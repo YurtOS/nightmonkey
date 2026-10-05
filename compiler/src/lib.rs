@@ -180,6 +180,37 @@ pub unsafe extern "C" fn night_inproc_build(
     }
 }
 
+/// Upper bound on the blob count `night_inproc_build` produces for
+/// `analysis_source` (see `wasm::inprocess::max_inprocess_blobs`): what a
+/// host that reserves table slots before compiling must reserve.
+#[no_mangle]
+pub extern "C" fn night_inproc_max_blobs(analysis_source: &source::Source) -> u32 {
+    wasm::inprocess::max_inprocess_blobs(analysis_source)
+}
+
+/// The batch assembled into one module for a host that mounts it whole (the
+/// Yurt JIT mount ABI; see `wasm::assemble`). Writes the length to `len` and
+/// returns the bytes, which live as long as `out`; null on failure (message
+/// on stderr).
+#[no_mangle]
+pub extern "C" fn night_inproc_module(
+    out: &mut wasm::inprocess::InprocOut,
+    len: &mut u32,
+) -> *const u8 {
+    if out.module.is_none() {
+        match wasm::assemble::assemble_module(out) {
+            Ok(bytes) => out.module = Some(bytes),
+            Err(e) => {
+                crate::diag_line!("night: inprocess: assembling the module: {e}");
+                return core::ptr::null();
+            }
+        }
+    }
+    let bytes = out.module.as_ref().unwrap();
+    *len = u32::try_from(bytes.len()).unwrap();
+    bytes.as_ptr()
+}
+
 #[no_mangle]
 pub extern "C" fn night_inproc_num_blobs(out: &wasm::inprocess::InprocOut) -> u32 {
     u32::try_from(out.blobs.len()).unwrap()

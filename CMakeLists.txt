@@ -14,6 +14,7 @@
 #   nightmonkey      the host AOT compiler (snapshot in, module out)
 #   wasm-jit-runner  the host that runs the in-process test lane
 #   inproc-shell.sh  the shell wrapper the test harnesses use
+# (the last two with NIGHT_INPROC_HOST=runner only).
 
 cmake_minimum_required(VERSION 3.20)
 
@@ -21,6 +22,16 @@ set(SPIDERMONKEY_DIST "" CACHE PATH
     "dist/ directory of a SpiderMonkey build with --enable-external-compiler-hooks")
 option(NIGHT_INPROCESS "Build the in-process test lane (guest compiler, wasm-jit-runner)" ON)
 option(NIGHT_DEBUG "Runtime diagnostics and crash-on-failure in the in-process lane" OFF)
+# How js-inproc installs a compiled batch (runtime/NightInprocHost.h):
+#   runner  wasm-jit-runner's hostcalls (env.wasm_table_size/wasm_add_funcs2)
+#   yurt    Yurt's JIT mount ABI (yurt_jit_reserve + a reserved module mount)
+set(NIGHT_INPROC_HOST "runner" CACHE STRING "in-process host: runner or yurt")
+set_property(CACHE NIGHT_INPROC_HOST PROPERTY STRINGS runner yurt)
+# For a Yurt guest SDK whose libyurt_abi predates the reservation wrappers
+# (yurt_jit_reserve, yurt_jit_mount_module_reserved): a directory holding a
+# yurt_jit.h that declares them, and objects or libraries defining them.
+set(NIGHT_YURT_JIT_INCLUDE "" CACHE PATH "directory with a yurt_jit.h newer than the SDK's")
+set(NIGHT_YURT_JIT_LIBS "" CACHE STRING "objects/libraries providing the yurt_jit reservation wrappers")
 set(NIGHT_CARGO "cargo" CACHE STRING "cargo executable")
 set(NIGHT_STACK_SIZE "67108864" CACHE STRING "linear-memory stack size of the shells, in bytes")
 set(NIGHT_CARGO_TARGET_DIR "" CACHE PATH "cargo target directory (default: <build>/cargo; share it between build trees)")
@@ -138,12 +149,22 @@ set(NIGHT_RUNTIME_SOURCES
     runtime/NightSnapshotExtras.cpp
     runtime/NightStack.cpp)
 if(NIGHT_INPROCESS)
-  list(APPEND NIGHT_RUNTIME_SOURCES runtime/NightInproc.cpp runtime/NightInprocHost.cpp)
+  list(APPEND NIGHT_RUNTIME_SOURCES runtime/NightInproc.cpp)
+  if(NIGHT_INPROC_HOST STREQUAL "runner")
+    list(APPEND NIGHT_RUNTIME_SOURCES runtime/NightInprocHost.cpp)
+  elseif(NIGHT_INPROC_HOST STREQUAL "yurt")
+    list(APPEND NIGHT_RUNTIME_SOURCES runtime/NightInprocHostYurt.cpp)
+  else()
+    message(FATAL_ERROR "NIGHT_INPROC_HOST must be runner or yurt, not ${NIGHT_INPROC_HOST}")
+  endif()
 endif()
 add_library(night_runtime STATIC ${NIGHT_RUNTIME_SOURCES})
 night_engine_target(night_runtime)
 if(NIGHT_INPROCESS)
   night_inprocess_target(night_runtime)
+  if(NIGHT_YURT_JIT_INCLUDE)
+    target_include_directories(night_runtime BEFORE PRIVATE "${NIGHT_YURT_JIT_INCLUDE}")
+  endif()
 endif()
 
 # --- the opcode table check ------------------------------------------------------
@@ -197,7 +218,9 @@ if(NIGHT_INPROCESS)
     COMMENT "cargo: night-guest (${SM_RUST_TARGET})"
     VERBATIM)
   add_dependencies(night_guest night_opcodes_check)
+endif()
 
+if(NIGHT_INPROCESS AND NIGHT_INPROC_HOST STREQUAL "runner")
   # The host that runs the in-process lane (hostcalls that inject compiled
   # bodies into the running shell instance).
   add_custom_target(wasm_jit_runner ALL
@@ -244,11 +267,13 @@ if(NIGHT_INPROCESS)
   # (rust_eh_personality, the panic and allocator shims), and the guest
   # compiler with the prebuilt std. The first definition wins and every copy
   # routes through the same allocator shim.
-  night_shell(js-inproc "${NIGHT_GUEST_LIB}")
+  night_shell(js-inproc "${NIGHT_GUEST_LIB}" ${NIGHT_YURT_JIT_LIBS})
   night_inprocess_target(js-inproc)
   add_dependencies(js-inproc night_guest)
   target_link_options(js-inproc PRIVATE -Wl,--allow-multiple-definition)
+endif()
 
+if(NIGHT_INPROCESS AND NIGHT_INPROC_HOST STREQUAL "runner")
   # The harness wrapper: runs js-inproc under wasm-jit-runner.
   configure_file(scripts/inproc-shell.sh.in "${NIGHT_BIN_DIR}/inproc-shell.sh" @ONLY)
   file(CHMOD "${NIGHT_BIN_DIR}/inproc-shell.sh" PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)

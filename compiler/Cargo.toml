@@ -22,6 +22,5 @@ log = "0.4"
 rustc-hash = "2"
 # Blob carving for the in-process batch path; version-matched to waffle's.
 wasmparser = { version = "0.248", default-features = false, features = ["std", "validate", "simd"] }
-
-[dev-dependencies]
+# Assembling the batch into one mountable module (wasm::assemble).
 wasm-encoder = "0.248"

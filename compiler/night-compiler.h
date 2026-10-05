@@ -208,6 +208,10 @@ night_inproc_out_t* night_inproc_build(night_source_t* analysis_source,
                                        const uint32_t* helper_funcptrs,
                                        uint32_t n_helpers, uint32_t table_base,
                                        night_alloc_fn alloc);
+// Upper bound on night_inproc_build's blob count for this source, for hosts
+// that reserve table slots before compiling (table_base is baked into the
+// code). Call it after every night_source_add_regex_program.
+uint32_t night_inproc_max_blobs(night_source_t* analysis_source);
 uint32_t night_inproc_num_blobs(night_inproc_out_t* out);
 const uint8_t* night_inproc_blob_ptr(night_inproc_out_t* out, uint32_t i);
 uint32_t night_inproc_blob_len(night_inproc_out_t* out, uint32_t i);
@@ -218,6 +222,12 @@ uint32_t night_inproc_script_source_id(night_inproc_out_t* out, uint32_t i);
 uint32_t night_inproc_script_blob(night_inproc_out_t* out, uint32_t i);
 const uint8_t* night_inproc_env_desc_ptr(night_inproc_out_t* out);
 uint32_t night_inproc_env_desc_len(night_inproc_out_t* out);
+// The batch assembled into one self-contained module for hosts that mount
+// whole modules (the Yurt JIT mount ABI: shared env.memory,
+// env.__indirect_function_table, helpers as yurt.table "<funcptr>", blob i
+// exported as __jit_entry_<i>). Writes the byte length to *len; the bytes
+// live as long as `out`. Null on failure.
+const uint8_t* night_inproc_module(night_inproc_out_t* out, uint32_t* len);
 void night_inproc_delete(night_inproc_out_t* out);
 
 #ifdef __cplusplus

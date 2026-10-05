@@ -37,6 +37,7 @@ pub use bbv::{
     build_ic_set_cold_helper,
 };
 pub(crate) mod effects;
+pub mod assemble;
 pub mod inprocess;
 pub mod regex;
 pub mod translate;

@@ -40,12 +40,16 @@ pub struct HelperImportSpec {
 /// The built batch. `blobs[i]` is runner blob `i` (function index
 /// `nextern + i`, predicted table index `table_base + i`); `scripts` maps
 /// each compiled script's source id to its blob position; `env_desc` is the
-/// serialized environment descriptor (see `ENV_DESC_WORDS`).
+/// serialized environment descriptor (see `ENV_DESC_WORDS`). `module` is the
+/// batch assembled into one self-contained module, for hosts that mount one
+/// (filled on demand by `night_inproc_module`; see `assemble`).
 pub struct InprocOut {
     pub blobs: Vec<Vec<u8>>,
     pub extern_table_indices: Vec<u32>,
+    pub extern_sigs: Vec<SignatureData>,
     pub scripts: Vec<(u32, u32)>,
     pub env_desc: Vec<u8>,
+    pub module: Option<Vec<u8>>,
 }
 
 /// env_desc layout (the engine side is `NightEnvDescHeaderWords` and
@@ -210,6 +214,26 @@ fn carve_blobs(bytes: &[u8], n_imports: usize) -> Result<Vec<Vec<u8>>, String> {
 /// pre-padded past them so every table-placed function's index is exactly
 /// `table_base + blob position`.
 const PRE_BODIES: u32 = 10;
+
+/// An upper bound on the number of blobs `build_inprocess_batch` emits for
+/// `source`, for hosts that must reserve their table slots before compiling
+/// (the emitted code bakes `table_base + i` in). Every defined function is a
+/// blob: the `PRE_BODIES` helpers, at most two per script (its body, plus a
+/// `night_abi_sig` adapter when the body has the widened ABI), and one
+/// matcher per regex program variant (latin1, twobyte). Skipped scripts and
+/// regex variants that fail to translate only make it looser.
+pub fn max_inprocess_blobs(source: &Source) -> u32 {
+    let scripts = source
+        .objects()
+        .filter(|(_, obj)| matches!(obj, crate::source::SourceObject::Script(_)))
+        .count();
+    let regex_variants: usize = source
+        .regex_programs
+        .iter()
+        .map(|rp| usize::from(!rp.latin1_bytecode.is_empty()) + usize::from(!rp.twobyte_bytecode.is_empty()))
+        .sum();
+    u32::try_from(PRE_BODIES as usize + 2 * scripts + regex_variants).unwrap_or(u32::MAX)
+}
 
 pub fn build_inprocess_batch(
     source: &Source,
@@ -524,6 +548,13 @@ pub fn build_inprocess_batch(
         .to_wasm_bytes()
         .map_err(|e| format!("serialize in-process batch: {e}"))?;
     let blobs = carve_blobs(&bytes, n_imports)?;
+    let bound = max_inprocess_blobs(source);
+    if blobs.len() > bound as usize {
+        return Err(format!(
+            "batch has {} blobs, more than its bound {bound} (max_inprocess_blobs undercounts)",
+            blobs.len()
+        ));
+    }
 
     let mut scripts: Vec<(u32, u32)> = Vec::new();
     for (&sid, &f) in &source_id_to_table_func {
@@ -542,8 +573,10 @@ pub fn build_inprocess_batch(
     Ok(InprocOut {
         blobs,
         extern_table_indices: helper_specs.iter().map(|s| s.table_index).collect(),
+        extern_sigs: helper_specs.iter().map(|s| s.sig.clone()).collect(),
         scripts,
         env_desc,
+        module: None,
     })
 }
 
@@ -951,5 +984,65 @@ mod tests {
             .collect();
         let reassembled = reassemble(&out.blobs, &extern_sigs);
         wasmparser::validate(&reassembled).expect("reassembled batch validates");
+
+        assert!(out.blobs.len() <= max_inprocess_blobs(&source) as usize);
+        let mut out = out;
+        assert_self_assembled_module(&mut out);
+    }
+
+    /// The self-assembled module (wasm::assemble) validates against a shared
+    /// memory, follows the Yurt JIT mount ABI's import/export shape, and uses
+    /// nothing the mount rejects (globals, memory.grow, table mutation).
+    fn assert_self_assembled_module(out: &mut InprocOut) {
+        use wasmparser::{Operator, Parser, Payload, TypeRef};
+        let bytes = crate::wasm::assemble::assemble_module(out).expect("assemble");
+        // Built without wasmparser's `features`, the validator accepts the
+        // default proposal set, threads (shared memory) included.
+        wasmparser::validate(&bytes).expect("self-assembled module validates");
+        let (mut helpers, mut memory, mut table, mut entries) = (0, false, false, 0);
+        for payload in Parser::new(0).parse_all(&bytes) {
+            match payload.unwrap() {
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.unwrap();
+                        match (import.module, import.name, import.ty) {
+                            ("yurt.table", slot, TypeRef::Func(_)) => {
+                                assert_eq!(slot, out.extern_table_indices[helpers].to_string());
+                                helpers += 1;
+                            }
+                            ("env", "memory", TypeRef::Memory(m)) => memory = m.shared,
+                            ("env", "__indirect_function_table", TypeRef::Table(_)) => table = true,
+                            other => panic!("unexpected import {other:?}"),
+                        }
+                    }
+                }
+                Payload::ExportSection(reader) => {
+                    for export in reader {
+                        assert_eq!(export.unwrap().name, format!("__jit_entry_{entries}"));
+                        entries += 1;
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    let mut ops = body.get_operators_reader().unwrap();
+                    while !ops.eof() {
+                        match ops.read().unwrap() {
+                            op @ (Operator::GlobalGet { .. }
+                            | Operator::GlobalSet { .. }
+                            | Operator::MemoryGrow { .. }
+                            | Operator::TableSet { .. }
+                            | Operator::TableGrow { .. }
+                            | Operator::TableFill { .. }
+                            | Operator::TableInit { .. }
+                            | Operator::TableCopy { .. }) => panic!("blob uses {op:?}"),
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(helpers, out.extern_table_indices.len());
+        assert!(memory && table);
+        assert_eq!(entries, out.blobs.len());
     }
 }
