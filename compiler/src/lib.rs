@@ -207,7 +207,11 @@ pub extern "C" fn night_inproc_module(
         }
     }
     let bytes = out.module.as_ref().unwrap();
-    *len = u32::try_from(bytes.len()).unwrap();
+    let Ok(n) = u32::try_from(bytes.len()) else {
+        crate::diag_line!("night: inprocess: the assembled module exceeds 4 GiB");
+        return core::ptr::null();
+    };
+    *len = n;
     bytes.as_ptr()
 }
 

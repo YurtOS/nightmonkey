@@ -1025,17 +1025,23 @@ mod tests {
                 Payload::CodeSectionEntry(body) => {
                     let mut ops = body.get_operators_reader().unwrap();
                     while !ops.eof() {
-                        match ops.read().unwrap() {
-                            op @ (Operator::GlobalGet { .. }
-                            | Operator::GlobalSet { .. }
-                            | Operator::MemoryGrow { .. }
-                            | Operator::TableSet { .. }
-                            | Operator::TableGrow { .. }
-                            | Operator::TableFill { .. }
-                            | Operator::TableInit { .. }
-                            | Operator::TableCopy { .. }) => panic!("blob uses {op:?}"),
-                            _ => {}
-                        }
+                        let op = ops.read().unwrap();
+                        assert!(
+                            !matches!(
+                                op,
+                                Operator::GlobalGet { .. }
+                                    | Operator::GlobalSet { .. }
+                                    | Operator::MemoryGrow { .. }
+                                    | Operator::MemoryInit { .. }
+                                    | Operator::DataDrop { .. }
+                                    | Operator::TableSet { .. }
+                                    | Operator::TableGrow { .. }
+                                    | Operator::TableFill { .. }
+                                    | Operator::TableInit { .. }
+                                    | Operator::TableCopy { .. }
+                            ),
+                            "blob uses {op:?}"
+                        );
                     }
                 }
                 _ => {}
