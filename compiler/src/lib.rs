@@ -263,3 +263,13 @@ pub extern "C" fn night_inproc_env_desc_len(out: &wasm::inprocess::InprocOut) ->
 
 #[no_mangle]
 pub extern "C" fn night_inproc_delete(_out: Box<wasm::inprocess::InprocOut>) {}
+
+/// Release compiler-only buffers after the host has copied/installed the code.
+/// The environment descriptor and script map remain valid until deletion.
+#[no_mangle]
+pub extern "C" fn night_inproc_release_code(out: &mut wasm::inprocess::InprocOut) {
+    out.blobs = Vec::new();
+    out.module = None;
+    out.extern_sigs = Vec::new();
+    out.extern_table_indices = Vec::new();
+}

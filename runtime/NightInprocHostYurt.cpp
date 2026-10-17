@@ -38,6 +38,13 @@ bool js::night::InprocHostReserve(uint32_t maxBlobs, uint32_t* tableBase) {
     JitError("yurt_jit_reserve", fd);
     return false;
   }
+  if (info.len < maxBlobs || info.base < 0) {
+    fprintf(stderr,
+            "night: inprocess: invalid reservation: base %d, %u slots "
+            "for %u requested\n", info.base, info.len, maxBlobs);
+    close(fd);
+    return false;
+  }
   gReservation = fd;
   gReservedLen = info.len;
   *tableBase = static_cast<uint32_t>(info.base);

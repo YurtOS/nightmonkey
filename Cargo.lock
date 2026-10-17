@@ -1337,6 +1337,7 @@ dependencies = [
  "waffle",
  "wasm-encoder 0.248.0",
  "wasmparser 0.248.0",
+ "wasmtime 45.0.3",
 ]
 
 [[package]]

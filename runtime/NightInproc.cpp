@@ -174,6 +174,7 @@ bool js::CompileInProcess(JSContext* cx, JS::Handle<JSScript*> script) {
     return InprocFail("installing the batch failed");
   }
   double t2 = NowMs();
+  night_inproc_release_code(out);
 
   // The env_desc wire is documented at NightEnvDescHeaderWords in
   // NightEnv.h: a fixed header, then one word per NIGHT_ENV_REGIONS entry.
@@ -229,7 +230,7 @@ bool js::CompileInProcess(JSContext* cx, JS::Handle<JSScript*> script) {
 #undef NIGHT_INPROC_REGION_WORD
 
   // The installed tables alias the descriptor buffer; `out` is deliberately
-  // never deleted.
+  // retained for its environment descriptor and script map only.
   if (!night_runtime_install_env(cx, env)) {
     night_snapshot_walk_delete(walk);
     return false;

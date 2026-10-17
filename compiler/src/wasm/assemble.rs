@@ -207,6 +207,84 @@ mod tests {
     use super::*;
     use wasmparser::{Operator, Parser, Payload, TypeRef};
 
+    #[test]
+    fn installed_batch_releases_code_but_keeps_environment_and_script_map() {
+        let mut out = super::super::inprocess::toy_inproc_out();
+        out.module = Some(assemble_module(&out).unwrap());
+        let desc = out.env_desc.clone();
+        let ptr = out.env_desc.as_ptr();
+        let scripts = out.scripts.clone();
+        crate::night_inproc_release_code(&mut out);
+        assert_eq!(out.blobs.capacity(), 0);
+        assert!(out.module.is_none());
+        assert_eq!(out.extern_sigs.capacity(), 0);
+        assert_eq!(out.extern_table_indices.capacity(), 0);
+        assert_eq!(out.env_desc, desc);
+        assert_eq!(out.env_desc.as_ptr(), ptr);
+        assert_eq!(out.scripts, scripts);
+    }
+
+    #[test]
+    fn yurt_module_instantiates_and_calls_through_owner_table() {
+        use wasmtime::{
+            Engine, Func, Linker, MemoryType as HostMemoryType, Module as HostModule, Ref,
+            RefType as HostRefType, SharedMemory, Store, Table, TableType as HostTableType,
+        };
+        // Blob 0 calls yurt.table[42]; blob 1 calls blob 0 indirectly using
+        // its baked type index 1 and reserved absolute table slot 50.
+        let out = InprocOut {
+            blobs: vec![
+                vec![0x60, 1, 0x7f, 1, 0x7f, 0, 0x20, 0, 0x10, 0, 0x0b],
+                vec![
+                    0x60, 1, 0x7f, 1, 0x7f, 0, 0x20, 0, 0x41, 50, 0x11, 1, 0, 0x0b,
+                ],
+            ],
+            extern_table_indices: vec![42],
+            extern_sigs: vec![SignatureData {
+                params: vec![Type::I32],
+                returns: vec![Type::I32],
+            }],
+            scripts: vec![],
+            env_desc: vec![],
+            module: None,
+        };
+        let mut config = wasmtime::Config::new();
+        config.shared_memory(true);
+        let engine = Engine::new(&config).unwrap();
+        let module = HostModule::new(&engine, assemble_module(&out).unwrap()).unwrap();
+        let mut store = Store::new(&engine, ());
+        let helper = Func::wrap(&mut store, |x: i32| x + 1);
+        let memory = SharedMemory::new(&engine, HostMemoryType::shared(1, 32)).unwrap();
+        let table = Table::new(
+            &mut store,
+            HostTableType::new(HostRefType::FUNCREF, 50, None),
+            Ref::Func(None),
+        )
+        .unwrap();
+        table.set(&mut store, 42, Ref::Func(Some(helper))).unwrap();
+        let base = table.grow(&mut store, 2, Ref::Func(None)).unwrap();
+        assert_eq!(base, 50);
+        let mut linker = Linker::new(&engine);
+        linker
+            .define(&mut store, "yurt.table", "42", helper)
+            .unwrap();
+        linker.define(&mut store, "env", "memory", memory).unwrap();
+        linker
+            .define(&mut store, "env", "__indirect_function_table", table)
+            .unwrap();
+        let instance = linker.instantiate(&mut store, &module).unwrap();
+        for i in 0..2 {
+            let f = instance
+                .get_func(&mut store, &format!("__jit_entry_{i}"))
+                .unwrap();
+            table.set(&mut store, base + i, Ref::Func(Some(f))).unwrap();
+        }
+        let entry = instance
+            .get_typed_func::<i32, i32>(&mut store, "__jit_entry_1")
+            .unwrap();
+        assert_eq!(entry.call(&mut store, 41).unwrap(), 42);
+    }
+
     /// Type index `nextern + i` is blob `i`'s functype, and function `i`
     /// uses that type. A same-arity mixup still validates; this is the
     /// check that catches it.

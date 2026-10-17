@@ -228,6 +228,9 @@ uint32_t night_inproc_env_desc_len(night_inproc_out_t* out);
 // exported as __jit_entry_<i>). Writes the byte length to *len; the bytes
 // live as long as `out`. Null on failure.
 const uint8_t* night_inproc_module(night_inproc_out_t* out, uint32_t* len);
+// After Install: invalidate blob/module/extern pointers and free their buffers.
+// env_desc and the script map remain valid until night_inproc_delete.
+void night_inproc_release_code(night_inproc_out_t* out);
 void night_inproc_delete(night_inproc_out_t* out);
 
 #ifdef __cplusplus
