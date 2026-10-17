@@ -38,3 +38,19 @@ Current parent validation: `cargo test -p night-compiler --locked`: 59 pass.
 `cargo fmt --all -- --check`: FAIL, generated opcode and other parent files.
 No changes to Rust source; no engine execution performed. Current issue #3 has
 no new comments. Full verification remains future implementation work.
+
+## Round 2 — 2b458fd30e93371122352f9c91a69b944d0050db
+
+Both Codex and Claude APPROVE. Both checked the exact spec delta and the
+three-body emission claim against source. No builds by reviewers. Claude's
+non-blocking notes: quantify alternatives, classify clarifications, and enumerate
+option transport pieces in the plan. These are addressed there.
+
+The bound/spare formula, C API option transport and positive tier witnesses are
+implementation decisions within Gate 1's approved guest API adaptation and
+verification contract, not new capabilities or a different approach. Report
+them to the user at Gate 2. User chose local builds first; AWS remains an option
+only if local prerequisites prevent qualification.
+
+Parent Clippy `cargo clippy --workspace --all-targets --locked -- -D warnings`
+also FAILS with `needless_late_init` at `compiler/src/wasm/regex.rs:1510`.
