@@ -5,29 +5,14 @@ description: Use when several dependent PRs (A→B→C, each based on the previo
 
 # Drive a PR Stack (outer loop)
 
-## Nightmonkey environment
-
-Read `AGENTS.md` and `docs/agents/org.md` first. JavaScript behavior follows
-ECMAScript and the supported SpiderMonkey interpreter; Linux governs OS
-interfaces. Use Nightmonkey's Verification commands, not kernel CI scripts or
-SDK tooling. Record the SpiderMonkey revision and engine feature with the head
-when reporting integrated results.
-
-Use available tools rather than assuming a slash command, plugin, agent name
-or CLI is installed. Claude-specific review commands below are examples for a
-Claude environment; from Codex use an independent Claude reviewer through an
-installed CLI or connector. If a required reviewer is unavailable, report the
-missing review; two reviewers of one model family do not establish dual review.
-Reviewers may run tests but must not edit, commit or push. Publishing comments
-or issues requires authorization from the user's task or an explicitly invoked
-workflow. Installing this skill does not invoke its publishing workflow.
+Read `AGENTS.md` and `docs/agents/org.md` first. This skill adds only the
+workflow below; repository and organization policy remain in those files.
 
 ## Overview
 
-Run **drive-pr-to-mergeable** on each PR in merge order. REQUIRED SUB-SKILL:
-drive-pr-to-mergeable (all its rules, including its merge-authority rule, apply
-per PR and to the stack as a whole; the per-PR runs it invokes never merge, the
-stack skill asks the merge question).
+Run `drive-pr-to-mergeable` on each PR in dependency order. The inner runs
+return ready reports and do not merge. Merge authority is defined only in
+`docs/agents/org.md`, "Merge authority".
 
 ## Inputs
 
@@ -37,29 +22,30 @@ never baked in here. Baselines per PR.
 
 ## Steps
 
-1. the available agent inventory and `git worktree list`: no other session working on any of these PRs.
+1. Inspect the available agent inventory and worktrees. Resolve overlapping
+   ownership before starting work on any PR in the stack.
 2. For each PR in order: finish its inner loop (fix the parent first).
 3. **Merge-forward** the finished PR's branch into the next PR's branch (merge
    commit, no rebase, no force-push), push, then start the next inner loop.
 4. A fix to an earlier PR after a later one started → merge-forward again
    through every child. After any merge-forward, the child's next review is
-   against its base branch (`--base origin/<parent-branch>`), not its last
+   against its base branch (`origin/<parent-branch>`), not its last
    reviewed SHA, so parent commits are not re-reviewed as the child's; re-record
    the child's baseline.
-5. Not converging on one PR → stop the whole stack, get a second opinion (the
-   `advisor` tool if available), then the user.
+5. If one PR does not converge, stop the stack, seek an independent second
+   opinion and report the remaining blockers to the user.
 
 ## Ready report
 
-Per-PR table (rounds, issues filed, CI), deferred items, merge order. Ask:
-"Ready — which PRs do you authorize me to merge?" Merge nothing, and in no
-order, until the user names them by number or URL (see "Merge authority" in
-docs/agents/org.md). **Before** merging an authorized parent, retarget its child
-PR to the parent's base (`gh pr edit <child> --base <parent's base>`): if the
-parent's branch is deleted first, GitHub closes the child for good. Never merge
-a child into its parent branch. After the retarget, the child's `<base>` is the
-new base: use it for sync, review and baseline from then on. After a parent
-merges, each child gets a new head (merge the new base, push): re-run its gates
-and CI, send its ready report again, and ask again for that PR — an earlier
-authorization covered the old head. Any agreed post-merge handoff (e.g. sending
-a merge SHA to a peer) happens only after the user-authorized merge.
+Report each PR's head/base SHAs, rounds, issues filed, local validation,
+hosted state, deferred items and dependency order. Apply "Merge authority" in
+`docs/agents/org.md` for any subsequent merge decision.
+
+Before an authorized parent merge, retarget the child PR to the parent's base
+so deleting the parent branch does not close the child. Never merge a child
+into its parent branch. Use the new base for subsequent synchronization,
+review and baseline comparisons. After the parent merges, merge the new base
+into each child, push, rerun checks and review, and send a fresh ready report.
+Obtain fresh authorization for each updated child head; stack authorization
+does not carry across these head changes. Perform an agreed handoff only after
+the authorized merge it depends on.

@@ -5,22 +5,8 @@ description: Use when a spec or implementation plan document needs independent a
 
 # Drive a Spec/Plan to Reviewer Approval
 
-## Nightmonkey environment
-
-Read `AGENTS.md` and `docs/agents/org.md` first. JavaScript behavior follows
-ECMAScript and the supported SpiderMonkey interpreter; Linux governs OS
-interfaces. Use Nightmonkey's Verification commands, not kernel CI scripts or
-SDK tooling. Record the SpiderMonkey revision and engine feature with the head
-when reporting integrated results.
-
-Use available tools rather than assuming a slash command, plugin, agent name
-or CLI is installed. Claude-specific review commands below are examples for a
-Claude environment; from Codex use an independent Claude reviewer through an
-installed CLI or connector. If a required reviewer is unavailable, report the
-missing review; two reviewers of one model family do not establish dual review.
-Reviewers may run tests but must not edit, commit or push. Publishing comments
-or issues requires authorization from the user's task or an explicitly invoked
-workflow. Installing this skill does not invoke its publishing workflow.
+Read `AGENTS.md` and `docs/agents/org.md` first. This skill adds only the
+workflow below; repository and organization policy remain in those files.
 
 ## Overview
 
@@ -41,16 +27,12 @@ closed or converted once the plan is executed.
 
 ## Loop
 
-1. **Review** at the committed SHA. Round 1: full review by a Claude agent AND
-   an independent Codex reviewer, each told what to check: requirements met,
-   contradictions, missing cases/failure modes, security (validate snapshot/hostcall input and preserve bounds,
-   GC rooting and lifetime invariants), testability (functional tests, red test
-   first), scope creep, proportionality (the smallest design that meets the
-   stated contract? realistic size estimates? precision or cases beyond the
-   contract, or beyond the applicable JavaScript/SpiderMonkey or OS contract, are scope creep), fit with the
-   existing architecture. Later rounds: the same reviewer agents (continued via
-   the available agent messaging tool) get the diff since their last SHA plus their own findings; a
-   fresh reviewer gets the whole document plus that diff.
+1. **Review** at the committed SHA with independent Claude and Codex reviewers.
+   Ask them to check requirements, contradictions, failure modes, applicable
+   security and domain rules from `AGENTS.md`, testability, proportionality and
+   architectural fit. Give returning reviewers the delta and their findings;
+   give fresh reviewers the full document and that delta. Reviewers are
+   read-only and must not edit, commit or push.
 2. **Record** each review: round, SHA, findings by severity (comment on the
    issue/draft PR, or a review log next to the doc). Each round also read new
    comments on the issue (or draft PR) the document belongs to: human and agent
@@ -63,9 +45,8 @@ closed or converted once the plan is executed.
    reviewer re-raising a finding already rebutted → reply with the earlier
    rebuttal; it is not a new finding.
 5. **Stop**: both reviewers approve with no verified findings above nit level.
-   Not converging after ~3 rounds → stop, get a second opinion (the `advisor`
-   tool if available), tell the user (likely the spec is wrong, not the
-   wording).
+   Not converging after ~3 rounds → stop, seek an independent second opinion
+   and report the remaining disagreements to the user.
 
 ## Output
 

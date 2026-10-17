@@ -5,38 +5,23 @@ description: Use when asked to take a problem or GitHub issue from idea to a rev
 
 # Issue → Design → PR → Mergeable
 
-## Nightmonkey environment
-
-Read `AGENTS.md` and `docs/agents/org.md` first. JavaScript behavior follows
-ECMAScript and the supported SpiderMonkey interpreter; Linux governs OS
-interfaces. Use Nightmonkey's Verification commands, not kernel CI scripts or
-SDK tooling. Record the SpiderMonkey revision and engine feature with the head
-when reporting integrated results.
-
-Use available tools rather than assuming a slash command, plugin, agent name
-or CLI is installed. Claude-specific review commands below are examples for a
-Claude environment; from Codex use an independent Claude reviewer through an
-installed CLI or connector. If a required reviewer is unavailable, report the
-missing review; two reviewers of one model family do not establish dual review.
-Reviewers may run tests but must not edit, commit or push. Publishing comments
-or issues requires authorization from the user's task or an explicitly invoked
-workflow. Installing this skill does not invoke its publishing workflow.
+Read `AGENTS.md` and `docs/agents/org.md` first. This skill adds only the
+workflow below; repository and organization policy remain in those files.
 
 ## Overview
 
 The user is in the design; agents review documents and code in bounded loops.
-Ends at "ready for merge": merging needs the user's clear authorization of that
-PR, and this skill never merges.
+Ends at a ready report; this workflow does not merge.
 
 The phases add gates and review loops. They do not replace AGENTS.md and memory
 rules (worktree, red test first, benchmark-before-building, etc.).
 
 ## Phase 0: Issue
 
-- Existing issue → `gh issue view N --comments`; `gh pr list --search N`,
-  `git branch -r --list '*N*'`, the available agent inventory and `git worktree list` for existing or concurrent work
-  (found → stop, tell the user). Re-confirm the problem on current
-  `origin/yurt`.
+- Read the existing issue and its conversation. Inspect open PRs, remote
+  branches, worktrees and the available agent inventory for related work.
+  Resolve any overlapping ownership before proceeding. Re-confirm the problem
+  on the current default branch identified by `AGENTS.md`.
 - No issue → draft one (problem, evidence, acceptance criteria), show it, file
   it only after the user okays the text.
 
@@ -50,7 +35,7 @@ rules (worktree, red test first, benchmark-before-building, etc.).
 
 ## Bounded path
 
-1. Own worktree off `origin/yurt` (superpowers:using-git-worktrees). Read the
+1. Own worktree off the default branch (superpowers:using-git-worktrees). Read the
    code; list what the change must preserve.
 2. **Gate 1, in chat**: short design (approach, files, what is preserved or
    changed, test strategy, risk). No spec or plan files, no document review.
@@ -70,22 +55,16 @@ path, prototype and paired-benchmark it before the design is final. Write the
 spec in `docs/superpowers/specs/`, commit. **Contract and proportion (written
 into the spec, repeated at Gate 1).**
 
-- **Contract:** what the change must achieve and how precisely, who consumes it,
-  and the applicable JavaScript/SpiderMonkey semantics (Linux for OS interfaces). Do not expand the applicable JavaScript/SpiderMonkey or OS contract unless the user asks
-  (exception below).
+- **Contract:** what the change must achieve, who consumes it, the applicable
+  specification and the required precision. Use the domain rules in `AGENTS.md`.
 - **Severity:** how much the defect actually costs (cosmetic / minor / major).
 - **Smallest viable fix:** the least change that meets the contract, reusing
   existing mechanisms first. Estimate the size of each option in lines.
 - Choosing an option more than ~3x the smallest one needs a stated reason the
   smallest fails the contract. "More exact" or "the right architecture" is not
   one.
-- Real defects found along the way, inside the contract or not, are fixed or
-  filed ("fixable means fix"). Widening the contract itself (more precision,
-  more cases as a goal) is scope: the user decides. Exception: validating
-  untrusted guest input at the boundary the change touches is always in scope;
-  if it would change behaviour a guest's libc can observe, the divergence rule
-  in org.md ("Linux is the spec") applies and the user decides. Broader
-  hardening is scope like anything else.
+- Fix or track real defects found along the way. Expanding the approved contract
+  is a scope decision for the user; apply the boundary rules in `AGENTS.md`.
 
 **Gate 1: spec approval.** Report the highlights (problem, contract, severity,
 smallest viable fix vs chosen approach with size estimates, rejected
@@ -112,8 +91,8 @@ proceed on their affirmative reply.
 to the gate message ("looks good", "fine", "👍", "go") approves the document at
 the SHA you asked about, even if it mentions only the outline. Ask again only
 when the reply is a question, an objection, or conditional ("looks good but…").
-This applies to design gates only: merging still needs the user's clear
-authorization of that PR.
+This applies to design gates only. Merge authority is defined in
+`docs/agents/org.md`.
 
 **Where the superpowers skills stop here.** brainstorming ends at Gate 1, not at
 writing-plans: the spec review comes first. writing-plans' "which execution
@@ -124,7 +103,8 @@ and cleanup options: push and open the PR (below).
 **Phase 4: Execute.** superpowers:subagent-driven-development (or
 executing-plans) with test-driven-development and verification-before-completion
 (the Verification section of AGENTS.md). Open a **draft** PR (or a stack, if the
-plan says so). Close any draft spec/plan PR.
+plan says so). Handle any draft spec/plan PR under the organization
+policy for PR closure.
 
 **Size tripwires.** A plan estimated at more than ~2x the size approved at Gate
 1 → back to Gate 1. During execution, a diff growing past ~2x the plan → stop,
