@@ -28,8 +28,8 @@ class CiSuiteTests(unittest.TestCase):
             'shift 2\nexec "$@"\n'
         )
         timeout.chmod(0o755)
-        for name in ("night", "jit", "js"):
-            harness = scripts / f"run-{name}-tests.sh"
+        for name in ("run-night-tests.sh", "run-jit-tests.sh", "run-jstests.sh"):
+            harness = scripts / name
             harness.write_text(
                 '#!/usr/bin/env bash\nprintf "%s\\n" "$NIGHT_INPROCESS_OFF" >> "$LANES"\n'
                 'if [ "$NIGHT_INPROCESS_OFF" = 0 ]; then exit "${AOT_STATUS:-0}"; fi\n'
@@ -57,6 +57,7 @@ class CiSuiteTests(unittest.TestCase):
     def test_both_runs_interpreter_after_aot_timeout(self):
         result = self.run_suite("jit", "both", AOT_STATUS="124")
         self.assertNotEqual(result.returncode, 0)
+        self.assertTrue((self.root / "lanes").exists(), result.stderr)
         self.assertEqual((self.root / "lanes").read_text(), "0\n1\n")
         self.assertTrue((self.root / "nightmonkey-logs/jit-aot.log").exists())
         self.assertTrue((self.root / "nightmonkey-logs/jit-interpreter.log").exists())
@@ -64,6 +65,7 @@ class CiSuiteTests(unittest.TestCase):
     def test_interpreter_failure_fails_both(self):
         result = self.run_suite("local", "both", INTERPRETER_STATUS="9")
         self.assertNotEqual(result.returncode, 0)
+        self.assertTrue((self.root / "lanes").exists(), result.stderr)
         self.assertEqual((self.root / "lanes").read_text(), "0\n1\n")
 
     def test_per_lane_caps_are_applied_to_each_requested_process(self):

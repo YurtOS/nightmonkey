@@ -38,7 +38,7 @@ class UpstreamHarnessTests(unittest.TestCase):
 
     def run_wrapper(self, suite, output, status=0):
         return subprocess.run(
-            ["bash", str(self.scripts / f"run-{suite}-tests.sh"), str(self.firefox), str(self.build)],
+            ["bash", str(self.scripts / ("run-jit-tests.sh" if suite == "jit" else "run-jstests.sh")), str(self.firefox), str(self.build)],
             env={**os.environ, "HARNESS_OUTPUT": output, "HARNESS_STATUS": str(status)},
             capture_output=True, text=True, check=False,
         )
