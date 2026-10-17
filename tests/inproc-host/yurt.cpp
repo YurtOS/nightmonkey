@@ -11,7 +11,7 @@
 #endif
 
 static uint32_t reservedLen = 3, blobCount = 2;
-static int fd, mounts;
+static int fd, mounts, unmounts;
 static int32_t mountRc;
 static bool moduleAvailable = true;
 static int32_t mountedBase = 40;
@@ -37,6 +37,11 @@ extern "C" int32_t yurt_jit_mount_module_reserved(const void*, uint32_t,
 }
 extern "C" int32_t yurt_jit_query_module(yurt_jit_module_t, yurt_jit_info* info) {
   *info = {mountedBase, reservedLen};
+  return 0;
+}
+extern "C" int32_t yurt_jit_unmount_module(yurt_jit_module_t mod) {
+  assert(mod == 123);
+  ++unmounts;
   return 0;
 }
 int main() {
@@ -86,4 +91,5 @@ int main() {
   assert(!InprocHostInstall(nullptr, base));
   InprocHostRelease();
   assert(mounts == 4);
+  assert(unmounts == 2);
 }
