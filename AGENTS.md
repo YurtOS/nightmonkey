@@ -31,8 +31,9 @@ the upstream CI workflow's `main` push trigger.
 This repository uses stock Cargo and `wasm32-wasip1`, not `cargo-yurt` or the
 Yurt guest SDK. The workspace declares Rust 1.82.0, but this is not the effective
 minimum for the locked workspace: Wasmtime 45.0.3 and Cranelift 0.132.3 require
-Rust 1.93.0. Check dependency MSRVs when updating the lockfile; no toolchain is
-pinned. Use `--locked` for reproducible host Rust commands.
+Rust 1.93.0. `rust-toolchain.toml` pins host Rust 1.98.1 for local and hosted
+checks. Check dependency MSRVs when updating the lockfile. Use `--locked` for
+reproducible host Rust commands.
 
 ```sh
 cargo build --workspace --locked
