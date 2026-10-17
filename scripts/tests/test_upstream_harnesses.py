@@ -20,6 +20,8 @@ class UpstreamHarnessTests(unittest.TestCase):
         for suite in ("jit-test", "jstests"):
             for prefix in ("", "wasi-"):
                 (tests / f"{prefix}{suite}-excludes.txt").write_text("")
+        shutil.copyfile(Path(__file__).resolve().parents[1] / "check-test-log.py",
+                        self.scripts / "check-test-log.py")
         self.build = self.root / "build"
         (self.build / "bin").mkdir(parents=True)
         wrapper = self.build / "bin/inproc-shell.sh"
