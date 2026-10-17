@@ -30,7 +30,7 @@
 - [x] Reuse and commit the existing generator regression; observe it fail on the baseline.
 - [x] Reuse the generator fix and regenerated table in separate commits.
 - [x] Reproduce Clippy's late-init failure and reuse its tuple initialization fix.
-- [ ] Run fmt, check, test, Clippy and generator tests.
+- [x] Run fmt, check, test, Clippy and generator tests.
 
 ### Task 2: Add CI coverage
 
@@ -43,7 +43,7 @@
 ### Task 3: Verify and review
 
 - [x] Update repository CI coverage documentation.
-- [ ] Run applicable verification and report missing engine prerequisites explicitly.
+- [x] Run applicable verification and report missing engine prerequisites explicitly.
 - [ ] Obtain independent Codex and Claude reviews where available; resolve valid findings.
 - [ ] Commit the reviewed changes and report the worktree/branch and hosted state.
 
@@ -54,8 +54,10 @@
 - Local-harness tests reproduced empty-suite and missing-wrapper false successes and path splitting before the fix.
 - Workflow-command tests reproduced empty upstream suites returning zero; the hosted jit and jstests steps now reject missing/zero coverage. All nine Python tests pass.
 - Actionlint rejected an injected undefined context. Bash pipefail rejected an upstream harness failure piped through tee.
-- Codex approved `3b462b9` after the empty-suite finding was fixed. Claude review and hosted integration validation are pending.
+- Codex approved `3b462b9` after the empty-suite finding was fixed. Claude review was unavailable: the sandbox attempt lacked login access and the outside-sandbox retry produced no review within ten minutes. Hosted integration validation is pending.
 - No compatible engine dist exists in this worktree; C++ integration, both actual JS execution lanes, full jstests and shipping snapshot execution have not been locally qualified.
 - Live GitHub inspection found no classic branch protection and no applicable branch rulesets on `yurt`; no required-check policy was changed.
 
-Ruling: pin host Rust 1.98.1, matching sibling yurt-rust CI, instead of 1.99.1. The latter enables new `chunks_exact_to_as_chunks` lints in unchanged snapshot code; retaining the established toolchain avoids widening CI setup into snapshot semantics changes. Rust 1.98.1 exceeds the locked dependencies' 1.93.0 minimum. All gates must pass on this exact pin.
+Ruling: pin host Rust 1.98.1, matching sibling yurt-rust CI, for reproducible local and hosted checks. The initial hypothesis that this pin would avoid the snapshot Clippy lint was disproved: both 1.98.1 and 1.99.1 report it without crate MSRV metadata. Prerequisite PR #6 supplies the owning metadata fix; CI is stacked on its head `17a177b`, and duplicated quality-fix commits were dropped during rebase. The resolved workflow conflict preserves the new script gate, which runs #6's generator regression. Cost if the pin becomes too old: dependency updates will require a deliberate toolchain update.
+
+Final local validation after rebasing on #6: Rust 1.98.1 fmt/check/test/Clippy all pass; workspace tests report 58 passed and zero failed. All nine Python tests, actionlint 1.7.12, Bash syntax checks and whitespace checks pass. Claude approval remains unavailable; final Codex review and hosted results will be recorded on the draft PR.
