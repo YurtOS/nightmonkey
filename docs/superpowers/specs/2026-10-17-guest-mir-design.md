@@ -1,6 +1,7 @@
 # Adopt MIR and baseline compilation inside the guest
 
-Status: proposed for user approval (Gate 1). Tracks YurtOS/nightmonkey#3.
+Status: Gate 1 approved at `020eeec42cf6071fc53454c1418261b6a5eaaa2a`.
+The user subsequently authorized stacking on fork PR #2. Tracks YurtOS/nightmonkey#3.
 
 ## Contract and motivation
 
@@ -31,7 +32,8 @@ Inspected on 2026-10-17:
 - Fork host PR #2: open, head
   `a8e553aa5ab0c7e7274e426a48cb366fd08966bb`. It owns the Yurt host and assembler;
   reuse it rather than implementing a competing host. It must be integrated
-  before the compiler adoption can be qualified as complete.
+  before the compiler adoption can be qualified as complete. The user authorized
+  stacking on this PR while it remains open; no edits to its owned branch.
 - Upstream engine PR #4: open, head
   `08702e6f7b6c6d9a2ebf9c0cfc37ccebdd395706` (`cfallin/external-slots`).
   Upstream compiler CI switches to this branch. Audit its complete engine delta
@@ -52,7 +54,10 @@ upstream movement requires a delta audit and possibly renewed approval.
 
 Recommended: selectively import the pinned compiler/runtime changes, restore
 the guest-facing interfaces on top, and reuse the host/assembler from fork PR
-#2. Branch from the fork default, preserving its policy and workflows. Preserve
+#2. Stack the adoption branch on `yurt-host` at the recorded PR #2 head. Preserve
+the fork default's policy and workflows (the parent predates their addition).
+Retarget the child to `yurt` when the parent merges and revalidate its resulting
+base and head. Preserve
 upstream provenance in commits. Do not replace the fork tree wholesale.
 
 The upstream replacement adds roughly 40,000 lines in MIR and baseline modules
