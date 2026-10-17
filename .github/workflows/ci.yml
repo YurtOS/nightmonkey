@@ -24,6 +24,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Test the opcode generator
+        run: |
+          rustup component add rustfmt
+          python3 -m unittest discover -s scripts/tests -v
+
       - name: Resolve the SpiderMonkey revision
         id: smrev
         run: |
