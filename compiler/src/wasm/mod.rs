@@ -36,8 +36,8 @@ pub use bbv::{
     build_call_classify_helper, build_elem_append_helper, build_elem_mega_helpers,
     build_ic_set_cold_helper,
 };
-pub(crate) mod effects;
 pub mod assemble;
+pub(crate) mod effects;
 pub mod inprocess;
 pub mod regex;
 pub mod translate;
