@@ -125,14 +125,24 @@ jobs:
       - name: jit-tests (AOT)
         if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.lane != 'interpreter' }}
         timeout-minutes: 60
-        run: scripts/run-jit-tests.sh firefox build -- --format=automation 2>&1 | tee "$RUNNER_TEMP/nightmonkey-logs/jit-aot.log"
+        run: |
+          scripts/run-jit-tests.sh firefox build -- --format=automation 2>&1 | tee "$RUNNER_TEMP/nightmonkey-logs/jit-aot.log"
+          grep -Eq '^Passed: [1-9][0-9]*$' "$RUNNER_TEMP/nightmonkey-logs/jit-aot.log" || {
+            echo "::error::jit-tests produced no positive test total"
+            exit 1
+          }
 
       - name: jit-tests (interpreter)
         if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.lane != 'aot' }}
         timeout-minutes: 60
         env:
           NIGHT_INPROCESS_OFF: '1'
-        run: scripts/run-jit-tests.sh firefox build -- --format=automation 2>&1 | tee "$RUNNER_TEMP/nightmonkey-logs/jit-interpreter.log"
+        run: |
+          scripts/run-jit-tests.sh firefox build -- --format=automation 2>&1 | tee "$RUNNER_TEMP/nightmonkey-logs/jit-interpreter.log"
+          grep -Eq '^Passed: [1-9][0-9]*$' "$RUNNER_TEMP/nightmonkey-logs/jit-interpreter.log" || {
+            echo "::error::jit-tests produced no positive test total"
+            exit 1
+          }
 
       - name: Full jstests (AOT)
         if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.full_jstests && matrix.lane == 'aot' }}
