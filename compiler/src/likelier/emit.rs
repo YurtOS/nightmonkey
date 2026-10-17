@@ -191,6 +191,16 @@ impl SlotFold {
     }
 }
 
+/// Lay a constructor's row out superclass first: the rows of its
+/// `.call`/`.apply` delegates (`Base.call(this, ...)`) before its own
+/// writes, wherever the calls sit. Subclasses of one base then share the
+/// base's fields as a prefix, at the same slots, so code reading them
+/// through any subclass (a base method's `this`) reads one slot
+/// (`subrange_in`, the group and region tables). The order fields are
+/// added in no longer matters to construction (`constructing(S)`; the
+/// runtime places each field at its row's slot).
+const SUPER_FIRST: bool = true;
+
 /// Expands a constructor's `this`-write events into the ordered layout row
 /// its instances end up with.
 ///
@@ -273,18 +283,36 @@ impl<'a> CtorRowExpander<'a> {
     }
 
     /// Walk `f`'s own events in program order, appending its writes and
-    /// splicing each delegation target's row where the call sits.
+    /// splicing each delegation target's row where the call sits; with
+    /// `SUPER_FIRST`, its `.call`/`.apply` delegates' rows (a superclass
+    /// constructor's) come first, wherever the call sits (MIR.md M5v).
     fn collect(&mut self, f: ScriptId, top: ScriptId, depth: u32) -> Vec<NameId> {
         let mut out = LayoutRow::default();
         let Some(events) = self.events.get(&f).cloned() else {
             return out.into_names();
         };
+        if SUPER_FIRST {
+            for ev in &events {
+                let TEvent::Deleg(pc) = ev else { continue };
+                let Some(t) = self.apply_targets.get(&Site::new(f, *pc)).copied() else {
+                    continue;
+                };
+                if t == f {
+                    continue;
+                }
+                self.note_participant(t, top);
+                for n in &self.expand_under(t, top, depth + 1) {
+                    out.push(*n);
+                }
+            }
+        }
         for ev in &events {
             let target = match ev {
                 TEvent::Write(n) => {
                     out.push(*n);
                     None
                 }
+                TEvent::Deleg(_) if SUPER_FIRST => None,
                 TEvent::Deleg(pc) => self.apply_targets.get(&Site::new(f, *pc)).copied(),
                 TEvent::DelegM(pc) => self
                     .follow_this_method_delegates
@@ -654,7 +682,40 @@ impl LayoutPlan {
         plan.add_region_tables(sv);
         plan.add_post_new_rows(sv, facts, deleg);
         plan.emit_this_layouts(sv, facts, &rows);
+        plan.emit_ctor_publish(sv, facts, deleg);
         plan
+    }
+
+    /// `ctor_publish`: for each stamped constructor, the scripts its
+    /// construction of `this` runs through, in program order of its
+    /// `this` events (the ctor, then each `.call`/`.apply` or
+    /// `this.m(...)` delegate, transitively). The construction phase is
+    /// exactly this tree: a call made anywhere in it may see `this` with
+    /// all of the ctor's fields but not yet its stamp.
+    fn emit_ctor_publish(&self, sv: &Solver<'_>, facts: &mut LikelyFacts, deleg: &Delegation) {
+        for f in super::sorted_keys(&facts.ctor_stamps) {
+            let mut seen: HashSet<ScriptId> = HashSet::default();
+            let mut work = vec![(f, 0u32)];
+            while let Some((s, depth)) = work.pop() {
+                if !seen.insert(s) {
+                    continue;
+                }
+                facts.ctor_publish.entry(s).or_default().push(f);
+                if depth >= MAX_DELEG_DEPTH {
+                    continue;
+                }
+                for ev in sv.tables.this_events.get(&s).into_iter().flatten() {
+                    let t = match ev {
+                        TEvent::Write(_) => None,
+                        TEvent::Deleg(pc) => deleg.apply_targets.get(&Site::new(s, *pc)),
+                        TEvent::DelegM(pc) => deleg.single_call_target.get(&Site::new(s, *pc)),
+                    };
+                    if let Some(&t) = t {
+                        work.push((t, depth + 1));
+                    }
+                }
+            }
+        }
     }
 
     /// Caller-side init-after-new: for each allocation site whose result
@@ -1457,10 +1518,9 @@ impl LayoutPlan {
 
     /// Per-method this-layouts: for each script that is not itself a
     /// constructor, the layout key (or key range) its `this` is predicted
-    /// to carry. The lowering consumes this at method entry --
-    /// `wasm::bbv::facts` primes the shape/generation cell from it, and
-    /// `wasm::bbv::property` serves fixed-slot reads off `this` against it
-    /// without a per-site class check. Two keys because a two-phase
+    /// to carry. The lowering consumes this at method entry -- MIR guards
+    /// `this` once to it (`guard_this_layout`), and the field accesses off
+    /// `this` fold their own guards into that one. Two keys because a two-phase
     /// constructor stamps a prefix key at its own exit and the full key at
     /// its init delegate's, so a method that may see either guards the
     /// range.
@@ -1739,6 +1799,27 @@ struct SiteFactTotals {
 }
 
 impl Solver<'_> {
+    /// The property constraint `ci` accesses: its own name, or for an
+    /// element access whose key every evaluation found to be one string
+    /// constant, that name (`Solver::const_key_names`), whose named
+    /// access it is.
+    fn access_name(&self, ci: usize, name: NameId) -> NameId {
+        let (key, pc) = match &self.engine.cons[ci] {
+            super::engine::Constraint::Read { key, pc, .. }
+            | super::engine::Constraint::Write { key, pc, .. } => (*key, *pc),
+            _ => return name,
+        };
+        if key.is_none() {
+            return name;
+        }
+        let site = Site::new(self.engine.con_script[ci], pc);
+        self.keyed_site_names
+            .get(&site)
+            .and_then(Agreed::get)
+            .copied()
+            .unwrap_or(name)
+    }
+
     /// Non-minting class lookup for a ctor script.
     fn class_lookup_fn(&self, f: ScriptId) -> Option<ClassId> {
         let key = match self.heap.script_proto.get(&f) {
@@ -1768,22 +1849,17 @@ impl Solver<'_> {
         let mut facts = LikelyFacts::default();
         let mut caps = CapDrops::default();
         self.emit_value_claims(&mut facts);
+        self.forwarded_omissions();
+        facts.omitted_formals = self.omitted_formals.clone();
         let deleg = self.emit_call_sites(&mut facts, &mut caps);
-        // The analysis half of the speculation trace (see `viz`).
-        if let Some(mut out) = super::viz::stream(self.opts) {
-            super::viz::write_arg_types(self, &mut out);
-            super::viz::write_gname_cells(self, &self.names, &mut out);
-            super::viz::write_field_cells(self, &self.names, &mut out);
-            super::viz::write_regions(self, &mut out);
-            super::viz::write_arith_dsts(self, &mut out);
-        }
+        self.emit_getter_names(&mut facts);
         let plan = LayoutPlan::build(self, &mut facts, &deleg);
         caps.add(&plan.caps);
+        facts.closed_layouts = self.closed_layouts(&plan);
         let totals = self.emit_site_facts(&mut facts, &plan);
         self.emit_arg_cls(&mut facts, &plan);
         self.emit_class_rows(&mut facts, &plan, &totals.typed_read_positions);
         self.emit_array_claims(&mut facts, &totals);
-        super::effects::emit_effect_summaries(self, &mut facts, &plan);
         facts.n_classes = self.heap.classes.len();
         facts.n_cons = self.engine.cons.len();
         // Drops the fixpoint recorded but never reported, plus everything
@@ -1931,35 +2007,6 @@ impl Solver<'_> {
             }
             facts.call_types.insert(Site::new(sid, pc), m);
         }
-        // Fractional-reachable arith sites: the result var of each arith
-        // constraint, joined over live ctxs -- double evidence at range Top
-        // means a real double population flows through the op, and its
-        // both-number arm may keep the Opt track (the numeric-category
-        // policy). See LikelyFacts::fractional_arith_sites.
-        for ci in 0..self.engine.cons.len() {
-            let Constraint::Arith { dst, pc, .. } = &self.engine.cons[ci] else {
-                continue;
-            };
-            let CKey::Var(def) = *dst else { continue };
-            let pc = *pc;
-            let sid = self.engine.con_script[ci];
-            let Some(ctxs) = self.engine.live_ctxs.get(&sid) else {
-                continue;
-            };
-            let Some(j) = self.engine.join_over_ctxs(ctxs, |ctx| CellKey::Var {
-                script: sid,
-                var: def,
-                ctx,
-            }) else {
-                continue;
-            };
-            if j.fractional_reachable() {
-                facts.fractional_arith_sites.insert(Site::new(sid, pc));
-            }
-            if j.string_reachable() {
-                facts.string_arith_sites.insert(Site::new(sid, pc));
-            }
-        }
         // Aliased-var per-site claims (the closure-scope analog of the
         // elem value claims): each statically resolved GetAliasedVar site
         // projects its (scope, slot) cell through the purely-numeric gate.
@@ -2002,6 +2049,19 @@ impl Solver<'_> {
             .collect();
         for (name, cid) in self.engine.gname_cells() {
             let ts = self.engine.ts(cid);
+            // One scripted function and nothing else: the read's value is
+            // predicted (`gname_fns`), whatever claim follows.
+            if let ([f], false, true, false, ObjType::Empty) = (
+                ts.fns.ids(),
+                ts.fns.is_multi(),
+                ts.prims.is_empty(),
+                ts.unknown,
+                ts.obj,
+            ) {
+                if let Some(k) = f.as_script() {
+                    facts.gname_fns.insert(name, k);
+                }
+            }
             let Some(m) = ts.value_claim_full().or_else(|| ts.object_claim_nullish()) else {
                 continue;
             };
@@ -2017,12 +2077,76 @@ impl Solver<'_> {
             };
             facts.gname_types.insert(name, m);
         }
+        // A top-level function declaration no script rewrites (the
+        // `gname_fns` input): its reads are that function as a constant,
+        // so its cell is empty where no snapshot value seeds it (the
+        // in-process flow compiles before the declaration runs).
+        for (&name, &k) in self.gname_fns {
+            let empty = self
+                .engine
+                .existing_cell(CellKey::GName(name))
+                .is_none_or(|c| self.engine.ts(c).is_empty());
+            if empty {
+                facts.gname_fns.entry(name).or_insert(k);
+            }
+        }
     }
 
     // --- family 2: call-site resolution ----------------------------------
 
     /// How each call site resolved, plus the delegation edges the layout
     /// analysis walks through.
+    fn emit_getter_names(&self, facts: &mut LikelyFacts) {
+        // The builtins' accessor properties (getters on prototypes and
+        // constructors), by name; not `length` and `byteLength`, whose
+        // engine getters the runtime serves as the pure reads they are.
+        const BUILTIN: &[&str] = &[
+            "__proto__",
+            "buffer",
+            "byteOffset",
+            "callee",
+            "caller",
+            "description",
+            "detached",
+            "dotAll",
+            "flags",
+            "global",
+            "growable",
+            "hasIndices",
+            "ignoreCase",
+            "input",
+            "lastMatch",
+            "lastParen",
+            "leftContext",
+            "maxByteLength",
+            "multiline",
+            "resizable",
+            "rightContext",
+            "size",
+            "source",
+            "species",
+            "stack",
+            "sticky",
+            "unicode",
+            "unicodeSets",
+        ];
+        facts
+            .getter_names
+            .extend(facts.accessor_names.iter().copied());
+        facts
+            .getter_names
+            .extend(self.tables.accessor_defs.iter().copied());
+        facts
+            .getter_names
+            .extend(self.tables.call_str_arg1.values().copied());
+        for s in BUILTIN {
+            let chars: Vec<u16> = s.encode_utf16().collect();
+            if let Some(n) = self.names.lookup(&chars) {
+                facts.getter_names.insert(n);
+            }
+        }
+    }
+
     fn emit_call_sites(&self, facts: &mut LikelyFacts, caps: &mut CapDrops) -> Delegation {
         // Scripted targets: 1..=MAX_SITE_TARGETS, emitted as a guard chain.
         for (&site, fns) in &self.site_likely_calls {
@@ -2054,6 +2178,7 @@ impl Solver<'_> {
                     _ => continue,
                 };
                 let sid = self.engine.con_script[ci];
+                let name = self.access_name(ci, name);
                 let site = Site::new(sid, pc);
                 let Some(&c) = self.site_recv_class.get(&site).and_then(Agreed::get) else {
                     continue;
@@ -2222,6 +2347,16 @@ impl Solver<'_> {
         // fence, which is pure cost unless some typed read consumes the
         // position, and the reads are not all seen yet.
         let mut typed_write_pending: Vec<PendingTypedWrite> = Vec::new();
+        // Plain objects that receive computed-name writes (a for-in copy
+        // like `Object.extend`): those land in the `[]` cell, so a named
+        // field's cell misses them and its read claim may be false.
+        let dyn_named: HashSet<super::types::ClassId> = self
+            .heap
+            .dyn_named_writes
+            .iter()
+            .filter_map(|&s| self.heap.class_id(super::heap::ClassKey::Site(s)))
+            .filter(|&c| !self.heap[c].is_array)
+            .collect();
         for ci in 0..self.engine.cons.len() {
             let (recv, name, pc, is_read) = match &self.engine.cons[ci] {
                 Constraint::Read { recv, name, pc, .. } => (*recv, *name, *pc, true),
@@ -2229,6 +2364,7 @@ impl Solver<'_> {
                 _ => continue,
             };
             let sid = self.engine.con_script[ci];
+            let name = self.access_name(ci, name);
             let site = Site::new(sid, pc);
             // The value-CLASS tier, elems included: the agreed class of the
             // loaded object, mapped through the same plan ranges the
@@ -2273,7 +2409,17 @@ impl Solver<'_> {
                 // read whose value is always an object gets the object-only
                 // claim, which the layout mask (a store-conformance claim,
                 // numeric by construction) cannot express.
-                if let Some(m) = self.site_read_ts.get(&site).and_then(TypeSet::site_claim) {
+                let dyn_recv = self
+                    .site_recv_class
+                    .get(&site)
+                    .and_then(Agreed::get)
+                    .is_some_and(|c| dyn_named.contains(c));
+                if let Some(m) = self
+                    .site_read_ts
+                    .get(&site)
+                    .and_then(TypeSet::site_claim)
+                    .filter(|_| !dyn_recv)
+                {
                     facts.field_sites.insert(site, m);
                 }
             }
@@ -2423,6 +2569,13 @@ impl Solver<'_> {
                     let (glo, ghi) = plan.range_of(group)?;
                     plan.subrange_in(glo, ghi, name)
                 });
+            if found.is_none() && is_read {
+                if let Some(k) = self.method_pred(plan, &facts.closed_layouts, site, name, lo, hi) {
+                    facts
+                        .method_sites
+                        .insert(site, (LayoutKey::new(lo), LayoutKey::new(hi), name, k));
+                }
+            }
             if found.is_none() {
                 self.dump_prop_gap(site, name, is_read, "no-slot-fact", recv);
                 if self.opts.diagnostics.propgap {
@@ -2577,6 +2730,52 @@ impl Solver<'_> {
     /// one of them. The kill censuses say a fact died and `--dump-clsfact`
     /// says whether a consumer wanted one; this says why the analysis never
     /// made one, which is the only question the other two leave open.
+    /// The layouts whose class holds no property outside their row
+    /// (`closed_layouts`): every name the class's view has a value for
+    /// (elements aside, which are no named property) is in the row.
+    fn closed_layouts(&self, plan: &LayoutPlan) -> HashSet<LayoutKey> {
+        let mut held: HashMap<ClassId, HashSet<NameId>> = HashMap::default();
+        for (c, n, cell) in self.engine.field_cells() {
+            if n != self.names_of.elems && !self.engine.ts(cell).is_empty() {
+                held.entry(c).or_default().insert(n);
+            }
+        }
+        plan.rows
+            .iter()
+            .filter(|&(k, row)| {
+                plan.key_class.get(k).is_some_and(|c| {
+                    held.get(c)
+                        .is_none_or(|ns| ns.iter().all(|n| row.names.contains(n)))
+                })
+            })
+            .map(|(&k, _)| LayoutKey::new(k))
+            .collect()
+    }
+
+    /// A read of `name` at `site` on receivers of layouts `lo..=hi`, none
+    /// of whose rows has the name: its predicted method, where the read's
+    /// value is exactly one scripted function (of any number of closures)
+    /// and nothing else -- what the receivers' prototype chain holds.
+    fn method_pred(
+        &self,
+        plan: &LayoutPlan,
+        closed: &HashSet<LayoutKey>,
+        site: Site,
+        name: NameId,
+        lo: u32,
+        hi: u32,
+    ) -> Option<ScriptId> {
+        if (lo..=hi).any(|k| plan.names(k).contains(&name) || !closed.contains(&LayoutKey::new(k)))
+        {
+            return None;
+        }
+        let ts = self.site_read_ts.get(&site)?;
+        match (ts.fns.ids(), ts.prims.is_empty(), ts.unknown, ts.obj) {
+            ([f], true, false, ObjType::Empty) => f.as_script(),
+            _ => None,
+        }
+    }
+
     fn dump_prop_gap(
         &self,
         site: Site,
@@ -2727,6 +2926,11 @@ impl Solver<'_> {
                 .iter()
                 .enumerate()
                 .map(|(i, n)| ClassFieldFacts {
+                    types: plan
+                        .key_class
+                        .get(&k)
+                        .and_then(|&c| self.class_view_types(c, *n))
+                        .unwrap_or(Claim::NONE),
                     name: *n,
                     prims: prims.get(i).copied().unwrap_or(Prims::EMPTY),
                     range: ranges.get(i).copied().flatten(),
@@ -2854,6 +3058,25 @@ impl Solver<'_> {
     /// The claim is per-object ("SHALLOW set => claimed fields are
     /// numbers"), the store fence clears SHALLOW on any non-conforming
     /// store, and a wrong prediction costs the degrade path, never a deopt.
+    /// The full predicted type of a class's view cell (`ClassFieldFacts::
+    /// types`): its primitive classes, and the object bit where objects or
+    /// functions flow in; none where an unknown value may.
+    fn class_view_types(&self, c: ClassId, name: NameId) -> Option<Claim> {
+        let cell = self
+            .engine
+            .lookup(super::engine::CellKey::ClassView { class: c, name })?;
+        let ts = self.engine.ts(cell);
+        if ts.unknown {
+            return None;
+        }
+        let objects = !matches!(ts.obj, ObjType::Empty) || !ts.fns.is_empty();
+        if ts.prims.is_empty() && !objects {
+            return None;
+        }
+        let obj_bit = if objects { Claim::OBJECT.bits() } else { 0 };
+        Some(Claim::from_bits(ts.prims.bits() | obj_bit))
+    }
+
     fn class_view_prims(&self, c: ClassId, name: NameId) -> Option<Prims> {
         let cell = self
             .engine

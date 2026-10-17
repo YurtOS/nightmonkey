@@ -33,6 +33,10 @@ namespace night {
 //
 // A change here is an ABI change: bump NightAotAbiVersion.
 #define NIGHT_REGION_SHAPE(_)                                                  \
+  /* A context's value stack (NightStack.h): a region of 1 << this many   */   \
+  /* bytes, aligned to its size, so compiled code tests a frame's fit by  */   \
+  /* whether its last byte shares the frame base's high bits.             */   \
+  _(valueStackLog2, 21)                                                        \
   /* Per-site property IC (gEnv.propicPtr): the inline get ways (a set   */    \
   /* site uses way 0 alone), then the add-transition row. A get receiver  */   \
   /* past the last way is served by the mega table.                       */   \
@@ -70,7 +74,6 @@ namespace night {
   /* bases below are NOT in the region table -- C++ recomputes them from   */  \
   /* propicGenPtr, which is exactly why the offsets have to be shared.     */  \
   _(hostGenOff, 0)                                                             \
-  _(hostStackLimitOff, 4)                                                      \
   _(hostFnClassOff, 8)                                                         \
   _(hostStaticStringsOff, 16)                                                  \
   _(hostAtomTableOff, 20)                                                      \
@@ -84,7 +87,7 @@ namespace night {
   _(hostBuiltinCellsOff, 64)                                                   \
   /* Builtin callee-identity cells, in translate::BC_* order. The count is */  \
   /* what positions everything after them.                                 */  \
-  _(builtinCellCount, 27)                                                      \
+  _(builtinCellCount, 30)                                                      \
   _(builtinCellBytes, 8)                                                       \
   /* TA-clasp table, right after the builtin cells: 9 fixed-length         */  \
   /* typed-array class pointers (element kind 1..=9 at index kind-1), 36   */  \
@@ -98,16 +101,70 @@ namespace night {
   _(argsClassUnmappedOff, 4)                                                   \
   _(argsClassDataArgsOff, 8)                                                   \
   _(argsDynCodeFuseOff, 12)                                                    \
-  /* Inline string-literal block, right after the args metadata:           */  \
-  /* [emptyString @0, thin replay triple @4, fat triple @16, stamp-epoch   */  \
-  /* address @28, binding-write epoch address @32, pad @36]. The major-GC  */  \
-  /* purge zeroes exactly the triples ([@4, @28)): the two epoch addresses */  \
-  /* are host constants and must survive it.                               */  \
-  _(strlitBlockBytes, 40)                                                      \
+  /* Inline string block, right after the args metadata: [emptyString @0, */  \
+  /* string nursery header @4, its alloc site's count address @8, the    */  \
+  /* guarded-chain table's address @12, &MapObject::class_ @16, unused   */  \
+  /* @20..@28, stamp-epoch                                                */  \
+  /* address @28, unused (0) @32,                                         */  \
+  /* &PlainObject::class_ @36]. The header word is 0 while the zone does  */  \
+  /* not allocate strings in the nursery; the runtime refreshes it after  */  \
+  /* every GC, the only place the zone's flag moves.                      */  \
+  _(strlitBlockBytes, 56)                                                      \
   _(strlitEmptyStringOff, 0)                                                   \
-  _(strlitTriplesEnd, 28)                                                      \
+  _(strlitStrHeaderOff, 4)                                                     \
+  _(strlitStrCountAddrOff, 8)                                                  \
+  _(strlitGchainAddrOff, 12)                                                   \
+  _(strlitMapClassOff, 16)                                                     \
+  /* The guarded-chain GET table (its address in the strlit block):        */  \
+  /* (shape, atom)-hashed as the mega table, rows [shape @0, atomId @4,     */  \
+  /* nHops @8, slotEnc @12, protoPtr[4] @16, protoShape[4] @32]; a hit      */  \
+  /* checks every hop's live shape, then reads the last hop's slot or       */  \
+  /* serves undefined for the absent slotEnc.                               */  \
+  _(gchainSize, 4096)                                                          \
+  _(gchainEntryBytes, 48)                                                      \
+  _(gchainMaxHops, 4)                                                          \
+  _(gchainNhopsOff, 8)                                                         \
+  _(gchainSlotEncOff, 12)                                                      \
+  _(gchainProtoPtrOff, 16)                                                     \
+  _(gchainProtoShapeOff, 32)                                                   \
+  /* A get row's slotEnc for a proven absence (kNightSlotEncAbsent).        */  \
+  _(icSlotEncAbsent, 4294967295)                                               \
+  /* The receiver key a get row holds for a primitive (whose lookup starts */  \
+  /* at its prototype): never a shape pointer (8-aligned), an empty row    */  \
+  /* (0) or the set sites' poly sentinel (1).                              */  \
+  _(icPrimNumberShape, 2)                                                      \
+  _(icPrimBooleanShape, 3)                                                     \
+  _(icPrimStringShape, 6)                                                      \
   _(strlitStampEpochAddrOff, 28)                                               \
-  _(strlitBindEpochAddrOff, 32)                                                \
+  _(strlitEnumeratorsOff, 32)                                                  \
+  _(strlitPlainClassOff, 36)                                                   \
+  /* A regexp exec/test with no match, decided in compiled code (MIR's     */  \
+  /* regexp arm): the shape of an optimizable RegExpObject (armed by the  */  \
+  /* leaf, zeroed with the movable caches), the address of the realm's     */  \
+  /* optimizeRegExpPrototypeFuse word, and the regex-leaf block's address. */  \
+  _(strlitRegExpShapeOff, 40)                                                  \
+  _(strlitRegExpFuseAddrOff, 44)                                               \
+  _(strlitRegexLeafOff, 48)                                                    \
+  /* MIR's element-add arm (`props[name] = v` adding `name`): the table's  */  \
+  /* address. Rows are direct-mapped on (old shape, atomPtr | 1) as the     */  \
+  /* global add table, each a site add-transition row (inlineIcTransBytes) */  \
+  /* then the key; filled where night_runtime_set_element learns or replays */  \
+  /* an add, zeroed with the movable caches.                                */  \
+  _(strlitElemAddOff, 52)                                                      \
+  _(elemAddRows, 1024)                                                         \
+  _(elemAddRowBytes, 64)                                                       \
+  _(elemAddKeyOff, 48)                                                         \
+  /* The regex-leaf block (NightRuntimeData::regexLeaf): [btStack @0]      */  \
+  /* [btElems @4] [output pairs @8, regexLeafMaxPairs * 8 bytes] [rows]:   */  \
+  /* per RegExpShared (direct-mapped by its address >> 4), [shared @0]     */  \
+  /* [latin1 matcher @4] [two-byte matcher @8] [pad], wasm table indices.  */  \
+  _(regexLeafRows, 64)                                                         \
+  _(regexLeafRowBytes, 16)                                                     \
+  _(regexLeafMaxPairs, 8)                                                      \
+  _(regexLeafBtStackOff, 0)                                                    \
+  _(regexLeafBtElemsOff, 4)                                                    \
+  _(regexLeafPairsOff, 8)                                                      \
+  _(regexLeafRowsOff, 72)                                                      \
   /* Math native-pointer slots (gEnv.mathNativesPtr), 4 bytes per MN_*.    */  \
   _(mathNativeSlots, 16)                                                       \
   /* Inline-alloc and construct cell rows: the compiler sizes the regions  */  \
@@ -116,7 +173,25 @@ namespace night {
   /* are written only by compiled code and read back only by it, so their   */ \
   /* sizes are not shared and stay in translate.rs.)                        */ \
   _(allocCellBytes, 32)                                                        \
-  _(constructCellBytes, 40)
+  _(constructCellBytes, 56)                                                    \
+  /* Per-binding value-fuse cells (gGlobalVals, after the slot rows):      */  \
+  /* [bits u64 @0][fuse word u32 @8][pad]. Fuse states: 0 unarmed, 1       */  \
+  /* armed (bits are the value), 2 blown, 3 armed with the binding's       */  \
+  /* predicted function (a compiled function of the script the binding    */  \
+  /* table names). Armed is bit 0.                                         */  \
+  _(bindingCellBytes, 16)                                                      \
+  _(bindingCellFuseOff, 8)                                                     \
+  _(bindingFuseArmed, 1)                                                       \
+  _(bindingFuseBlown, 2)                                                       \
+  _(bindingFusePredicted, 3)                                                   \
+  /* Predicted-method cells (gEnv.methodCellsPtr): [proto u32 @0][pad]     */  \
+  /* [fn bits u64 @8]. Armed: proto is the receivers' prototype through    */  \
+  /* which the name resolves to fn, a compiled function of the predicted   */  \
+  /* script held by a constant (ObjectFuse) property. 0 unarmed, 1 not     */  \
+  /* armable until a GC.                                                   */  \
+  _(methodCellBytes, 16)                                                       \
+  _(methodCellFnOff, 8)                                                        \
+  _(methodCellPoison, 1)
 
 #define NIGHT_REGION_SHAPE_CONST(name, value) \
   static constexpr uint32_t Night_##name = (value);
@@ -135,10 +210,29 @@ static_assert(Night_argsDynCodeFuseOff + 4 <= Night_argsClassBlockBytes,
               "the dyncode fuse word must fit the args block");
 static_assert(Night_strlitStampEpochAddrOff + 4 <= Night_strlitBlockBytes,
               "the stamp-epoch address must fit the strlit block");
-static_assert(Night_strlitBindEpochAddrOff + 4 <= Night_strlitBlockBytes,
-              "the binding-epoch address must fit the strlit block");
-static_assert(Night_strlitTriplesEnd <= Night_strlitStampEpochAddrOff,
-              "the purge must not zero the published epoch addresses");
+static_assert(Night_strlitEnumeratorsOff + 4 <= Night_strlitBlockBytes,
+              "the active-iterator list address must fit the strlit block");
+static_assert((Night_bindingFuseArmed & 1) && (Night_bindingFusePredicted & 1) &&
+                  !(Night_bindingFuseBlown & 1),
+              "a binding fuse is armed exactly when bit 0 is set");
+static_assert(Night_strlitRegexLeafOff + 4 <= Night_strlitBlockBytes &&
+                  Night_strlitBlockBytes % 8 == 0,
+              "the regexp words must fit the (8-aligned) strlit block");
+static_assert(Night_strlitElemAddOff + 4 <= Night_strlitBlockBytes,
+              "the element-add table's address must fit the strlit block");
+static_assert(Night_elemAddKeyOff >= Night_inlineIcTransBytes &&
+                  Night_elemAddKeyOff + 4 <= Night_elemAddRowBytes &&
+                  (Night_elemAddRows & (Night_elemAddRows - 1)) == 0,
+              "an element-add row is a transition row, then its key");
+static_assert(Night_regexLeafRowsOff ==
+                  Night_regexLeafPairsOff + 8 * Night_regexLeafMaxPairs,
+              "the regex-leaf rows follow the output pairs");
+static_assert((Night_regexLeafRows & (Night_regexLeafRows - 1)) == 0,
+              "the regex-leaf rows are a power of two");
+static_assert(Night_strlitPlainClassOff + 4 <= Night_strlitBlockBytes,
+              "the plain-object class must fit the strlit block");
+static_assert(Night_strlitMapClassOff + 4 <= Night_strlitStampEpochAddrOff,
+              "the strlit host words must not overlap the epoch address");
 
 // The three block bases C++ recomputes off propicGenPtr, in one place so the
 // arithmetic exists once. `genBase` is `gEnv.propicGenPtr`.

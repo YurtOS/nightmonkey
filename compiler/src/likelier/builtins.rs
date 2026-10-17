@@ -300,64 +300,6 @@ pub enum NativeEffect {
     Top,
 }
 
-/// Effect class of a native name resolved against `kind`: the modeled
-/// primitive-returning names are `Pure` (`has_result` carries the
-/// interned mask's presence, so mangled intrinsic ids classify by their
-/// resolved result rather than by re-looking up the mangled name), the
-/// in-place array mutators `Elems`, the allocation-only constructors and
-/// object-returning pure kernels `Pure` by name, everything else `Top`
-/// (`sort` stays `Top`: the comparator is user code).
-pub(super) fn native_effect(kind: NativeKind, name: &[u16], has_result: bool) -> NativeEffect {
-    const ELEMS: &[&str] = &[
-        "push",
-        "pop",
-        "shift",
-        "unshift",
-        "fill",
-        "copyWithin",
-        "splice",
-        "reverse",
-    ];
-    // No writes to pre-existing heap: fresh allocations and coercion
-    // kernels (argument coercion reaching user code is tolerated by the
-    // summary contract, same as every other Pure name).
-    const PURE: &[&str] = &[
-        "Error",
-        "TypeError",
-        "RangeError",
-        "ReferenceError",
-        "SyntaxError",
-        "EvalError",
-        "URIError",
-        "RegExp",
-        "ArrayBuffer",
-        "create",
-        "keys",
-        "values",
-        "entries",
-        "freeze",
-        "seal",
-        "getPrototypeOf",
-        "getOwnPropertyNames",
-        "getOwnPropertyDescriptor",
-        "%ToObject",
-        "%RegExpMatcher",
-        "%StringSplitString",
-        "%GuardToSetObject",
-        "%GuardToMapObject",
-    ];
-    if ELEMS.iter().any(|n| name_eq(name, n)) {
-        NativeEffect::Elems
-    } else if has_result
-        || native_result_for(kind, name).is_some()
-        || PURE.iter().any(|n| name_eq(name, n))
-    {
-        NativeEffect::Pure
-    } else {
-        NativeEffect::Top
-    }
-}
-
 /// Whether a name is a plausible method of the given prim-receiver kind
 /// (drives callee-position resolution off string/number receivers; only
 /// modeled names resolve -- an absent name leaves the cell Empty).
@@ -603,6 +545,18 @@ pub(super) fn ta_kind_for_ctor_name(name: &[u16]) -> Option<TaKind> {
 /// Whether a name denotes the `Array` constructor.
 pub(super) fn is_array_ctor_name(name: &[u16]) -> bool {
     name_eq(name, "Array")
+}
+
+/// Whether a global name is a keyed-collection constructor: `Some(true)`
+/// for a map (`Map`, `WeakMap`), `Some(false)` for a set.
+pub(super) fn collection_ctor_name(name: &[u16]) -> Option<bool> {
+    if name_eq(name, "Map") || name_eq(name, "WeakMap") {
+        Some(true)
+    } else if name_eq(name, "Set") || name_eq(name, "WeakSet") {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 /// Whether the translator has an inline arm for this bare-name native.

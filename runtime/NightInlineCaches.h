@@ -27,10 +27,13 @@ namespace night {
 // OFFSET from its base, with bit 0 set when the base is the object's
 // out-of-line `slots_` vector rather than the object itself. Offsets are
 // multiples of 8, so the bit is free and the decode is two masks, a select
-// and an add (`Bbv::emit_slot_addr`).
+// and an add.
 static inline uint32_t NightSlotEnc(bool isDynamic, uint32_t idx) {
   return isDynamic ? (idx * 8u) | 1u : 16u + idx * 8u;
 }
+// The encoding a get cache row holds for a proven absence: the hit serves
+// `undefined` once its guards pass.
+static constexpr uint32_t kNightSlotEncAbsent = UINT32_MAX;
 static inline bool NightSlotEncIsDynamic(uint32_t enc) { return enc & 1u; }
 static inline uint32_t NightSlotEncIndex(uint32_t enc) {
   return NightSlotEncIsDynamic(enc) ? (enc & ~1u) / 8u : (enc - 16u) / 8u;
@@ -47,11 +50,17 @@ uint32_t NightObjectSlotSpanIfShared(JSObject* obj);
 // receiver's shape; the replays apply the cached (oldShape, id) -> newShape
 // transition to another object of oldShape. `nurseryOut` asks the caller to
 // zero the row at the next minor-GC end.
+// `*skipOut`: the transition raises the span past the new slot's own
+// (analysis-chosen slot layouts leave the slots between as holes), so a
+// replay must also initialize those; only the C++ replays below do, so such
+// a transition goes in the runtime's tables and never in a site row, which
+// the compiled add arms replay.
 bool NightPopulateAddTransition(JSContext* cx, JSObject* obj, jsid id,
                                 uint32_t oldSpan, uint32_t* newShapeOut,
                                 uint32_t* slotOut, uint32_t protoPtrsOut[4],
                                 uint32_t protoShapesOut[4],
-                                uint32_t* numProtosOut, bool* nurseryOut);
+                                uint32_t* numProtosOut, bool* nurseryOut,
+                                bool* skipOut);
 bool NightTryAddPropTransition(JSContext* cx, uint64_t recvBits,
                                uint32_t oldShapeW, uint32_t newShapeW,
                                uint32_t slot, const uint32_t* protoPtrs,
@@ -69,12 +78,24 @@ bool NightTryInitAddTransition(JSContext* cx, uint64_t objBits,
 bool NightPopulateInlineGetIC(JSContext* cx, JSObject* obj, jsid id,
                               uint32_t* recvShapeOut, uint32_t* holderPtrOut,
                               uint32_t* holderShapeOut, uint32_t* slotEncOut);
+// The same for a primitive receiver, whose lookup starts at `proto` (its
+// prototype) and whose rows are keyed by `pseudoShape`.
+bool NightPopulateInlineGetICPrim(JSContext* cx, JSObject* proto,
+                                  uint32_t pseudoShape, jsid id,
+                                  uint32_t* recvShapeOut,
+                                  uint32_t* holderPtrOut,
+                                  uint32_t* holderShapeOut,
+                                  uint32_t* slotEncOut);
 // Guarded proto-chain populate (the invalidated-teleporting fallback):
 // per-hop [ptr, shape] pairs from the first proto through the holder.
 bool NightPopulateGuardedChain(JSContext* cx, JSObject* obj, jsid id,
                                uint32_t maxHops, uint32_t* nHopsOut,
                                uint32_t* protoPtrs, uint32_t* protoShapes,
                                uint32_t* slotEncOut);
+bool NightPopulateGuardedChainPrim(JSContext* cx, JSObject* proto, jsid id,
+                                   uint32_t maxHops, uint32_t* nHopsOut,
+                                   uint32_t* protoPtrs, uint32_t* protoShapes,
+                                   uint32_t* slotEncOut);
 // Accessor-call cache populate: resolve `id` on the proto chain to a scripted
 // getter/setter and yield the guard words the compiled accessor arm checks.
 bool NightPrimeAccessor(JSContext* cx, JSObject* obj, jsid id, bool wantSetter,

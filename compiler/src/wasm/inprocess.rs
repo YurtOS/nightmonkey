@@ -41,9 +41,7 @@ pub struct HelperImportSpec {
 /// The built batch. `blobs[i]` is runner blob `i` (function index
 /// `nextern + i`, predicted table index `table_base + i`); `scripts` maps
 /// each compiled script's source id to its blob position; `env_desc` is the
-/// serialized environment descriptor (see `ENV_DESC_WORDS`). `module` is the
-/// batch assembled into one self-contained module, for hosts that mount one
-/// (filled on demand by `night_inproc_module`; see `assemble`).
+/// serialized environment descriptor (see `ENV_DESC_WORDS`).
 pub struct InprocOut {
     pub blobs: Vec<Vec<u8>>,
     pub table_base: u32,
@@ -215,7 +213,7 @@ fn carve_blobs(bytes: &[u8], n_imports: usize) -> Result<Vec<Vec<u8>>, String> {
 /// Defined functions pushed before `translate_all` runs; the funcref table is
 /// pre-padded past them so every table-placed function's index is exactly
 /// `table_base + blob position`.
-const PRE_BODIES: u32 = 10;
+const PRE_BODIES: u32 = 11;
 
 pub fn build_inprocess_batch(
     source: &Source,
@@ -309,7 +307,8 @@ pub fn build_inprocess_batch(
     };
     let (ta_get_poly, ta_set_poly) =
         translate::build_ta_poly_helpers(&mut m, mem, env.ta_class_base);
-    let ic_get_poly = translate::build_ic_get_helper(&mut m, mem, env.mega_get_base);
+    let ic_get_poly =
+        translate::build_ic_get_helper(&mut m, mem, env.mega_get_base, env.strlit_slot);
     let call_classify = super::build_call_classify_helper(&mut m, mem, env.fn_class_slot);
     let elem_append_check =
         super::build_elem_append_helper(&mut m, mem, env.append_cache_base, opts.instrument.guards);
@@ -363,7 +362,40 @@ pub fn build_inprocess_batch(
             body,
         ))
     };
-    if direct_call_stub2.index() != n_imports + PRE_BODIES as usize - 1 {
+    // The AOT regex matchers' functype, carried by an inert stub (the
+    // matchers themselves are blobs anywhere): MIR's regexp arm's
+    // `call_indirect` immediate.
+    let regex_matcher_sig = m.signatures.push(SignatureData {
+        params: vec![Type::I32; 6],
+        returns: vec![Type::I32],
+    });
+    let regex_stub = {
+        let mut body = FunctionBody::new(&m, regex_matcher_sig);
+        let entry = body.entry;
+        let i32_ty = body.single_type_list(Type::I32);
+        // Not a status the arm takes as "no match".
+        let retry = body.add_value(ValueDef::Operator(
+            Operator::I32Const { value: 2 },
+            Default::default(),
+            i32_ty,
+        ));
+        body.append_to_block(entry, retry);
+        body.set_terminator(
+            entry,
+            waffle::Terminator::Return {
+                values: vec![retry],
+            },
+        );
+        m.funcs.push(FuncDecl::Body(
+            regex_matcher_sig,
+            "night_regex_stub".to_string(),
+            body,
+        ))
+    };
+    if direct_call_stub2.index() != n_imports + PRE_BODIES as usize - 2
+        || regex_stub.index() != n_imports + PRE_BODIES as usize - 1
+        || regex_matcher_sig.index() != n_imports + PRE_BODIES as usize - 1
+    {
         return Err("pre-body function count misaligned".to_string());
     }
 
@@ -390,9 +422,9 @@ pub fn build_inprocess_batch(
             direct_call_stub,
             night_abi_sig2,
             direct_call_stub2,
+            regex_matcher_sig,
         },
         env.helper_bases(),
-        opts.diagnostics.viz,
     )?;
 
     let mut strlit_addr: u32 = 0;
@@ -439,7 +471,6 @@ pub fn build_inprocess_batch(
         source_id_to_func: _,
         source_id_to_table_func,
         sid_to_index,
-        fuse_binding_index,
         strlit_patches,
         regex_entries,
         prop_ic_base,
@@ -464,7 +495,7 @@ pub fn build_inprocess_batch(
     }
     let atom_bytes = serialize_atom_table(&atoms);
     let gbind_bytes =
-        serialize_global_binding_table(&atoms.names, &env.syn_gname_names, &fuse_binding_index);
+        serialize_global_binding_table(&atoms.names, &env.syn_gname_names, &env.binding_preds);
     let fuse_bytes = serialize_fuse_table(&env, &mut atoms);
     let regex_bytes = serialize_regex_table(&regex_entries);
 
@@ -513,6 +544,8 @@ pub fn build_inprocess_batch(
         mathNativesPtr: env.math_natives_base,
         appendCachePtr: env.append_cache_base,
         accessorCachePtr: env.accessor_cache_base,
+        methodCellsPtr: env.method_cells_base,
+        methodCellsLen: env.method_cells_len,
     };
 
     let mut header = [0u32; ENV_DESC_WORDS];
@@ -570,7 +603,6 @@ mod tests {
     use crate::source::SourceObject;
 
     const HELPER_NAMES: &[&str] = &[
-        "night_runtime_callee_night_target",
         "night_runtime_add",
         "night_runtime_concat",
         "night_runtime_call",
@@ -578,7 +610,6 @@ mod tests {
         "night_runtime_native_dispatch",
         "night_runtime_apply_fwd",
         "night_runtime_construct",
-        "night_runtime_get_property",
         "night_runtime_set_property",
         "night_runtime_get_prop_ic_miss",
         "night_runtime_set_prop_ic_miss",
@@ -590,7 +621,6 @@ mod tests {
         "night_runtime_string",
         "night_runtime_get_intrinsic",
         "night_runtime_get_intrinsic_cell",
-        "night_runtime_strlit_verify",
         "night_runtime_str_chars_eq",
         "night_runtime_tonumeric",
         "night_runtime_pos",
@@ -602,7 +632,6 @@ mod tests {
         "night_runtime_box_nonstrict_this",
         "night_runtime_get_mapped_arg",
         "night_runtime_set_mapped_arg",
-        "night_runtime_validate_this_layout",
         "night_runtime_in",
         "night_runtime_has_own",
         "night_runtime_to_property_key",
@@ -657,6 +686,7 @@ mod tests {
         "night_runtime_typeof",
         "night_runtime_typeof_eq",
         "night_runtime_constant_strict_eq",
+        "night_runtime_regexp_leaf",
         "night_runtime_bind_unqualified_gname",
         "night_runtime_set_name",
         "night_runtime_new_object",
@@ -678,6 +708,7 @@ mod tests {
         "night_runtime_iter",
         "night_runtime_more_iter",
         "night_runtime_end_iter",
+        "night_runtime_post_whole_cell",
         "night_runtime_close_iter_for_exception",
         "night_runtime_symbol",
         "night_runtime_optimize_get_iterator",
@@ -689,11 +720,8 @@ mod tests {
         "night_runtime_post_write_barrier",
         "night_runtime_post_write_barrier_elem",
         "night_runtime_pre_write_barrier",
-        "night_runtime_resolve_global_slot",
         "night_runtime_resolve_global_slot_guarded",
-        "night_runtime_set_global",
         "night_runtime_binding_written",
-        "night_runtime_binding_value",
         "night_runtime_math_unary",
         "night_runtime_math_pow",
         "night_runtime_fmod",
@@ -705,8 +733,34 @@ mod tests {
         "night_runtime_obj_with_proto",
         "night_runtime_fun_with_proto",
         "night_runtime_set_fun_name",
-        "night_runtime_no_extra_indexed",
         "night_runtime_gen_is_closing",
+        "night_runtime_mir_stress",
+        "night_runtime_slots_covered",
+        "night_runtime_ctor_stamp",
+        "night_runtime_ctor_restamp",
+        "night_runtime_init_field",
+        "night_runtime_elem_grow",
+        "night_runtime_get_prop_pure",
+        "night_runtime_set_prop_pure",
+        "night_runtime_to_primitive_pure",
+        "night_runtime_get_elem_pure",
+        "night_runtime_set_elem_pure",
+        "night_runtime_new_this",
+        "night_runtime_new_this_init",
+        "night_runtime_method_arm",
+        "night_runtime_bigint",
+        "night_runtime_non_syntactic_global_this",
+        "night_runtime_set_intrinsic",
+        "night_runtime_env_callee",
+        "night_runtime_eval",
+        "night_runtime_spread_eval",
+        "night_runtime_dynamic_import",
+        "night_runtime_import_meta",
+        "night_runtime_get_import",
+        "night_runtime_add_disposable",
+        "night_runtime_take_dispose_capability",
+        "night_runtime_create_suppressed_error",
+        "night_runtime_resume",
         "night_runtime_regex_ci_compare",
     ];
 
@@ -753,6 +807,7 @@ mod tests {
             is_class_ctor: false,
             strict: true,
             has_mapped_args: false,
+            pos: None,
         };
         Source {
             objects: vec![SourceObject::Script(script)],
@@ -824,7 +879,10 @@ mod tests {
         let out = build_inprocess_batch(
             source,
             SourceObjectId::new(0),
-            &Options::default(),
+            &Options {
+                pipeline: crate::options::Pipeline::Baseline,
+                ..Options::default()
+            },
             &specs,
             &mut |count| {
                 assert_eq!(reserved, 0, "reserve called more than once");

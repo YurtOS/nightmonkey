@@ -77,17 +77,20 @@ pub fn dump_facts(facts: &LikelyFacts, path: &str) {
             claim.bits()
         ));
     }
+    for (&name, &k) in &facts.gname_fns {
+        lines.push(format!("gname_fns {} = {k}", esc(facts.names.get(name))));
+    }
+    for (site, &(lo, hi, name, k)) in &facts.method_sites {
+        lines.push(format!(
+            "method_sites {site} = L{lo}..L{hi} {} {k}",
+            esc(facts.names.get(name))
+        ));
+    }
     for (&site, &claim) in &facts.call_types {
         lines.push(format!("call_types {site} = {:#x}", claim.bits()));
     }
     for (&site, &claim) in &facts.aliased_sites {
         lines.push(format!("aliased_sites {site} = {:#x}", claim.bits()));
-    }
-    for &site in &facts.fractional_arith_sites {
-        lines.push(format!("fractional_arith_sites {site}"));
-    }
-    for &site in &facts.string_arith_sites {
-        lines.push(format!("string_arith_sites {site}"));
     }
     for (&site, key) in &facts.lit_stamps {
         lines.push(format!("lit_stamps {site} = {}", key.get()));
@@ -129,6 +132,12 @@ pub fn dump_facts(facts: &LikelyFacts, path: &str) {
             .map(|f| format!("{:#x}", f.prims.bits()))
             .collect();
         lines.push(format!("class_layout_masks {ctor} = {}", m.join(",")));
+        let t: Vec<String> = class
+            .fields
+            .iter()
+            .map(|f| format!("{:#x}", f.types.bits()))
+            .collect();
+        lines.push(format!("class_layout_types {ctor} = {}", t.join(",")));
         if class.fields.iter().any(|f| f.typed_prims != f.prims) {
             let m: Vec<String> = class
                 .fields
@@ -183,6 +192,10 @@ pub fn dump_facts(facts: &LikelyFacts, path: &str) {
     }
     for (&s, &key) in &facts.ctor_stamps {
         lines.push(format!("ctor_stamps {s} = {key}"));
+    }
+    for (&s, ctors) in &facts.ctor_publish {
+        let v: Vec<String> = ctors.iter().map(|c| c.to_string()).collect();
+        lines.push(format!("ctor_publish {s} = {}", v.join(",")));
     }
     for (&s, &n) in &facts.ctor_nslots {
         lines.push(format!("ctor_nslots {s} = {n}"));
@@ -247,26 +260,6 @@ pub fn dump_facts(facts: &LikelyFacts, path: &str) {
             lo.get(),
             hi.get(),
             mask.bits()
-        ));
-    }
-    for (&sid, e) in &facts.script_effects {
-        let mut fields = String::new();
-        for &(range, name) in &e.field_writes {
-            let cls = match range {
-                Some((lo, hi)) => format!("{}..{}", lo.get(), hi.get()),
-                None => "?".to_string(),
-            };
-            let _ = write!(fields, " {}:{}", cls, esc(facts.names.get(name)));
-        }
-        lines.push(format!(
-            "effect sid#{} = {}{fields}{}",
-            sid.get(),
-            e.label(),
-            if e.gname_writes.is_empty() {
-                String::new()
-            } else {
-                format!(" gnames={}", names(&facts.names, &e.gname_writes))
-            },
         ));
     }
     lines.sort();

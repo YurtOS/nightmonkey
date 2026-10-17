@@ -3,16 +3,21 @@
 
 #include "runtime/NightRegistration.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <vector>
 
+#include "frontend/SourceNotes.h"  // SrcNoteIterator
 #include "gc/GC.h"
 #include "js/GCAPI.h"
 #include "js/GCVector.h"
 #include "js/HashTable.h"
 #include "js/shadow/String.h"
 #include "runtime/Night.h"
+#include "runtime/NightContext.h"
 #include "runtime/NightEnv.h"
+#include "runtime/NightStack.h"
 #include "vm/ArrayObject.h"
 #include "vm/JSContext.h"
 #include "vm/JSFunction.h"
@@ -98,6 +103,11 @@ static bool DelazifyTree(JSContext* cx, JS::Handle<JSScript*> script,
 //   per scope: u32 scopeAddr, u32 numBindings,
 //     per binding: u32 nameAtomAddr (0 for elided), u32 isVar,
 //                  u32 hasEnvSlot, u32 slot
+//   u32 numScripts (source positions, diagnostics only: the visualizer)
+//   per script: u32 scriptAddr, u32 lineno, u32 column (one-origin),
+//     u32 sourceStart, u32 sourceEnd, u32 numEntries,
+//     per entry: u32 pc, u32 line, u32 column -- the position from that pc
+//     on, at each source note that moves it (as PCToLineNumber reads them)
 static void AppendU32(std::vector<uint8_t>& out, uint32_t v) {
   out.push_back(uint8_t(v));
   out.push_back(uint8_t(v >> 8));
@@ -158,6 +168,53 @@ static bool BuildDigest(
       AppendU32(out, bi.kind() == BindingKind::Var ? 1 : 0);
       AppendU32(out, hasEnvSlot ? 1 : 0);
       AppendU32(out, hasEnvSlot ? loc.slot() : 0);
+      n++;
+    }
+    out[countPos] = uint8_t(n);
+    out[countPos + 1] = uint8_t(n >> 8);
+    out[countPos + 2] = uint8_t(n >> 16);
+    out[countPos + 3] = uint8_t(n >> 24);
+  }
+  AppendU32(out, uint32_t(scripts.length()));
+  for (JSScript* script : scripts) {
+    AppendU32(out, uint32_t(reinterpret_cast<uintptr_t>(script)));
+    unsigned startLine = script->lineno();
+    JS::LimitedColumnNumberOneOrigin startCol(script->column());
+    AppendU32(out, startLine);
+    AppendU32(out, startCol.oneOriginValue());
+    AppendU32(out, script->sourceStart());
+    AppendU32(out, script->sourceEnd());
+    size_t countPos = out.size();
+    AppendU32(out, 0);
+    uint32_t n = 0;
+    unsigned lineno = startLine;
+    JS::LimitedColumnNumberOneOrigin column = startCol;
+    ptrdiff_t offset = 0;
+    for (SrcNoteIterator iter(script->notes(), script->notesEnd());
+         !iter.atEnd(); ++iter) {
+      const auto* sn = *iter;
+      offset += sn->delta();
+      SrcNoteType type = sn->type();
+      if (type == SrcNoteType::SetLine) {
+        lineno = SrcNote::SetLine::getLine(sn, startLine);
+        column = JS::LimitedColumnNumberOneOrigin();
+      } else if (type == SrcNoteType::SetLineColumn) {
+        lineno = SrcNote::SetLineColumn::getLine(sn, startLine);
+        column = SrcNote::SetLineColumn::getColumn(sn);
+      } else if (type == SrcNoteType::NewLine) {
+        lineno++;
+        column = JS::LimitedColumnNumberOneOrigin();
+      } else if (type == SrcNoteType::NewLineColumn) {
+        lineno++;
+        column = SrcNote::NewLineColumn::getColumn(sn);
+      } else if (type == SrcNoteType::ColSpan) {
+        column += SrcNote::ColSpan::getSpan(sn);
+      } else {
+        continue;
+      }
+      AppendU32(out, uint32_t(offset));
+      AppendU32(out, lineno);
+      AppendU32(out, column.oneOriginValue());
       n++;
     }
     out[countPos] = uint8_t(n);
@@ -294,14 +351,53 @@ JS_PUBLIC_API bool JS::NightRegisterRoot(JSContext* cx,
 // environment from the tool-written region table, apply the fuse policy,
 // and enable dispatch. The tool already set each compiled script's
 // nightFuncIndex_ in the image.
+extern "C" void NightCensusTraceRearm();
+
+// `NIGHT_GC_STATS`: at exit, the minor GCs, the bytes they promoted (the
+// tenured heap's growth across each), the major GCs, and how many NightStack
+// slots the GCs traced as roots (the stack's depth at each, summed).
+static JSContext* gStatsCx = nullptr;
+static uint64_t gStatsMinor = 0, gStatsPromoted = 0, gStatsStart = 0;
+static void NightStatsNursery(JSContext* cx, JS::GCNurseryProgress p,
+                              JS::GCReason, void*) {
+  uint64_t b = JS_GetGCParameter(cx, JSGC_BYTES);
+  if (p == JS::GCNurseryProgress::GC_NURSERY_COLLECTION_START) {
+    gStatsStart = b;
+  } else {
+    gStatsMinor++;
+    if (b > gStatsStart) {
+      gStatsPromoted += b - gStatsStart;
+    }
+  }
+}
+static void NightStatsDump() {
+  fprintf(stderr,
+          "night: gcstats minor %llu promoted %llu major %u stack-traces "
+          "%llu stack-slots %llu\n",
+          (unsigned long long)gStatsMinor, (unsigned long long)gStatsPromoted,
+          unsigned(JS_GetGCParameter(gStatsCx, JSGC_MAJOR_GC_NUMBER)),
+          (unsigned long long)js::nightrt::TheNightStack(gStatsCx).traces(),
+          (unsigned long long)js::nightrt::TheNightStack(gStatsCx).tracedSlots());
+}
+
+JS_PUBLIC_API void JS::NightClearCaches(JSContext* cx) {
+  if (gNightActivated && nightrt::NightStateOf(cx)) {
+    js::night::NightClearCaches(cx);
+  }
+}
+
 JS_PUBLIC_API bool JS::NightActivate(JSContext* cx) {
+  NightCensusTraceRearm();
+  if (getenv("NIGHT_GC_STATS") && !gStatsCx) {
+    gStatsCx = cx;
+    JS::AddGCNurseryCollectionCallback(cx, NightStatsNursery, nullptr);
+    atexit(NightStatsDump);
+  }
   if (gNightActivated) {
     return true;
   }
-  // Not transformed: the module runs fully interpreted, which is not an
-  // error (e.g. a NightMonkey-enabled runtime snapshotted without the tool).
   if (!gNightRegistration.compiled) {
-    return true;
+    return false;
   }
   js::night::NightEnvDesc env;
   static_assert(sizeof(env) == sizeof(gNightRegistration.regionTable),

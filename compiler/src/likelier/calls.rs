@@ -8,9 +8,9 @@
 //! depth cap, callee cap, recursion collapse, global budget -- all bind
 //! into the callee's generic context instead.
 
-use super::engine::{CellKey, ConId, Constraint, SEED};
+use super::engine::{CellKey, ConId, Constraint, SideKey, SEED};
 use super::stats::Stats;
-use super::types::{BoundedFnSet, CtxId, FnId, ObjType, TypeSet, CTX0};
+use super::types::{BoundedFnSet, CtxId, FnId, NameId, ObjType, TypeSet, CTX0};
 use super::Solver;
 use crate::constants::{
     CALLEE_CAP, CTX_BUDGET, CTX_DEPTH_CAP, MAX_TRACKED_FORMALS, TABLE_MEMBER_CAP,
@@ -78,6 +78,14 @@ impl Ctxs {
             }
             cur = f.parent;
         }
+        // A context minted earlier stays this edge's context: the budget
+        // gates minting, not re-evaluation. Checking the budget first would
+        // send a call re-evaluated after it ran out (an input grew) to
+        // CTX0, joining that caller's arguments into the callee's generic
+        // row, for every caller, while its own row sat unchanged.
+        if let Some(&c) = self.ids.get(&(ctx, site, callee)) {
+            return c;
+        }
         let depth = self.frames[ctx.0 as usize].depth;
         if depth >= self.depth_cap {
             stats.call_ctx_degraded_depth += 1;
@@ -86,9 +94,6 @@ impl Ctxs {
         if stats.ctxs_spent >= self.budget {
             stats.call_ctx_degraded_budget += 1;
             return CTX0;
-        }
-        if let Some(&c) = self.ids.get(&(ctx, site, callee)) {
-            return c;
         }
         let c = CtxId(u32::try_from(self.frames.len()).unwrap());
         self.frames.push(CtxFrame {
@@ -146,6 +151,8 @@ struct CallAt {
     user: (ConId, CtxId),
     /// Where the call's result goes, in the caller's frame.
     ret: super::engine::CKey,
+    /// The call's receiver, if it names one.
+    this_: Option<super::engine::CKey>,
 }
 
 impl Solver<'_> {
@@ -171,6 +178,63 @@ impl Solver<'_> {
                 ctx: cx,
             });
             self.engine.raise(dst, &v, at.user);
+        }
+        // The formals the call leaves out read `undefined`. Recorded, not
+        // raised: without path sensitivity, `undefined` reaches the
+        // arithmetic its `== null` tests guard and marks the operands
+        // fractional (crypto's multipliers).
+        let passed = u32::try_from(args.len().saturating_sub(skip)).unwrap();
+        let m = self.min_actuals.entry((f, cx)).or_insert(passed);
+        *m = (*m).min(passed);
+        for i in passed..self.nargs_of(f) {
+            self.omitted_formals.insert((f, i));
+        }
+    }
+
+    /// Script `f`'s declared formal count.
+    fn nargs_of(&self, f: ScriptId) -> u32 {
+        match self.source.objects.get(f.get() as usize) {
+            Some(crate::source::SourceObject::Script(s)) => u32::from(s.nargs),
+            _ => 0,
+        }
+    }
+
+    /// The formals left out through `T.apply(this, arguments)`: T gets the
+    /// caller's actuals, so in each context as few as the caller's fewest
+    /// in the context it forwards from, transitively along forwarding
+    /// chains. Per context, so a constructor script many classes share
+    /// (`Class.create`) forwards each `new` site's count to that class's
+    /// initializer, not the fewest of any class. A context no analyzed call
+    /// binds is entered by none, unless its script escaped (then by calls
+    /// with any number: none). After the solve, like the rest of the
+    /// omissions, which nothing in it reads.
+    pub(super) fn forwarded_omissions(&mut self) {
+        let mut edges: Vec<_> = self.arg_forwards.iter().copied().collect();
+        edges.sort_unstable();
+        loop {
+            let mut changed = false;
+            for &(caller, target) in &edges {
+                let m = match self.min_actuals.get(&caller) {
+                    Some(&m) => m,
+                    None if self.escaped.contains(&FnId::script(caller.0))
+                        || self.args_escaped.contains(&caller.0) =>
+                    {
+                        0
+                    }
+                    None => continue,
+                };
+                let t = self.min_actuals.entry(target).or_insert(m);
+                if m < *t {
+                    *t = m;
+                    changed = true;
+                }
+                for i in m..self.nargs_of(target.0) {
+                    changed |= self.omitted_formals.insert((target.0, i));
+                }
+            }
+            if !changed {
+                break;
+            }
         }
     }
 
@@ -216,6 +280,12 @@ impl Solver<'_> {
         // protects: a single-owner pin binds its asserted class (strictly
         // better evidence than the lost receiver), a conflicted pin (a
         // genuinely shared method) binds the receiver itself.
+        self.bind_this_value(at, f, cx, v);
+    }
+
+    /// `bind_this`'s binding of a receiver value `v` into `f`'s `this` at
+    /// `cx`.
+    fn bind_this_value(&mut self, at: CallAt, f: ScriptId, cx: CtxId, v: TypeSet) {
         let bound = if self.bind_this_ok(f, &v) {
             v
         } else if let Some(&owner) = self.this_pin.get(&f).and_then(super::types::Agreed::get) {
@@ -241,6 +311,22 @@ impl Solver<'_> {
     /// Raise the result of calling a callee that is not a script: a modeled
     /// native's spec mask, or unknown evidence for anything unmodeled.
     fn raise_builtin_ret(&mut self, at: CallAt, f: FnId, args: &[super::engine::CKey]) {
+        // A collection's `add`/`set`/`get`: the `ElemBuiltin` beside the
+        // call raises the result; the native's unmodeled one would only
+        // bury it in unknown evidence.
+        if let (Some(i), Some(t)) = (self.natives.get(f), at.this_) {
+            let name = self.names.get(i.name);
+            if ["add", "set", "get"]
+                .iter()
+                .any(|n| super::builtins::name_eq(name, n))
+            {
+                let tc = self.engine.resolve(at.script, at.ctx, t);
+                let tts = self.engine.read(tc, at.user);
+                if self.is_coll_recv(&tts) {
+                    return;
+                }
+            }
+        }
         let v = if f.native_index().is_some() {
             let ai = self.args_integral(at.script, at.ctx, args, at.user);
             self.native_ret(f, ai)
@@ -291,6 +377,7 @@ impl Solver<'_> {
                     ctx,
                     user,
                     ret,
+                    this_,
                 };
                 let c = self.engine.resolve(script, ctx, callee);
                 let cts = self.engine.read(c, user);
@@ -299,6 +386,10 @@ impl Solver<'_> {
                     self.note_site_ctor_native(script, pc, &cts.fns);
                 } else {
                     self.note_site_native(script, pc, &cts.fns);
+                }
+                if let super::engine::CKey::Var(v) = callee {
+                    self.engine
+                        .subscribe_side(SideKey::CallVar(script, v), user);
                 }
                 let region_fed = matches!(callee, super::engine::CKey::Var(v)
                     if self.region_calls.contains(&(script, v)));
@@ -381,7 +472,19 @@ impl Solver<'_> {
                 // result reads as "no value ever arrived here", so a
                 // consumer would claim whatever its other, numeric-only
                 // writers said and miss on every call result.
-                if cts.fns.is_multi() || (cts.fns.is_empty() && cts.obj == ObjType::AnyObject) {
+                // The unknown bit with no object or function part is as
+                // unusable as AnyObject: something is called, not nothing.
+                let unresolved = cts.fns.is_empty()
+                    && (cts.obj == ObjType::AnyObject
+                        || (cts.obj == ObjType::Empty && cts.unknown));
+                if cts.fns.is_multi() || unresolved {
+                    if unresolved && !construct {
+                        if let super::engine::CKey::Var(v) = callee {
+                            if let Some(&name) = self.name_calls.get(&(script, v)) {
+                                self.bind_by_name(at, pc, name, &args, this_);
+                            }
+                        }
+                    }
                     // Fn-table dispatch: a multi callee read
                     // off a snapshot fn-table's elems still binds the join
                     // of the site's arg profiles into every member's Arg
@@ -394,6 +497,7 @@ impl Solver<'_> {
                                 let rcell = self.engine.resolve(script, ctx, rk);
                                 let rts = self.engine.read(rcell, user);
                                 if let ObjType::One(a) = rts.obj {
+                                    self.engine.subscribe_side(SideKey::Table(a), user);
                                     if self.table_members.contains_key(&a) {
                                         self.bind_table_args(a, script, ctx, &args, user);
                                     }
@@ -512,6 +616,7 @@ impl Solver<'_> {
                     ctx,
                     user,
                     ret,
+                    this_: args.first().copied(),
                 };
                 let t = self.engine.resolve(script, ctx, target);
                 let tts = self.engine.read(t, user);
@@ -532,18 +637,37 @@ impl Solver<'_> {
                     // caller-chained contexts fan out past the budget).
                     if tts.fns.is_multi() && form == CallForm::Call {
                         if let super::engine::CKey::Var(v) = target {
+                            self.engine
+                                .subscribe_side(SideKey::CallVar(script, v), user);
                             if let Some(&rk) = self.elems_callee_vars.get(&(script, v)) {
                                 let rcell = self.engine.resolve(script, ctx, rk);
                                 let rts = self.engine.read(rcell, user);
+                                // `t[0].call(t[1], ...)`: the receiver is
+                                // the same table's element, so each
+                                // table's members take that table's scope.
+                                let paired = super::TABLE_SCOPES
+                                    && matches!(args.first(), Some(&super::engine::CKey::Var(tv))
+                                        if self.elems_callee_vars.get(&(script, tv)) == Some(&rk));
+                                let tables: Vec<super::types::AbsId> = match rts.obj {
+                                    ObjType::One(a) => vec![a],
+                                    ObjType::ClassAny(c) => {
+                                        self.class_tables.get(&c).cloned().unwrap_or_default()
+                                    }
+                                    _ => vec![],
+                                };
                                 let members: Vec<FnId> = match rts.obj {
-                                    ObjType::One(a) => self
-                                        .table_members
-                                        .get(&a)
-                                        .map_or_else(Vec::new, |m| m.iter().copied().collect()),
-                                    ObjType::ClassAny(c) => self
-                                        .class_table_members
-                                        .get(&c)
-                                        .map_or_else(Vec::new, |m| m.iter().copied().collect()),
+                                    ObjType::One(a) => {
+                                        self.engine.subscribe_side(SideKey::Table(a), user);
+                                        self.table_members
+                                            .get(&a)
+                                            .map_or_else(Vec::new, |m| m.iter().copied().collect())
+                                    }
+                                    ObjType::ClassAny(c) => {
+                                        self.engine.subscribe_side(SideKey::ClassTable(c), user);
+                                        self.class_table_members
+                                            .get(&c)
+                                            .map_or_else(Vec::new, |m| m.iter().copied().collect())
+                                    }
                                     _ => Vec::new(),
                                 };
                                 let mut members = members;
@@ -564,7 +688,33 @@ impl Solver<'_> {
                                     if self.engine.instantiate(f, cx) {
                                         self.stats.ctxs_spent += 1;
                                     }
-                                    if let Some(&recv) = args.first() {
+                                    // The tables `f` was written into
+                                    // beside its scope (a member a degraded
+                                    // arg row added has no scope there).
+                                    let own: Vec<super::types::AbsId> = if paired {
+                                        tables
+                                            .iter()
+                                            .copied()
+                                            .filter(|a| {
+                                                self.table_direct
+                                                    .get(a)
+                                                    .is_some_and(|m| m.contains(&FnId::script(f)))
+                                            })
+                                            .collect()
+                                    } else {
+                                        vec![]
+                                    };
+                                    if !own.is_empty() {
+                                        // Their scopes (subscribed: a
+                                        // table's scope may grow later).
+                                        for &a in &own {
+                                            self.engine.subscribe_side(SideKey::Table(a), user);
+                                            let sc =
+                                                self.engine.cell(CellKey::TableScope { abs: a });
+                                            let v = self.engine.read(sc, user);
+                                            self.bind_this_value(at, f, cx, v);
+                                        }
+                                    } else if let Some(&recv) = args.first() {
                                         self.bind_this(at, f, cx, recv, false);
                                     }
                                     self.bind_args(at, f, cx, &args, 1);
@@ -590,7 +740,8 @@ impl Solver<'_> {
                         self.bind_args(at, f, cx, &args, 1);
                     } else if arg1_is_arguments {
                         // `T.apply(this, arguments)`: forward the caller's
-                        // own argument rows.
+                        // own argument rows (and its omissions).
+                        self.arg_forwards.insert(((script, ctx), (f, cx)));
                         for i in 0..MAX_TRACKED_FORMALS {
                             let arg = FormalIndex::new(i);
                             let src = self.engine.cell(CellKey::Arg { script, arg, ctx });
@@ -819,7 +970,9 @@ impl Solver<'_> {
     /// Insert members into a table's list (capped, censused) and extend
     /// the standing links if the table already has dispatch sites.
     pub(super) fn add_table_members(&mut self, a: super::types::AbsId, ids: &[FnId]) {
+        let fresh = !self.table_members.contains_key(&a);
         let e = self.table_members.entry(a).or_default();
+        let mut grew = fresh;
         for &f in ids {
             if e.len() >= TABLE_MEMBER_CAP {
                 if !e.contains(&f) {
@@ -827,15 +980,26 @@ impl Solver<'_> {
                 }
                 continue;
             }
-            e.insert(f);
+            grew |= e.insert(f);
+        }
+        if grew {
+            self.engine.fire_side(SideKey::Table(a));
         }
         if let Some(c) = self.heap[a].class {
+            let tables = self.class_tables.entry(c).or_default();
+            if !tables.contains(&a) {
+                tables.push(a);
+            }
             let ce = self.class_table_members.entry(c).or_default();
+            let mut grew = false;
             for &f in ids {
                 if ce.len() >= TABLE_MEMBER_CAP {
                     break;
                 }
-                ce.insert(f);
+                grew |= ce.insert(f);
+            }
+            if grew {
+                self.engine.fire_side(SideKey::ClassTable(c));
             }
         }
         self.install_table_links(a);
@@ -875,6 +1039,47 @@ impl Solver<'_> {
 
     /// An executed-but-unresolved call result: raise the unknown evidence
     /// bit into the return destination (see `TypeSet::unknown`).
+    /// A method call off a receiver the analysis could not resolve
+    /// (`name_calls`): its target is one of the functions some object holds
+    /// under `name`. Where the snapshot holds at most `callee_cap` of them,
+    /// the arguments (and `this`) bind into each, at a depth-1 context per
+    /// (site, target) parented at the generic one, as a region dispatch's
+    /// guess does: a method reached only through such calls then sees the
+    /// values passed, not Empty formals, and no other caller's context sees
+    /// the guess. The result stays the unknown evidence the caller raised.
+    fn bind_by_name(
+        &mut self,
+        at: CallAt,
+        pc: Pc,
+        name: NameId,
+        args: &[super::engine::CKey],
+        this_: Option<super::engine::CKey>,
+    ) {
+        self.engine.subscribe_side(SideKey::NamedFns(name), at.user);
+        let cands = self.named_fns_for(name);
+        if cands.is_empty() || cands.len() > self.ctxs.callee_cap {
+            return;
+        }
+        for f in cands {
+            let cx = self
+                .ctxs
+                .push(CTX0, Site::new(at.script, pc), f, &mut self.stats);
+            if cx == CTX0 {
+                // No context for the guess: the formals take the unknown
+                // evidence instead, as a computed-name dispatch's do.
+                self.escape_args(f);
+                continue;
+            }
+            if self.engine.instantiate(f, cx) {
+                self.stats.ctxs_spent += 1;
+            }
+            self.bind_args(at, f, cx, args, 0);
+            if let Some(tk) = this_ {
+                self.bind_this(at, f, cx, tk, true);
+            }
+        }
+    }
+
     fn raise_unknown_ret(
         &mut self,
         script: ScriptId,
@@ -909,6 +1114,26 @@ impl Solver<'_> {
     /// Precise receivers bind normally.
     fn bind_this_ok(&self, f: ScriptId, v: &TypeSet) -> bool {
         !(self.this_pin.contains_key(&f) && matches!(v.obj, ObjType::AnyObject | ObjType::AnyOf(_)))
+    }
+
+    /// A function called with arguments no call edge binds (computed-name
+    /// dispatch, `KeyedRead`): unresolved evidence into its formals at the
+    /// generic context, once. Unlike `do_escape`, `this` is kept: the
+    /// dispatch's receiver is the object the method was read from, and the
+    /// body's entry guards `this` to its class.
+    pub(super) fn escape_args(&mut self, script: ScriptId) {
+        if !self.args_escaped.insert(script) {
+            return;
+        }
+        let any = TypeSet::unresolved();
+        for i in 0..MAX_TRACKED_FORMALS {
+            let c = self.engine.cell(CellKey::Arg {
+                script,
+                arg: FormalIndex::new(i),
+                ctx: CTX0,
+            });
+            self.engine.raise(c, &any, (SEED, CTX0));
+        }
     }
 
     /// Escape: function values reaching an untracked sink get Any joined

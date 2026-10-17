@@ -44,7 +44,9 @@
 //! Field *values* have no such rule: they always join.
 
 use super::builtins::{self, NativeKind};
-use super::engine::{AllocKind, CellId, CellKey, ConId, Constraint, ElemBuiltinKind, SEED};
+use super::engine::{
+    AllocKind, CellId, CellKey, ConId, Constraint, ElemBuiltinKind, SideKey, SEED,
+};
 use super::types::{observe, Agreed};
 use super::types::{AbsId, AbsLabels, ClassId, CtxId, FnId, NameId, ObjType, TypeSet, CTX0};
 use super::{RecvKind, SharedCtorSite, Solver};
@@ -109,6 +111,10 @@ pub struct Abstraction {
     /// merge into a region that keeps its element view, an array and a
     /// non-array collapse to AnyObject) and the array-claim emission.
     pub is_array: bool,
+    /// Whether this abstraction is a keyed collection (`AllocKind::
+    /// Collection`), whose `add`/`set`/`get` move values through its
+    /// `ELEMS` cell.
+    pub is_coll: bool,
     /// Whether the transcribed snapshot object's properties have been
     /// copied into this abstraction's field cells yet (`ensure_seeded`).
     /// Seeding is lazy -- a bundle has far more snapshot objects than the
@@ -140,6 +146,8 @@ pub struct ClassInfo {
     /// Site classes only: whether the allocation makes a JS Array. See
     /// [`Abstraction::is_array`].
     pub is_array: bool,
+    /// Site classes only: [`Abstraction::is_coll`].
+    pub is_coll: bool,
 }
 
 #[derive(Default)]
@@ -172,6 +180,10 @@ pub struct Heap {
     /// objects and a slot row would arm a guard that misses forever.
     pub dyn_named_writes: HashSet<Site>,
 }
+
+/// Whether an element access whose key is only string constants (none an
+/// index) is the named access of each (`Solver::const_key_names`).
+pub(super) const CONST_KEYS: bool = true;
 
 impl Heap {
     pub fn class_id(&self, key: ClassKey) -> Option<ClassId> {
@@ -589,6 +601,7 @@ impl Solver<'_> {
             proto_of: None,
             ta_kind: None,
             is_array: false,
+            is_coll: false,
             seeded: false,
         });
         // The engine's parallel join-metadata vec (consulted by every
@@ -712,6 +725,7 @@ impl Solver<'_> {
             sources: Vec::new(),
             ta_kind: None,
             is_array: false,
+            is_coll: false,
         });
         self.heap.class_ids.insert(key, c);
         let pa = self.new_abs(AbsKey::ProtoOf(c));
@@ -974,6 +988,7 @@ impl Solver<'_> {
             return;
         }
         self.heap[c].sources.push(src);
+        self.engine.fire_side(SideKey::Sources(c));
         if let AbsKey::Alloc { script, pc, .. } = self.heap[src].key {
             self.heap.site_is_proto.insert(Site::new(script, pc));
         }
@@ -1029,6 +1044,17 @@ impl Solver<'_> {
         self.field_cell(abs, name)
     }
 
+    /// Whether a receiver's object part is a keyed collection (one
+    /// abstraction or one class of them): what gates the collection
+    /// builtins, whose names user classes use too.
+    pub(super) fn is_coll_recv(&self, rts: &TypeSet) -> bool {
+        match rts.obj {
+            ObjType::One(a) => self.heap[a].is_coll,
+            ObjType::ClassAny(c) => self.heap[c].is_coll,
+            _ => false,
+        }
+    }
+
     /// The bundle-wide union of every array abstraction's elements.
     fn elems_union(&mut self) -> CellId {
         self.engine.cell(CellKey::ArrayElemsUnion)
@@ -1038,6 +1064,17 @@ impl Solver<'_> {
     fn read_join(&mut self, cell: CellId, user: (ConId, CtxId), out: &mut TypeSet) {
         let v = self.engine.read(cell, user);
         let _ = self.engine.join_ts(out, &v);
+    }
+
+    /// Subscribe an access whose cells depend on region membership: an
+    /// `AnyOf` receiver (the region's views and method tables) and an
+    /// element access through `ClassAny` (the region root's view).
+    fn subscribe_region_recv(&mut self, rts: &TypeSet, is_elems: bool, user: (ConId, CtxId)) {
+        match rts.obj {
+            ObjType::AnyOf(r) => self.engine.subscribe_region(r, user),
+            ObjType::ClassAny(c) if is_elems => self.engine.subscribe_region(c, user),
+            _ => {}
+        }
     }
 
     /// The class of the view a receiver of class `c` reads `name` through.
@@ -1062,6 +1099,7 @@ impl Solver<'_> {
         }
         let cell = self.engine.cell(key);
         self.heap.fields_of.entry(abs).or_default().push(name);
+        self.engine.fire_side(SideKey::Fields(abs));
         let info = &self.heap[abs];
         let proto_of = info.proto_of;
         let owner = info.owner_class;
@@ -1104,6 +1142,54 @@ impl Solver<'_> {
 
     /// Pre-fill a snapshot abstraction's field cells from the transcribed
     /// heap, once, on first field access.
+    /// The scripted functions the snapshot holds as the value of a property
+    /// named `name`, on any object (`name_calls`' candidates).
+    pub(super) fn named_fns_for(&mut self, name: NameId) -> Vec<ScriptId> {
+        if self.named_fns.is_none() {
+            let mut m: HashMap<NameId, Vec<ScriptId>> = HashMap::default();
+            for (_, obj) in self.source.objects() {
+                let SourceObject::Object(ObjectData {
+                    non_native: false,
+                    properties,
+                    ..
+                }) = obj
+                else {
+                    continue;
+                };
+                for (k, v) in properties.iter() {
+                    if k.is_other() {
+                        continue;
+                    }
+                    let Some(SVal::Fn(s)) = sval(self.source, *v) else {
+                        continue;
+                    };
+                    let SourceObject::String(key) = self.source.object(*k) else {
+                        continue;
+                    };
+                    let n = self.names.intern(key.chars());
+                    let fs = m.entry(n).or_default();
+                    if !fs.contains(&s) {
+                        fs.push(s);
+                    }
+                }
+            }
+            self.named_fns = Some(m);
+        }
+        let mut fs = self
+            .named_fns
+            .as_ref()
+            .unwrap()
+            .get(&name)
+            .cloned()
+            .unwrap_or_default();
+        for &f in self.dyn_named_fns.get(&name).map_or(&[][..], |v| &v[..]) {
+            if !fs.contains(&f) {
+                fs.push(f);
+            }
+        }
+        fs
+    }
+
     pub(super) fn ensure_seeded(&mut self, abs: AbsId) {
         if self.heap[abs].seeded {
             return;
@@ -1268,8 +1354,89 @@ impl Solver<'_> {
             .filter(|&f| !f.is_builtin())
             .collect();
         if !ids.is_empty() {
+            let d = self.table_direct.entry(a).or_default();
+            for &f in &ids {
+                d.insert(f);
+            }
             self.add_table_members(a, &ids);
         }
+    }
+
+    /// Every named field a computed-key read of `rts` may return: the
+    /// fields of each object the receiver may be, and of its prototype
+    /// chain (elements excepted: the `Read` beside it has those), joined
+    /// into `out`, subscribing the reader. Returns the scripted functions
+    /// among them. An `AnyOf` receiver contributes its region's classes'
+    /// prototype chains; arrays, `AnyObject` and unresolved receivers
+    /// contribute nothing here (the elements read, and escape, cover them).
+    fn named_fields_join(
+        &mut self,
+        rts: &TypeSet,
+        user: (ConId, CtxId),
+        out: &mut TypeSet,
+    ) -> Vec<ScriptId> {
+        let mut holders: Vec<AbsId> = vec![];
+        match rts.obj {
+            ObjType::One(a) if !self.heap[a].is_array => holders.push(a),
+            ObjType::ClassAny(c) if !self.heap[c].is_array => holders.push(self.heap[c].proto_abs),
+            ObjType::AnyOf(r) => {
+                let root = self.engine.region_root(r);
+                let members = self
+                    .engine
+                    .region_members
+                    .get(&root)
+                    .cloned()
+                    .unwrap_or_else(|| vec![root]);
+                if members.len() <= crate::constants::REGION_VIEW_CAP {
+                    holders.extend(members.iter().map(|&m| self.heap[m].proto_abs));
+                }
+            }
+            _ => {}
+        }
+        let elems = self.names_of.elems;
+        let mut seen: std::collections::BTreeSet<AbsId> = std::collections::BTreeSet::new();
+        let mut fns: Vec<ScriptId> = vec![];
+        while let Some(h) = holders.pop() {
+            let mut cur = h;
+            for _ in 0..CHAIN_DEPTH {
+                if !seen.insert(cur) {
+                    break;
+                }
+                // A class's synthetic method table holds only the names
+                // some site has read by name; the concrete prototypes that
+                // feed it hold them all.
+                if let Some(c) = self.heap[cur].proto_of {
+                    self.engine.subscribe_side(SideKey::Sources(c), user);
+                    holders.extend(self.heap[c].sources.iter().copied());
+                }
+                self.ensure_seeded(cur);
+                self.engine.subscribe_side(SideKey::Fields(cur), user);
+                let names = self.heap.fields_of.get(&cur).cloned().unwrap_or_default();
+                for n in names {
+                    if n == elems {
+                        continue;
+                    }
+                    let cell = self.field_cell(cur, n);
+                    let v = self.engine.read(cell, user);
+                    for f in v.fns.scripted() {
+                        if !fns.contains(&f) {
+                            fns.push(f);
+                        }
+                    }
+                    let _ = self.engine.join_ts(out, &v);
+                }
+                match self.heap[cur].proto {
+                    ProtoLink::Abs(p) => cur = p,
+                    ProtoLink::None => {
+                        // A later prototype install extends the chain.
+                        let sent = self.engine.cell(CellKey::ProtoSentinel(cur));
+                        let _ = self.engine.read(sent, user);
+                        break;
+                    }
+                }
+            }
+        }
+        fns
     }
 
     /// Monotone chain join from `holder`'s proto upward: joins each level's
@@ -1401,6 +1568,134 @@ impl Solver<'_> {
         }
     }
 
+    /// An element access's key, where its value is only string constants
+    /// that are not indexes: those names, whose named accesses the access
+    /// is (an empty list where no key has arrived yet). `None` for any
+    /// other key, or no key. Each site's single agreed name is
+    /// recorded (`keyed_site_names`) for the facts.
+    fn const_key_names(
+        &mut self,
+        sid: ScriptId,
+        ctx: CtxId,
+        key: Option<super::engine::CKey>,
+        pc: Pc,
+        user: (ConId, CtxId),
+    ) -> Option<Vec<NameId>> {
+        let key = key?;
+        let k = self.engine.resolve(sid, ctx, key);
+        let kts = self.engine.read(k, user);
+        let site = Site::new(sid, pc);
+        let names = if CONST_KEYS {
+            kts.const_names(&self.names)
+        } else {
+            None
+        };
+        match &names {
+            Some(ns) => {
+                for &n in ns {
+                    self.keyed_site_names.entry(site).or_default().observe(n);
+                }
+            }
+            None => {
+                self.keyed_site_names.insert(site, Agreed::Conflict);
+            }
+        }
+        names
+    }
+
+    /// A read of `recv.name` into `dst` (`Constraint::Read`).
+    #[allow(clippy::too_many_arguments)]
+    fn eval_read(
+        &mut self,
+        sid: ScriptId,
+        ctx: CtxId,
+        user: (ConId, CtxId),
+        recv: super::engine::CKey,
+        name: NameId,
+        dst: super::engine::CKey,
+        pc: Pc,
+        callee_pos: bool,
+    ) {
+        let r = self.engine.resolve(sid, ctx, recv);
+        let rts = self.engine.read(r, user);
+        self.trace_site_eval(sid, pc, ctx, recv, r, &rts);
+        let d = self.engine.resolve(sid, ctx, dst);
+        let mut out = TypeSet::default();
+        let region_contributed = self.read_into(&rts, name, callee_pos, user, &mut out);
+        if callee_pos && region_contributed {
+            if let super::engine::CKey::Var(v) = dst {
+                if self.region_calls.insert((sid, v)) {
+                    self.engine.fire_side(SideKey::CallVar(sid, v));
+                }
+            }
+        }
+        // A method read off an unresolved receiver: the call's
+        // target is some function held under `name` (bind_by_name).
+        let unresolved_recv =
+            rts.obj == ObjType::AnyObject || (rts.obj == ObjType::Empty && rts.unknown);
+        if callee_pos && unresolved_recv && name != self.names_of.elems {
+            if let super::engine::CKey::Var(v) = dst {
+                if self.name_calls.insert((sid, v), name).is_none() {
+                    self.engine.fire_side(SideKey::CallVar(sid, v));
+                }
+            }
+        }
+        // Recorded for every elems read, not just callee position:
+        // an apply-form dispatch (`action[0].call(...)`) consumes
+        // the read's result as its TARGET, and the fn-table
+        // fallback needs the same provenance there.
+        if name == self.names_of.elems {
+            if let super::engine::CKey::Var(v) = dst {
+                if self.elems_callee_vars.insert((sid, v), recv) != Some(recv) {
+                    self.engine.fire_side(SideKey::CallVar(sid, v));
+                }
+            }
+        }
+        self.note_site_recv(sid, pc, &rts);
+        self.note_site_evidence(sid, pc, name, &rts, Some(&out));
+        self.engine.raise(d, &out, user);
+    }
+
+    /// A write of `src` into `recv.name` (`Constraint::Write`).
+    #[allow(clippy::too_many_arguments)]
+    fn eval_write(
+        &mut self,
+        sid: ScriptId,
+        ctx: CtxId,
+        user: (ConId, CtxId),
+        recv: super::engine::CKey,
+        name: NameId,
+        src: super::engine::CKey,
+        pc: Pc,
+    ) {
+        let r = self.engine.resolve(sid, ctx, recv);
+        let rts = self.engine.read(r, user);
+        let s = self.engine.resolve(sid, ctx, src);
+        let v = self.engine.read(s, user);
+        if name == self.names_of.elems {
+            if let ObjType::One(a) = rts.obj {
+                // A non-function element beside a table's
+                // functions: the pair's scope.
+                let mut scope = v.clone();
+                scope.fns = Default::default();
+                if super::TABLE_SCOPES && !scope.is_empty() {
+                    let c = self.engine.cell(CellKey::TableScope { abs: a });
+                    self.engine.raise(c, &scope, user);
+                }
+                self.note_table_members(a, src, sid, &v);
+                if let AbsKey::Alloc { script, pc, .. } = self.heap[a].key {
+                    self.heap.dyn_named_writes.insert(Site::new(script, pc));
+                }
+            }
+        }
+        self.note_site_evidence(sid, pc, name, &rts, None);
+        let this_recv = recv == super::engine::CKey::This && name != self.names_of.elems;
+        if this_recv {
+            self.this_field_raise(sid, name, &v, user);
+        }
+        self.write_into(&rts, name, &v, this_recv, user);
+    }
+
     pub(super) fn eval_heap(&mut self, con: ConId, ctx: CtxId) -> bool {
         let sid = self.engine.con_script[con.0 as usize];
         let user = (con, ctx);
@@ -1411,30 +1706,17 @@ impl Solver<'_> {
                 dst,
                 pc,
                 callee_pos,
+                key,
             } => {
-                let r = self.engine.resolve(sid, ctx, recv);
-                let rts = self.engine.read(r, user);
-                self.trace_site_eval(sid, pc, ctx, recv, r, &rts);
-                let d = self.engine.resolve(sid, ctx, dst);
-                let mut out = TypeSet::default();
-                let region_contributed = self.read_into(&rts, name, callee_pos, user, &mut out);
-                if callee_pos && region_contributed {
-                    if let super::engine::CKey::Var(v) = dst {
-                        self.region_calls.insert((sid, v));
+                // A string constant key reads its names; and, like any
+                // key, the elements, where writes under keys that were not
+                // constants went (any of which may have been one of them).
+                if let Some(names) = self.const_key_names(sid, ctx, key, pc, user) {
+                    for n in names {
+                        self.eval_read(sid, ctx, user, recv, n, dst, pc, callee_pos);
                     }
                 }
-                // Recorded for every elems read, not just callee position:
-                // an apply-form dispatch (`action[0].call(...)`) consumes
-                // the read's result as its TARGET, and the fn-table
-                // fallback needs the same provenance there.
-                if name == self.names_of.elems {
-                    if let super::engine::CKey::Var(v) = dst {
-                        self.elems_callee_vars.insert((sid, v), recv);
-                    }
-                }
-                self.note_site_recv(sid, pc, &rts);
-                self.note_site_evidence(sid, pc, name, &rts, Some(&out));
-                self.engine.raise(d, &out, user);
+                self.eval_read(sid, ctx, user, recv, name, dst, pc, callee_pos);
                 true
             }
             Constraint::Write {
@@ -1442,25 +1724,46 @@ impl Solver<'_> {
                 name,
                 src,
                 pc,
+                key,
             } => {
-                let r = self.engine.resolve(sid, ctx, recv);
-                let rts = self.engine.read(r, user);
-                let s = self.engine.resolve(sid, ctx, src);
-                let v = self.engine.read(s, user);
-                if name == self.names_of.elems {
-                    if let ObjType::One(a) = rts.obj {
-                        self.note_table_members(a, src, sid, &v);
-                        if let AbsKey::Alloc { script, pc, .. } = self.heap[a].key {
-                            self.heap.dyn_named_writes.insert(Site::new(script, pc));
+                // A string constant key writes its names only; a key with no
+                // evidence (which may be anything at run time) or any other
+                // writes the elements, as before.
+                match self.const_key_names(sid, ctx, key, pc, user) {
+                    Some(names) if !names.is_empty() => {
+                        for n in names {
+                            self.eval_write(sid, ctx, user, recv, n, src, pc);
                         }
                     }
+                    _ => self.eval_write(sid, ctx, user, recv, name, src, pc),
                 }
-                self.note_site_evidence(sid, pc, name, &rts, None);
-                let this_recv = recv == super::engine::CKey::This && name != self.names_of.elems;
-                if this_recv {
-                    self.this_field_raise(sid, name, &v, user);
+                true
+            }
+            Constraint::KeyedRead { recv, key, dst, .. } => {
+                let k = self.engine.resolve(sid, ctx, key);
+                let kts = self.engine.read(k, user);
+                // A string constant key: the element read beside this one
+                // reads those names (`const_key_names`), not every field.
+                if CONST_KEYS && kts.const_names(&self.names).is_some() {
+                    return true;
                 }
-                self.write_into(&rts, name, &v, this_recv, user);
+                let named = kts.unknown
+                    || kts.prims.intersects(PRIM_STRING | PRIM_SYMBOL)
+                    || kts.obj != ObjType::Empty;
+                if !named {
+                    return true;
+                }
+                let r = self.engine.resolve(sid, ctx, recv);
+                let rts = self.engine.read(r, user);
+                let mut out = TypeSet::default();
+                let fns = self.named_fields_join(&rts, user, &mut out);
+                for f in fns {
+                    self.escape_args(f);
+                }
+                if !out.is_empty() {
+                    let d = self.engine.resolve(sid, ctx, dst);
+                    self.engine.raise(d, &out, user);
+                }
                 true
             }
             Constraint::Alloc { dst, pc, kind } => {
@@ -1470,6 +1773,14 @@ impl Solver<'_> {
                     AllocKind::Array => self.intern_alloc(sid, pc, ctx, None, true, None),
                     AllocKind::TypedArray(k) => {
                         self.intern_alloc(sid, pc, ctx, None, false, Some(k))
+                    }
+                    AllocKind::Collection { .. } => {
+                        let a = self.intern_alloc(sid, pc, ctx, None, false, None);
+                        self.heap[a].is_coll = true;
+                        if let Some(c) = self.heap[a].class {
+                            self.heap[c].is_coll = true;
+                        }
+                        a
                     }
                 };
                 let d = self.engine.resolve(sid, ctx, dst);
@@ -1487,7 +1798,30 @@ impl Solver<'_> {
                 let rts = self.engine.read(r, user);
                 let d = self.engine.resolve(sid, ctx, ret);
                 let elems = self.names_of.elems;
-                if kind == ElemBuiltinKind::Write {
+                if matches!(
+                    kind,
+                    ElemBuiltinKind::CollAdd | ElemBuiltinKind::CollSet | ElemBuiltinKind::CollGet
+                ) {
+                    if !self.is_coll_recv(&rts) {
+                        return true;
+                    }
+                    let recv_obj = TypeSet {
+                        obj: rts.obj,
+                        ..TypeSet::default()
+                    };
+                    if kind == ElemBuiltinKind::CollGet {
+                        let mut out = TypeSet::prim(PRIM_UNDEFINED);
+                        let _ = self.read_into(&recv_obj, elems, false, user, &mut out);
+                        self.engine.raise(d, &out, user);
+                    } else {
+                        if let Some(arg) = arg {
+                            let s = self.engine.resolve(sid, ctx, arg);
+                            let v = self.engine.read(s, user);
+                            self.write_into(&recv_obj, elems, &v, false, user);
+                        }
+                        self.engine.raise(d, &recv_obj, user);
+                    }
+                } else if kind == ElemBuiltinKind::Write {
                     if let Some(arg) = arg {
                         let s = self.engine.resolve(sid, ctx, arg);
                         let v = self.engine.read(s, user);
@@ -1520,6 +1854,7 @@ impl Solver<'_> {
         self.trace_field("read", name, rts, None, user);
         let mut region_contributed = false;
         let is_elems = name == self.names_of.elems;
+        self.subscribe_region_recv(rts, is_elems, user);
         let chain_ok = !is_elems;
         // Prim-receiver method resolution: a call off a known-string or
         // known-numeric receiver resolves modeled String/Number.prototype
@@ -1626,24 +1961,31 @@ impl Solver<'_> {
                         }
                         any.fns = fns;
                     }
-                    // The region's aggregated view, subscribing the reader.
-                    // The `unknown` witness is still joined alongside it
-                    // (the view is a union of the writes the analysis SAW,
-                    // and writes at an `AnyObject` receiver are dropped by
-                    // design, so it can under-approximate) -- but the
-                    // witness carries NO object component: joined as
-                    // `AnyObject` it absorbed the view's population
-                    // (`join_obj(AnyOf, AnyObject) = AnyObject`), so every
-                    // value read off a region-typed receiver degraded to
-                    // `unk|obj:any` and spread AnyObject through the pool
-                    // and free-list fields it was stored into. The region
-                    // IS the merged fact; `unknown` says the rest honestly.
+                    // The region's field: its own writes and every member
+                    // class's (`region_field`), subscribing the reader. The
+                    // union of what the analysis saw written, taken as the
+                    // value with no `unknown` witness beside it: writes at
+                    // an `AnyObject` receiver are dropped, so it can
+                    // under-approximate, which the facts' guards answer.
+                    // That is the bet: objects are typed tightly where they
+                    // are made and set up, and a read out in the world,
+                    // where they have met, does better with the union of
+                    // their classes' fields than with nothing.
                     any.obj = ObjType::Empty;
-                    if let Some(view) = self.region_view(r, name) {
-                        let v = self.engine.read(view, user);
-                        let _ = self.engine.join_ts(out, &v);
+                    match self.region_field(r, name) {
+                        Some(cell) => {
+                            let v = self.engine.read(cell, user);
+                            let _ = self.engine.join_ts(out, &v);
+                            let methods = TypeSet {
+                                fns: any.fns,
+                                ..TypeSet::default()
+                            };
+                            let _ = self.engine.join_ts(out, &methods);
+                        }
+                        None => {
+                            let _ = self.engine.join_ts(out, &any);
+                        }
                     }
-                    let _ = self.engine.join_ts(out, &any);
                 }
             }
             ObjType::AnyObject => {
@@ -1660,30 +2002,21 @@ impl Solver<'_> {
         region_contributed
     }
 
-    /// The region's field view for `name`: the ROOT class's view cell, with
-    /// every member's view linked into it and back out again.
+    /// The region's field for `name`, as a region-typed read sees it: the
+    /// region's own cell (the writes whose receiver was only known to the
+    /// region) fed by every member class's view and by the cells of the
+    /// roots merged into it. One way only: a class-level read never sees a
+    /// region write, so the classes keep the precision they were set up
+    /// with, and the fuzzier region reads pick up everything they hold.
     ///
-    /// One tier up from `class_field_cell`, and the same shape: an
-    /// abstraction's field cell is linked up into `ClassView`, so a write
-    /// through a precise receiver is seen by a `ClassAny` read; this links a
-    /// class's view up into the region's, so a write through a classed
-    /// receiver is seen by an `AnyOf` read, and back down, so a write at
-    /// region granularity is seen by class- and alloc-site-level reads. That
-    /// second direction is the point: without it, a write whose receiver
-    /// is only known to a region would be dropped outright, emptying the
-    /// field for every reader.
+    /// The root moves as later meets union regions, so the cell is keyed by
+    /// the current root and re-linked lazily on each access; `link` is
+    /// idempotent, so a repeat costs a hash lookup.
     ///
-    /// Deliberately NOT a new cell kind. The region root moves as later
-    /// meets union regions, so a view keyed by the root at creation time
-    /// would go stale; using the root's own `ClassView` and re-linking
-    /// lazily on each access makes that self-healing -- after a merge the
-    /// next access relinks against the new root and member set, and `link`
-    /// is idempotent, so the repeat costs a hash lookup.
-    ///
-    /// Capped like `region_methods`: a mega-region is honestly megamorphic,
-    /// its union is worth nothing, and the linking is O(members). Past the
-    /// cap there is no view and the caller keeps the old behaviour.
-    fn region_view(&mut self, r: ClassId, name: NameId) -> Option<CellId> {
+    /// Capped: a mega-region is honestly megamorphic, its union is worth
+    /// nothing, and the linking is O(members). Past the cap there is no
+    /// field and the caller keeps the unknown witness.
+    fn region_field(&mut self, r: ClassId, name: NameId) -> Option<CellId> {
         let root = self.engine.region_root(r);
         let members = self
             .engine
@@ -1694,16 +2027,17 @@ impl Solver<'_> {
         if members.len() > crate::constants::REGION_VIEW_CAP {
             return None;
         }
-        let view = self.engine.cell(CellKey::ClassView { class: root, name });
+        let cell = self.engine.cell(CellKey::RegionField { class: root, name });
         for m in members {
-            if m == root {
-                continue;
-            }
             let mv = self.engine.cell(CellKey::ClassView { class: m, name });
-            self.engine.link(mv, view);
-            self.engine.link(view, mv);
+            self.engine.link(mv, cell);
+            if m != root {
+                if let Some(old) = self.engine.lookup(CellKey::RegionField { class: m, name }) {
+                    self.engine.link(old, cell);
+                }
+            }
         }
-        Some(view)
+        Some(cell)
     }
 
     /// The region's method-table union for `name`: join the fn sets of each
@@ -1870,6 +2204,20 @@ impl Solver<'_> {
     ) {
         self.trace_field("write", name, rts, Some(v), user);
         let is_elems = name == self.names_of.elems;
+        self.subscribe_region_recv(rts, is_elems, user);
+        if !is_elems && !v.fns.is_multi() {
+            let mut grew = false;
+            for f in v.fns.scripted() {
+                let fs = self.dyn_named_fns.entry(name).or_default();
+                if !fs.contains(&f) {
+                    fs.push(f);
+                    grew = true;
+                }
+            }
+            if grew {
+                self.engine.fire_side(SideKey::NamedFns(name));
+            }
+        }
         if rts.fns.is_multi() {
             self.do_escape(v, user);
         } else {
@@ -1945,26 +2293,27 @@ impl Solver<'_> {
                 self.accessor_write(c, name, v, user);
             }
             ObjType::AnyOf(r) if !is_elems => {
-                // A write whose receiver is known to a region: raise it into
-                // the region's view, which is linked down into every
-                // member's class view, so class- and alloc-site-level reads
-                // see it. Dropping this was what emptied a field for every
-                // reader when one write site lost its receiver class.
+                // A write whose receiver is known to a region: the region's
+                // own field, which region-typed reads see and class-level
+                // reads do not (`region_field`). The value stays tracked --
+                // a function stored there is called through those reads --
+                // so it escapes only where the region is past the cap and
+                // the write is dropped.
                 //
                 // `AnyObject` deliberately keeps the drop (below): it is not
                 // a bounded set of classes that met, it is everything, and
                 // distributing a write to every object in the program would
                 // pollute far more than it recovers.
-                match self.region_view(r, name) {
-                    Some(view) => self.engine.raise(view, v, user),
+                match self.region_field(r, name) {
+                    Some(cell) => self.engine.raise(cell, v, user),
                     None => {
                         self.stats.dropped_writes += 1;
                         if this_recv {
                             self.stats.dropped_this_writes += 1;
                         }
+                        self.do_escape(v, user);
                     }
                 }
-                self.do_escape(v, user);
             }
             ObjType::AnyOf(_) | ObjType::AnyObject => {
                 if is_elems {
@@ -2264,6 +2613,7 @@ mod tests {
         mk(
             &mut sv,
             Constraint::Write {
+                key: None,
                 recv: CKey::Var(VarId::new(0)),
                 name: n,
                 src: CKey::Var(VarId::new(1)),
@@ -2280,6 +2630,7 @@ mod tests {
         mk(
             &mut sv,
             Constraint::Read {
+                key: None,
                 recv: CKey::Var(VarId::new(2)),
                 name: n,
                 dst: CKey::Var(VarId::new(3)),
@@ -2305,6 +2656,7 @@ mod tests {
         mk(
             &mut sv,
             Constraint::Read {
+                key: None,
                 recv: CKey::Var(VarId::new(4)),
                 name: n,
                 dst: CKey::Var(VarId::new(5)),
@@ -2348,6 +2700,7 @@ mod tests {
                 ts: TypeSet::prim(PRIM_DOUBLE),
             },
             Constraint::Write {
+                key: None,
                 recv: CKey::Var(VarId::new(0)),
                 name: n,
                 src: CKey::Var(VarId::new(1)),
@@ -2358,6 +2711,7 @@ mod tests {
                 ts: TypeSet::obj_one(a),
             },
             Constraint::Read {
+                key: None,
                 recv: CKey::Var(VarId::new(2)),
                 name: n,
                 dst: CKey::Var(VarId::new(3)),
@@ -2398,6 +2752,7 @@ mod tests {
             sv.engine.add_con(
                 ScriptId::new(2),
                 Constraint::Read {
+                    key: None,
                     recv: CKey::Var(VarId::new(base)),
                     name: proto_name,
                     dst: CKey::Var(VarId::new(base + 1)),
@@ -2415,6 +2770,7 @@ mod tests {
             sv.engine.add_con(
                 ScriptId::new(2),
                 Constraint::Write {
+                    key: None,
                     recv: CKey::Var(VarId::new(base + 1)),
                     name: m,
                     src: CKey::Var(VarId::new(base + 2)),
@@ -2440,6 +2796,7 @@ mod tests {
         sv.engine.add_con(
             ScriptId::new(1),
             Constraint::Read {
+                key: None,
                 recv: CKey::Var(VarId::new(0)),
                 name: m,
                 dst: CKey::Var(VarId::new(1)),
@@ -2503,6 +2860,7 @@ mod tests {
         sv.engine.add_con(
             ScriptId::new(1),
             Constraint::Read {
+                key: None,
                 recv: CKey::Var(VarId::new(0)),
                 name: m,
                 dst: CKey::Var(VarId::new(1)),
@@ -2539,6 +2897,7 @@ mod tests {
         sv.engine.add_con(
             ScriptId::new(2),
             Constraint::Write {
+                key: None,
                 recv: CKey::Var(VarId::new(1)),
                 name: m,
                 src: CKey::Var(VarId::new(2)),
@@ -2548,6 +2907,7 @@ mod tests {
         sv.engine.add_con(
             ScriptId::new(2),
             Constraint::Write {
+                key: None,
                 recv: CKey::Var(VarId::new(0)),
                 name: proto_name,
                 src: CKey::Var(VarId::new(1)),
@@ -2598,6 +2958,7 @@ mod tests {
                 ts: TypeSet::obj_one(a),
             },
             Constraint::Write {
+                key: None,
                 recv: CKey::Var(VarId::new(2)),
                 name: v1,
                 src: CKey::Var(VarId::new(1)),
@@ -2608,12 +2969,14 @@ mod tests {
                 ts: TypeSet::prim(PRIM_INT32),
             },
             Constraint::Write {
+                key: None,
                 recv: CKey::Var(VarId::new(2)),
                 name: v1,
                 src: CKey::Var(VarId::new(3)),
                 pc: Pc::new(8),
             },
             Constraint::Read {
+                key: None,
                 recv: CKey::Var(VarId::new(2)),
                 name: v1,
                 dst: CKey::Var(VarId::new(4)),
@@ -2663,12 +3026,14 @@ mod tests {
                 pc: Pc::new(0),
             },
             Constraint::Write {
+                key: None,
                 recv: CKey::Var(VarId::new(0)),
                 name: elems,
                 src: CKey::Var(VarId::new(3)),
                 pc: Pc::new(0),
             },
             Constraint::Read {
+                key: None,
                 recv: CKey::Var(VarId::new(0)),
                 name: elems,
                 dst: CKey::Var(VarId::new(4)),
@@ -2688,6 +3053,7 @@ mod tests {
         let c = sv.engine.add_con(
             ScriptId::new(1),
             Constraint::Write {
+                key: None,
                 recv: CKey::Var(VarId::new(0)),
                 name: elems,
                 src: CKey::Var(VarId::new(1)),

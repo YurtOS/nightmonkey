@@ -1,0 +1,3073 @@
+//! The opcode set (MIR.md §7): per-op signature, result rule, successor
+//! shape, and effect summary.
+//!
+//! Everything here is a function of the opcode, its immediates and its
+//! operand *types* (plus the module tables). That is what lets the
+//! validator check an op without knowing how it got there, and lets a
+//! pass reason about an op it did not create.
+//!
+//! Terminators that can fail carry their refined outputs to the success
+//! edge as *outputs*: the success block's params receive them (see
+//! `func::EdgeArg`). [`Sig::outputs`] are the types the op produces; the
+//! receiving params may be supertypes.
+
+use crate::ids::{EnvSlot, LayoutKey, Pc, ScriptId};
+use crate::mir::entity::{AtomId, BindingId, FuseId, NativeId, SnapObj};
+use crate::mir::module::{Module, Region};
+use crate::mir::types::{
+    is_subtype, join, FactKind, FieldSet, IRange, KeyRange, KillPattern, KillSet, LayoutClaim,
+    LayoutState, NumInfo, ObjInfo, ObjKind, RawKind, StrInfo, TagSet, Type, VSet, I32_MAX, I32_MIN,
+    INT_LIM,
+};
+use crate::opsem::{TaKind, PRIM_BIGINT, PRIM_DOUBLE, PRIM_INT32, PRIM_NULL, PRIM_UNDEFINED};
+
+/// A boxed constant.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ConstVal {
+    Undefined,
+    Null,
+    Bool(bool),
+    Int32(i32),
+    /// Bits of an f64, so the opcode stays `Eq` (and NaNs round-trip).
+    Double(u64),
+    /// The TDZ sentinel (`JS_UNINITIALIZED_LEXICAL`), a magic value: what an
+    /// uninitialized `let`/`const` binding holds.
+    Uninitialized,
+    /// Any valid value: an exit operand for a frame slot that is dead at
+    /// the exit's pc (§5.1's liveness pruning). The lowering leaves such a
+    /// slot as the frame already has it.
+    Dead,
+    /// The `this` placeholder of a `new` (`JS_IS_CONSTRUCTING`), a magic
+    /// value.
+    IsConstructing,
+    /// An array literal's elision (`JS_ELEMENTS_HOLE`), a magic value.
+    Hole,
+}
+
+/// `RtOp::PushEnv` kinds.
+pub const ENV_LEXICAL: u32 = 0;
+pub const ENV_CLASS_BODY: u32 = 1;
+pub const ENV_VAR: u32 = 2;
+
+/// `RtOp::Check` kinds.
+pub const CHECK_OBJ_COERCIBLE: u32 = 0;
+pub const CHECK_CLASS_HERITAGE: u32 = 1;
+pub const CHECK_THIS: u32 = 2;
+pub const CHECK_THIS_REINIT: u32 = 3;
+
+/// The target of an unbox.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum UnboxKind {
+    I32,
+    F64Num,
+    Bool,
+    Obj,
+    Str,
+}
+
+impl UnboxKind {
+    pub const ALL: [UnboxKind; 5] = [
+        UnboxKind::I32,
+        UnboxKind::F64Num,
+        UnboxKind::Bool,
+        UnboxKind::Obj,
+        UnboxKind::Str,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            UnboxKind::I32 => "i32",
+            UnboxKind::F64Num => "f64num",
+            UnboxKind::Bool => "bool",
+            UnboxKind::Obj => "obj",
+            UnboxKind::Str => "str",
+        }
+    }
+
+    /// The tags a value must have for this unbox to be infallible.
+    pub fn tags(self) -> TagSet {
+        match self {
+            UnboxKind::I32 => TagSet::INT32,
+            UnboxKind::F64Num => TagSet::NUMBER,
+            UnboxKind::Bool => TagSet::BOOLEAN,
+            UnboxKind::Obj => TagSet::OBJECT,
+            UnboxKind::Str => TagSet::STRING,
+        }
+    }
+
+    /// The raw type unboxing `v` (already within `tags()`) yields.
+    fn result(self, v: &VSet) -> Type {
+        match self {
+            UnboxKind::I32 => Type::I32(v.num.int_range(I32_MIN, I32_MAX)),
+            UnboxKind::F64Num => Type::F64(v.num),
+            UnboxKind::Bool => Type::Bool,
+            UnboxKind::Obj => Type::Obj(v.obj),
+            UnboxKind::Str => Type::Str(v.str),
+        }
+    }
+}
+
+/// What a `check.binding` proves of its binding.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum BindingCheck {
+    /// Its slot is resolved against the global object's live shape (or
+    /// its value fuse is armed): `load_gname` may read it.
+    Read,
+    /// That, and the slot is a writable data property: `store_gname` may
+    /// write it.
+    Write,
+    /// Its value fuse is in the predicted state: the binding holds a
+    /// compiled function of its predicted script (`BindingDef::pred`),
+    /// which `load_gname` then yields, typed.
+    Fn,
+}
+
+impl BindingCheck {
+    /// Whether a check of this kind proves one of kind `o` too.
+    pub fn implies(self, o: BindingCheck) -> bool {
+        self == o || o == BindingCheck::Read
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ArithOp {
+    Add,
+    Sub,
+    Mul,
+    /// JS `%` on integers (the dividend's sign). Checked (`.ovf`), it
+    /// fails on a zero divisor and on a -0 result (a negative dividend
+    /// with remainder 0); `.wrap` and `int` need both ruled out by type.
+    Rem,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum F64Op {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum BitOp {
+    And,
+    Or,
+    Xor,
+    Shl,
+    Shr,
+}
+
+/// A raw numeric representation, for compares.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum NumRepr {
+    I32,
+    Int,
+    F64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Cc {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum MathFn {
+    Abs,
+    Floor,
+    Ceil,
+    Round,
+    Trunc,
+    Sqrt,
+    Sign,
+    Fround,
+    Sin,
+    Cos,
+    Tan,
+    Exp,
+    Log,
+    Min,
+    Max,
+    Pow,
+    Atan2,
+}
+
+impl MathFn {
+    pub const ALL: [MathFn; 17] = [
+        MathFn::Abs,
+        MathFn::Floor,
+        MathFn::Ceil,
+        MathFn::Round,
+        MathFn::Trunc,
+        MathFn::Sqrt,
+        MathFn::Sign,
+        MathFn::Fround,
+        MathFn::Sin,
+        MathFn::Cos,
+        MathFn::Tan,
+        MathFn::Exp,
+        MathFn::Log,
+        MathFn::Min,
+        MathFn::Max,
+        MathFn::Pow,
+        MathFn::Atan2,
+    ];
+
+    pub fn arity(self) -> usize {
+        match self {
+            MathFn::Min | MathFn::Max | MathFn::Pow | MathFn::Atan2 => 2,
+            _ => 1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum JsBinop {
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Pow,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Lsh,
+    Rsh,
+    Ursh,
+}
+
+/// The generic operations `js.rt` runs through their runtime helpers,
+/// with their operands (all boxed).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum RtOp {
+    /// `lhs instanceof rhs` -> boolean.
+    Instanceof,
+    /// `key in obj` -> boolean.
+    In,
+    /// `obj.hasOwnProperty(key)` (the `HasOwn` op), `key, obj` -> boolean.
+    HasOwn,
+    /// `delete obj.name` -> boolean (strict or not).
+    DelProp(AtomId, bool),
+    /// `delete obj[key]` -> boolean.
+    DelElem(bool),
+    /// `{}` -> object, with fixed slots for this many fields (the literal's
+    /// layout row length; 0 for the engine's default).
+    NewObject(u32),
+    /// `new Array(len)` for a literal of `len` elements -> object.
+    NewArray(u32),
+    /// Define own property `name` of `obj` to `v`, with the attributes.
+    InitProp(AtomId, u32),
+    /// Define own element `key` of `obj` to `v`, with the attributes.
+    /// Its attrs, and whether the store owes the array stamp's RANGES
+    /// claim a clear (`ranges`: a claim applies and the value is not
+    /// proven inside it).
+    InitElem(u32, bool),
+    /// ToPropertyKey (a string, a symbol or an int32) -> val.
+    ToPropertyKey,
+    /// The regexp literal the script's gcthing `index` names, cloned ->
+    /// object.
+    RegExp(u32),
+    /// Define getter/setter `name` of `obj` to `f` (`kind`: 1 setter,
+    /// 2 hidden).
+    InitPropGetSet(AtomId, u32),
+    /// Self-hosted intrinsic `name` (`GetIntrinsic`) -> value.
+    Intrinsic(AtomId),
+    /// Global `name` for `typeof` (`GetGName` before `Typeof`): an unbound
+    /// name is undefined, not a ReferenceError -> value.
+    GetNameTypeof(AtomId),
+    /// For-in's property iterator over `v` (`Iter`) -> object.
+    Iter,
+    /// A check of `v` that throws or does nothing (`CheckObjCoercible`,
+    /// `CheckClassHeritage`, `CheckThis`: `CHECK_*`).
+    Check(u32),
+    /// Name function `fun` by key `name` (`SetFunName`, the prefix kind).
+    SetFunName(u32),
+    /// The global `this` (`GlobalThis`) -> object.
+    GlobalThis,
+    /// The BigInt literal at the script's gcthing index (`BigInt`) -> value.
+    BigInt(u32),
+    /// Set `obj`'s prototype to `proto` (`MutateProto`, `__proto__:` in a
+    /// literal).
+    MutateProto,
+    /// `#x in obj` style checks (`CheckPrivateField`: condition, kind),
+    /// `obj, key` -> boolean.
+    CheckPrivateField(u32, u32),
+    /// Throw unless `v` is an object (`CheckIsObj`, the message kind).
+    CheckIsObj(u32),
+    /// Close iterator `it` (`CloseIter`, the completion kind): calls its
+    /// `return`.
+    CloseIter(u32),
+    /// A spread call's argument array, or undefined when the spread value
+    /// is not a packed array whose iteration is intact
+    /// (`OptimizeSpreadCall`) -> value.
+    OptimizeSpreadCall,
+    /// `f(...arr)` / `new f(...arr)` (`SpreadCall`/`SpreadNew`: whether it
+    /// constructs): `callee, this, arr, new.target` -> value.
+    SpreadCall(u32),
+    /// A scope's environment over the frame's (`PushLexicalEnv`,
+    /// `PushClassBodyEnv`, `PushVarEnv`: `ENV_*`, the scope's pc) ->
+    /// object; `env.set` makes it the frame's.
+    PushEnv(u32, u32),
+    /// A `with` environment over the frame's wrapping `v` (`EnterWith`,
+    /// its pc) -> object.
+    EnterWith(u32),
+    /// A copy of the frame's block environment (`FreshenLexicalEnv`,
+    /// `RecreateLexicalEnv` with 1: fresh bindings) -> object.
+    FreshenEnv(u32),
+    /// A name read through the frame's environment chain (`GetName`; 1 for
+    /// `typeof`, where unbound is undefined) -> value.
+    GetName(AtomId, u32),
+    /// The environment a later `js.rt.setname` stores `name` into, from the
+    /// frame's chain (`BindName`, `BindUnqualifiedName` with 1) -> object.
+    BindName(AtomId, u32),
+    /// `delete name` through the frame's chain (`DelName`) -> boolean.
+    DelName(AtomId),
+    /// The frame's variable environment (`BindVar`) -> object.
+    BindVar,
+    /// `env.name = v` for an environment `BindName` found (`SetName`,
+    /// strict): `env, v`.
+    SetName(AtomId, bool),
+    /// A computed-key accessor in a literal or class (`InitElemGetter`
+    /// and kin: bit 0 setter, bit 1 hidden): `obj, key, fn`.
+    InitElemGetSet(u32),
+    /// The home object's prototype (`SuperBase`: home) -> value.
+    SuperBase,
+    /// The constructor's parent (`SuperFun`: callee) -> value.
+    SuperFun,
+    /// `super.name` (`GetPropSuper`): `recv, base` -> value.
+    GetPropSuper(AtomId),
+    /// `super[key]` (`GetElemSuper`): `recv, key, base` -> value.
+    GetElemSuper,
+    /// `super.name = v` (`SetPropSuper`, strict): `recv, base, v` -> v.
+    SetPropSuper(AtomId, bool),
+    /// `super[key] = v` (`SetElemSuper`, strict): `recv, key, base, v` -> v.
+    SetElemSuper(bool),
+    /// Set method `f`'s home object (`InitHomeObject`): `f, home`.
+    InitHomeObject,
+    /// A class constructor with prototype `proto` (`FunWithProto`, the
+    /// function gcthing), closing over the frame's environment -> object.
+    FunWithProto(u32),
+    /// A derived constructor's result (`CheckReturn`): `this, rval` ->
+    /// value (throws for a non-object, non-undefined rval or an
+    /// uninitialized `this`).
+    CheckReturn,
+    /// Register a `using` resource with the frame's environment
+    /// (`AddDisposable`, the hint): `v, method, needs_closure`.
+    AddDisposable(u32),
+    /// The frame's environment's disposal list, taken
+    /// (`TakeDisposeCapability`) -> value.
+    TakeDisposeCapability,
+    /// `SuppressedError(e, suppressed)` (`CreateSuppressedError`) -> object.
+    CreateSuppressedError,
+    /// `name` read from environment `env` a `BindName` found
+    /// (`GetBoundName`): `env` -> value.
+    GetBoundName(AtomId),
+    /// An object with prototype `proto` (`ObjWithProto`) -> object.
+    ObjWithProto,
+    /// A fresh private name (`NewPrivateName`) -> symbol.
+    NewPrivateName(AtomId),
+    /// `import(spec, opts)` (`DynamicImport`) -> object.
+    DynamicImport,
+    /// A direct eval with spread arguments (`SpreadEval`, its pc):
+    /// `callee, this, arr` -> value.
+    SpreadEval(u32),
+    /// A generator object for the frame's callee and environment
+    /// (`Generator`) -> object.
+    CreateGenerator,
+    /// Mark generator `g` finished (`FinalYieldRval`): `g`.
+    GenFinal,
+    /// Raise a `throw`/`return` resumption (`CheckResumeKind` with a kind
+    /// other than next; always fails): `v, g, kind`. A return stages `v`
+    /// as the frame's rval.
+    GenCheckResume,
+    /// `AsyncAwait`/`AsyncResolve` (1 for resolve): `v, g` -> value.
+    AsyncAwait(u32),
+    /// `AsyncReject`: `reason, stack, g` -> value.
+    AsyncReject,
+    /// `CanSkipAwait`: `v` -> boolean.
+    CanSkipAwait,
+    /// `MaybeExtractAwaitValue`: `v, can_skip` -> value.
+    MaybeExtractAwait,
+    /// Resume generator `g` with `v` and resume kind `k` (`Resume`) -> value.
+    Resume,
+    /// `ToString` of v -> string.
+    ToString,
+    /// Well-known symbol `code` (`JSOp::Symbol`) -> symbol.
+    Symbol(u32),
+    /// Builtin object `kind` (`JSOp::BuiltinObject`) -> object.
+    BuiltinObject(u32),
+}
+
+impl RtOp {
+    /// The op with its atoms renamed by `f` (an inlined callee's, into
+    /// the caller's table). Exhaustive, with no wildcard: a new variant
+    /// carrying an atom must say how it maps.
+    pub fn map_atoms(self, f: impl Fn(AtomId) -> AtomId) -> RtOp {
+        use RtOp::*;
+        match self {
+            DelProp(a, s) => DelProp(f(a), s),
+            InitProp(a, t) => InitProp(f(a), t),
+            InitPropGetSet(a, k) => InitPropGetSet(f(a), k),
+            Intrinsic(a) => Intrinsic(f(a)),
+            GetNameTypeof(a) => GetNameTypeof(f(a)),
+            GetName(a, t) => GetName(f(a), t),
+            BindName(a, k) => BindName(f(a), k),
+            DelName(a) => DelName(f(a)),
+            SetName(a, s) => SetName(f(a), s),
+            GetPropSuper(a) => GetPropSuper(f(a)),
+            SetPropSuper(a, s) => SetPropSuper(f(a), s),
+            GetBoundName(a) => GetBoundName(f(a)),
+            NewPrivateName(a) => NewPrivateName(f(a)),
+            op @ (Instanceof
+            | In
+            | HasOwn
+            | DelElem(_)
+            | NewObject(_)
+            | NewArray(_)
+            | InitElem(..)
+            | ToPropertyKey
+            | RegExp(_)
+            | Iter
+            | Check(_)
+            | SetFunName(_)
+            | GlobalThis
+            | BigInt(_)
+            | MutateProto
+            | CheckPrivateField(..)
+            | CheckIsObj(_)
+            | CloseIter(_)
+            | OptimizeSpreadCall
+            | SpreadCall(_)
+            | PushEnv(..)
+            | EnterWith(_)
+            | FreshenEnv(_)
+            | BindVar
+            | InitElemGetSet(_)
+            | SuperBase
+            | SuperFun
+            | GetElemSuper
+            | SetElemSuper(_)
+            | InitHomeObject
+            | FunWithProto(_)
+            | CheckReturn
+            | AddDisposable(_)
+            | TakeDisposeCapability
+            | CreateSuppressedError
+            | ObjWithProto
+            | DynamicImport
+            | SpreadEval(_)
+            | CreateGenerator
+            | GenFinal
+            | GenCheckResume
+            | AsyncAwait(_)
+            | AsyncReject
+            | CanSkipAwait
+            | MaybeExtractAwait
+            | Resume
+            | ToString
+            | Symbol(_)
+            | BuiltinObject(_)) => op,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum JsUnop {
+    Neg,
+    Pos,
+    BitNot,
+    Inc,
+    Dec,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum JsCc {
+    Eq,
+    Ne,
+    StrictEq,
+    StrictNe,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+/// A generic numeric op or compare that `Opcode::Prim` does on primitive
+/// operands only.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum PrimOp {
+    Add,
+    Binop(JsBinop),
+    Unop(JsUnop),
+    Compare(JsCc),
+    ToNumeric,
+}
+
+impl PrimOp {
+    /// The generic op it restricts.
+    pub fn generic(self) -> Opcode {
+        match self {
+            PrimOp::Add => Opcode::JsAdd,
+            PrimOp::Binop(b) => Opcode::JsBinop(b),
+            PrimOp::Unop(u) => Opcode::JsUnop(u),
+            PrimOp::Compare(c) => Opcode::JsCompare(c),
+            PrimOp::ToNumeric => Opcode::JsToNumeric,
+        }
+    }
+
+    /// The restriction of a generic op, if it has one.
+    pub fn of(op: &Opcode) -> Option<PrimOp> {
+        Some(match *op {
+            Opcode::JsAdd => PrimOp::Add,
+            Opcode::JsBinop(b) => PrimOp::Binop(b),
+            Opcode::JsUnop(u) => PrimOp::Unop(u),
+            Opcode::JsCompare(c) => PrimOp::Compare(c),
+            Opcode::JsToNumeric => PrimOp::ToNumeric,
+            _ => return None,
+        })
+    }
+}
+
+/// An opcode with its immediates. Operands are `InstData::args`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Opcode {
+    // Constants.
+    ConstVal(ConstVal),
+    ConstI32(i32),
+    /// Bits of the f64.
+    ConstF64(u64),
+    ConstBool(bool),
+    ConstObj(SnapObj),
+    ConstStr(AtomId),
+
+    // Conversions.
+    Box,
+    /// An f64 boxed as the double it is (NaN made canonical), not as an
+    /// int32 where it is one: for a store whose readers all admit the
+    /// double tag (the `elem_write_sites` rule).
+    BoxDouble,
+    Unbox(UnboxKind),
+    I32ToInt,
+    I32ToF64,
+    IntToF64,
+    /// Identity with a declared weaker result type (§4.2). Every op's
+    /// result may be declared weaker than its rule; `weaken` is the op
+    /// whose only purpose is that.
+    Weaken,
+
+    // Guards and checks (terminators: ok, fail).
+    GuardUnbox(UnboxKind),
+    GuardTags(TagSet),
+    GuardKind(ObjKind),
+    GuardLayout {
+        keys: KeyRange,
+        types: bool,
+        slots: bool,
+        /// And the CLOSED bit: no own property outside the row.
+        closed: bool,
+    },
+    /// An object under construction for layout `key` (MIR.md §2.3): its
+    /// word carries the CONSTRUCTING sentinel with `key`'s early key, and
+    /// SLOTS (and TYPES if `types`), and the fields `n` (the word's set
+    /// and a span of theirs), exactly (`constructing(n)`).
+    GuardCtor {
+        key: LayoutKey,
+        n: FieldSet,
+        types: bool,
+    },
+    GuardSingleton(SnapObj),
+    GuardScript(ScriptId),
+    /// A predicted method (`method_sites`): the receiver, of layouts whose
+    /// rows lack `atom`, if CLOSED, reads `atom` through its prototype
+    /// chain as the function in the method cell at `cell` -- the cell
+    /// armed for the receiver's prototype, so the chain resolves the name
+    /// to a compiled function of `script`, held by a constant property.
+    /// ok: that function; fail: the receiver is not CLOSED, or the cell is
+    /// not armed for its prototype and the runtime could not arm it.
+    MethodLoad {
+        cell: u32,
+        atom: AtomId,
+        script: ScriptId,
+    },
+    /// An f64 that is exactly an int32 (not -0) becomes an `I32`.
+    F64ToIntExact,
+    /// An `int` known to be int32 (T: fails outside int32's range).
+    IntToI32,
+    /// An int32 in the inclusive range (fails outside it): an onramp's
+    /// value brought to the range the loop's entry path proves.
+    GuardRange(IRange),
+    CheckFuse(FuseId),
+    /// The binding is usable as `BindingCheck` says.
+    CheckBinding(BindingId, BindingCheck),
+    CheckNative(NativeId),
+    /// The receiver (boxed) has, for property `name`, the accessor the
+    /// runtime's accessor-call cache recorded for its shape (a getter, or
+    /// with the flag a setter), on a holder whose shape is still the one
+    /// recorded: ok with that accessor function.
+    AccessorProbe(AtomId, bool),
+
+    // Control.
+    Jump,
+    Br,
+    /// Dense switch over `0..n`, plus a default.
+    Switch(u32),
+    /// `switch (x)` over `n` string constants (`x === s_k` for the first
+    /// `k` that holds): operands `x`, then `s_0 .. s_{n-1}` (atoms). Edges:
+    /// one per case, the default (no case holds, `x` not a string
+    /// included), and `fail` for a subject the lowering does not compare
+    /// inline (a rope), before anything happens.
+    SwitchStr(u32),
+    Return,
+    /// Operands: `this`, `nargs` args, `nlocals` locals, the rval, then
+    /// the operand stack (the rest). All `Val(⊤)`.
+    Exit {
+        pc: Pc,
+        nargs: u32,
+        nlocals: u32,
+    },
+    ExitThrow {
+        pc: Pc,
+        nargs: u32,
+        nlocals: u32,
+    },
+    /// Suspend the generator at a yield (`InitialYield`, `Yield`, `Await`
+    /// at `pc`, resume index `index`): an exit's operands (the frame at
+    /// `pc`, whose stack ends with the generator, below it the yielded
+    /// value unless `initial`). The lowering writes the frame, saves it
+    /// into the generator (baseline's `gen_suspend`) and returns the
+    /// yielded value (the generator for `initial`). A resume enters the
+    /// function's `Resume` root for `index`.
+    GenSuspend {
+        pc: Pc,
+        index: u32,
+        nargs: u32,
+        nlocals: u32,
+        initial: bool,
+    },
+    /// Whether `v` is the generator-closing magic (`IsGenClosing`) -> bool.
+    IsGenClosing,
+    /// An exit from an inlined callee's code (§5.5), with an `exit`'s
+    /// operands for the callee's frame: finish the callee in its baseline
+    /// body from `pc` (with its exception pending if `throw`), and take
+    /// `ok` with its result or `err` with its exception.
+    ExitInline {
+        pc: Pc,
+        nargs: u32,
+        nlocals: u32,
+        throw: bool,
+    },
+    /// Write the inlined callee's frame (§5.5) from `callee, this, args`
+    /// (the callee's formals, padded), its other slots as its prologue
+    /// would. The instruction's frame is the callee's.
+    InlineEnter,
+    Unreachable,
+
+    // Numeric.
+    I32Ovf(ArithOp),
+    I32Wrap(ArithOp),
+    IntArith(ArithOp),
+    F64Arith(F64Op),
+    F64Neg,
+    I32Bit(BitOp),
+    I32Ushr,
+    ToInt32,
+    Cmp(NumRepr, Cc),
+    Math(MathFn),
+
+    // Generic JS ops.
+    JsAdd,
+    JsBinop(JsBinop),
+    JsUnop(JsUnop),
+    JsCompare(JsCc),
+    JsTypeof,
+    /// `typeof v == type` (or `!=`), the operand byte of `JSOp::TypeofEq`
+    /// (`js::TypeofEqOperand`): a leaf.
+    JsTypeofEq(u8),
+    /// `v === c` for the constant the operand of `JSOp::StrictConstantEq`
+    /// encodes (`js::ConstantCompareOperand`): a leaf.
+    JsConstantStrictEq(u16),
+    /// Formal `n` of the frame's mapped `arguments` object (which the
+    /// entry made): `ArgumentsObject::arg`, a leaf.
+    ArgsMapped(u32),
+    /// Set formal `n` of the frame's mapped `arguments` object: a leaf.
+    ArgsMappedSet(u32),
+    JsToBool,
+    JsToNumeric,
+    /// The generic op on operands that run no code in it: primitives (and
+    /// for an equality, two objects, or an object and null or undefined),
+    /// ok with its result. An operand whose conversion would call user
+    /// code (`valueOf`, `toString`, `Symbol.toPrimitive`) fails before
+    /// anything happened; a TypeError or RangeError of the op itself
+    /// (a Symbol, BigInt mixing) takes `err`. Allocates (concatenation, a
+    /// BigInt), writes nothing (MIR-MEMORY.md §1, KICKOFF-8 item 1).
+    Prim(PrimOp),
+    JsGetProp(AtomId),
+    /// `recv.name` where the lookup runs no code: an own or prototype data
+    /// property, an absent one (`undefined`), or a pure builtin length; ok
+    /// with the value. A lookup that would run code (a getter, a proxy, a
+    /// resolve hook, a primitive with no prototype) or throw (`null`,
+    /// `undefined`) fails, before anything happened. It reads the field by
+    /// name and nothing else (MIR-MEMORY.md §1: a property fallback's
+    /// common case, which must not write `Unknown`).
+    GetPropData(AtomId),
+    /// `recv.name = v` where the set runs no code: an overwrite of an own
+    /// writable data property of a native object (or of an array's
+    /// writable length), or an add to an
+    /// extensible one with no setter, read-only property or hook on its
+    /// chain; not on the global or an object Watchtower watches.
+    /// `ok_clean` once stored; `ok_dirty` once stored where the store
+    /// demoted a claim of the object's published class (a value not of the
+    /// field's type, an add off the class's slots); anything else fails
+    /// before anything happened; an engine error takes `err`. Its clean
+    /// edge writes the field by name and nothing else.
+    SetPropData(AtomId),
+    /// Strict-mode (`true`) or sloppy assignment.
+    JsSetProp(AtomId, bool),
+    JsGetElem,
+    /// `recv[key]` where the read runs no code: a primitive key (an object
+    /// key's ToPropertyKey may call user code), found as a data property,
+    /// an element (dense, a typed array's, an arguments object's, a
+    /// string's char), or absent (`undefined`); ok with the value. A read
+    /// that would run code (a getter, a proxy, a resolve hook) or throw
+    /// fails before anything happened; an engine error (OOM, interning the
+    /// key) takes `err`. Reads anything, writes nothing.
+    GetElemData,
+    /// `recv[key] = v` where the set runs no code, with the RANGES duty
+    /// (as `JsSetElem`'s): an element of a native object or array (an
+    /// overwrite of a writable one; an add with no setter or read-only
+    /// element on the chain; a writable length), or a typed array's of a
+    /// number. Edges as `setprop.data`'s. With an int32 key its clean edge
+    /// writes elements and lengths only.
+    SetElemData(bool),
+    /// Strictness, and the RANGES duty (as `InitElem`'s).
+    JsSetElem(bool, bool),
+    JsGetName(AtomId),
+    /// Sloppy-mode `this` that is not an object: the global `this` for
+    /// null/undefined, a wrapper object for a primitive.
+    JsBoxThis,
+    /// The binding object for an unqualified global assignment
+    /// (`BindUnqualifiedGName`).
+    JsBindGName(AtomId),
+    /// `env.name = v` for a global or name assignment (`SetGName`), strict
+    /// or sloppy.
+    JsSetName(AtomId, bool),
+    /// A generic operation through its runtime helper (see [`RtOp`]).
+    JsRt(RtOp),
+    /// The function's (unmapped) arguments object: the frame's cached
+    /// one, else a new one, cached. Only in the function's own frame.
+    ArgsObject,
+    /// A rest-parameter array of the actuals past the first `n`.
+    RestArray(u32),
+    /// The actual argument count, an i32.
+    ArgsLength,
+    /// The frame's `new.target` (the op's frame: an inlined construct's
+    /// frame holds its own) -> value.
+    FrameNewTarget,
+    /// The frame's callee (`Callee`) -> value.
+    FrameCallee,
+    /// For-in: the iterator's next property name, or the NO_ITER magic
+    /// when it is exhausted (`MoreIter`; advances the iterator).
+    IterMore,
+    /// Whether a value is the NO_ITER magic (`IsNoIter`) -> bool.
+    IterIsDone,
+    /// For-in: close the iterator (`EndIter`).
+    IterEnd,
+    /// Whether `v` iterates as a packed array with the iteration protocol
+    /// intact (`OptimizeGetIterator`) -> bool.
+    IterOptimizable,
+    /// Actual argument `args[0]` (an i32 index below the count).
+    ActualArg,
+    /// Actual argument `k`, or undefined if there are not that many.
+    ActualArgOr(u32),
+    /// Whether boxed `args[0]` is the builtin in cell `k` (the runtime's
+    /// pristine-builtin cells, e.g. `Function.prototype.apply`).
+    JsIsBuiltin(u32),
+    /// `target.apply(this, arguments)` forwarding the frame's own actuals
+    /// (operands `apply`, `target`, `this`), through the runtime.
+    ApplyFwd,
+    /// `throw args[0]`: the only successor is `err`.
+    JsThrow,
+    /// Write `args[0]` (a `Val`, or an i32, f64 or bool, stored as the
+    /// Value it is) to baseline frame slot `k` (0 `this`, then the
+    /// formals, the locals, the rval): the write-through that keeps the
+    /// frame's copy of every formal, local and rval equal to the slot's
+    /// value, so exits need not carry them (§5.1).
+    FrameStore(u32),
+    /// A closure of the script's inner function `index` (a gcthing index)
+    /// over environment `args[0]` (`Lambda`).
+    JsLambda(u32),
+
+    // Objects.
+    LoadField(AtomId),
+    /// `load_field` through a receiver whose type proves the field's slot
+    /// (its layout claim with SLOTS, one slot across the claim's keys):
+    /// the slot's value, of the field's claimed type. Not a terminator:
+    /// it cannot miss, GC, throw or run JS (MIR-MEMORY.md §1.1), so
+    /// value numbering and LICM treat it as a pure read of its field.
+    LoadSlot(AtomId),
+    /// `store_field` through a receiver whose type proves the field's slot
+    /// and TYPES, of a value conforming to the field's claim: the slot
+    /// written (RANGES dropped, as every store does). Not a terminator: it
+    /// cannot miss, demote, GC, throw or run JS.
+    StoreSlot(AtomId),
+    StoreField(AtomId),
+    InitField(AtomId),
+    PublishLayout,
+    NewObject(LayoutKey),
+    /// An object literal's allocation (`NewInit`/`NewObject`) at a site
+    /// the analysis stamps: `n` slots from the site's alloc cell (ok: the
+    /// fresh object, boxed; err: the helper's OOM). Not a fence: an
+    /// allocation writes nothing that exists (MIR-MEMORY.md §4).
+    LitNew(u32),
+    /// An `InitProp` of a literal whose row is layout `K` (its site's):
+    /// the value into the property's slot, by the site's add transition
+    /// (ok; err: OOM). It writes `Field(K, name)` of an object nothing
+    /// else can reach yet: not a fence.
+    LitInit(AtomId, LayoutKey),
+    NewArray,
+    LoadElem,
+    /// The RANGES duty (as `InitElem`'s).
+    /// ... and whether it also appends (past the initialized length, or
+    /// into a hole, where the prototypes' proof allows: it then writes
+    /// the lengths too), else fails; without, only an overwrite.
+    StoreElem(bool, bool),
+    LoadTa,
+    StoreTa,
+    LengthArray,
+    LengthString,
+    LengthTa,
+    ElementsPtr,
+    StrCharCodeAt,
+
+    // Globals and environments.
+    LoadGName(BindingId),
+    StoreGName(BindingId),
+    /// The global object (the realm's, fixed for the program) -> object.
+    GlobalObject,
+    EnvCurrent,
+    /// The callee of the function environment `hops` links up the frame's
+    /// chain (`EnvCallee`, `super` in an arrow or eval) -> object.
+    EnvCallee(u32),
+    /// The script's object gcthing `index` (`Object`, `CallSiteObj`: a
+    /// template or singleton, not a copy) -> object.
+    ObjectLit(u32),
+    /// Make environment `e` (boxed) the frame's current one: a scope's
+    /// entry (write-through, as baseline's frame keeps it).
+    EnvSet,
+    /// Make the frame's current environment's enclosing one current: a
+    /// scope's exit (`PopLexicalEnv`, `LeaveWith`).
+    EnvPop,
+    EnvParent,
+    EnvLoad(EnvSlot),
+    EnvStore(EnvSlot),
+
+    // Calls. Operands: callee (or new.target pair), `this`, args.
+    Call,
+    /// A call of an iterator method (`CallIter`): `call`, whose uncallable
+    /// callee throws the iterator protocol's error.
+    CallIter,
+    /// A direct `eval` (`Eval`/`StrictEval` at pc): `call`'s operands; the
+    /// code runs in the frame's environment.
+    CallEval(u32),
+    CallDirect,
+    /// `new`: operands callee, `this` (the IS_CONSTRUCTING magic), args,
+    /// new.target. The site's sized-allocation slot count and early stamp
+    /// word (`stamp::construct_nslots`/`construct_alloc_word`).
+    Construct(u32, u32),
+    /// The `this` of a construct (`callee, new.target`): a fresh object
+    /// sized `nslots` and seeded with the alloc word, as a direct construct
+    /// makes it (the site's construct cell, else `create_this`).
+    CreateThis(u32, u32),
+    /// `create_this` of a proven scripted constructor that is its own
+    /// new.target, with its `prototype` (`callee, proto`): a fresh object
+    /// sized `nslots`, seeded with the alloc word, whose prototype is
+    /// `proto` (or Object.prototype if `proto` is no object). Runs no code;
+    /// an allocation (MIR-MEMORY.md §6).
+    NewThis(u32, u32),
+    /// `new_this` with the first `n` fields of layout `key` added, their
+    /// values the operands after `callee, proto` (a constructor whose body
+    /// starts by storing them: MIR.md M5q): the object under construction
+    /// with `n` fields, as that many `init_field`s would leave it. Runs no
+    /// code; `fail` where an add would not be plain (a setter or read-only
+    /// property of the name on the prototype chain), before anything
+    /// observable.
+    NewThisInit {
+        nslots: u32,
+        word: u32,
+        key: LayoutKey,
+        types: bool,
+        n: u32,
+    },
+    /// Whether function `f` is a constructor (its flags): an arrow
+    /// function or a method is not.
+    FnIsCtor,
+    /// Whether object `o` emulates `undefined` (`document.all`): what
+    /// loose equality with null or undefined asks of an object.
+    ObjEmulatesUndef,
+    /// Advance boxed `v`'s prefix-stamped object to its full layout key
+    /// when its bits and shape allow (the module's restamp descriptor
+    /// `i`): the two-phase restamp at an init delegate's or fill script's
+    /// returns, or after a fill sequence's last add.
+    Restamp(u32),
+    /// Write class word `w` into a freshly allocated object literal or
+    /// array (`lit_stamps_in`, `array_stamp_in`): nothing can have read
+    /// the old word, and the claims it seeds hold vacuously.
+    StampFresh(u32),
+    /// A layout constructor's first stamp of its completed `this`
+    /// (layout, field count, kept bits): a no-op unless `this` is an
+    /// object of this constructor still under construction.
+    CtorStamp(u32, u32, u32),
+    /// `publish_layout` at its earliest point (MIR.md §2.3): the same
+    /// stamp before a call made while `this` may still be under
+    /// construction (`ctor_publish`), only for an object carrying this
+    /// constructor's own early key (an unkeyed one waits for the return).
+    CtorPublish(u32, u32, u32),
+    CallNative(NativeId),
+}
+
+/// What a successor edge means to its terminator.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum SuccRole {
+    Target,
+    Then,
+    Else,
+    Case(u32),
+    Default,
+    Ok,
+    Fail,
+    OkClean,
+    OkDirty,
+    Err,
+}
+
+impl SuccRole {
+    pub fn name(self) -> String {
+        match self {
+            SuccRole::Target => "target".into(),
+            SuccRole::Then => "then".into(),
+            SuccRole::Else => "else".into(),
+            SuccRole::Case(n) => format!("case{n}"),
+            SuccRole::Default => "default".into(),
+            SuccRole::Ok => "ok".into(),
+            SuccRole::Fail => "fail".into(),
+            SuccRole::OkClean => "ok_clean".into(),
+            SuccRole::OkDirty => "ok_dirty".into(),
+            SuccRole::Err => "err".into(),
+        }
+    }
+
+    /// Whether this edge may carry the op's outputs.
+    pub fn carries_outputs(self) -> bool {
+        matches!(self, SuccRole::Ok | SuccRole::OkClean | SuccRole::OkDirty)
+    }
+}
+
+const OK_FAIL: &[SuccRole] = &[SuccRole::Ok, SuccRole::Fail];
+const CLEAN_DIRTY_ERR: &[SuccRole] = &[SuccRole::OkClean, SuccRole::OkDirty, SuccRole::Err];
+const OK_ERR: &[SuccRole] = &[SuccRole::Ok, SuccRole::Err];
+const OK_FAIL_ERR: &[SuccRole] = &[SuccRole::Ok, SuccRole::Fail, SuccRole::Err];
+
+impl Opcode {
+    /// The successor edges this op has, in order. Empty for non-terminators
+    /// and for the exiting terminators.
+    pub fn roles(&self) -> Vec<SuccRole> {
+        use Opcode::*;
+        match self {
+            Jump => vec![SuccRole::Target],
+            Br => vec![SuccRole::Then, SuccRole::Else],
+            Switch(n) => (0..*n)
+                .map(SuccRole::Case)
+                .chain([SuccRole::Default])
+                .collect(),
+            SwitchStr(n) => (0..*n)
+                .map(SuccRole::Case)
+                .chain([SuccRole::Default, SuccRole::Fail])
+                .collect(),
+            GuardUnbox(_)
+            | GuardTags(_)
+            | GuardKind(_)
+            | GuardLayout { .. }
+            | GuardCtor { .. }
+            | GuardSingleton(_)
+            | GuardScript(_)
+            | MethodLoad { .. }
+            | F64ToIntExact
+            | IntToI32
+            | GuardRange(_)
+            | CheckFuse(_)
+            | CheckBinding(..)
+            | CheckNative(_)
+            | AccessorProbe(..)
+            | I32Ovf(_)
+            | LoadElem
+            | StoreElem(..)
+            | LoadTa
+            | StoreTa
+            | StrCharCodeAt
+            | GetPropData(_)
+            | InitField(_) => OK_FAIL.to_vec(),
+            JsAdd | JsBinop(_) | JsUnop(_) | JsCompare(_) | JsToNumeric | JsGetProp(_)
+            | JsSetProp(..) | JsGetElem | JsSetElem(..) | JsBindGName(_) | JsSetName(..)
+            | LoadField(_) | StoreField(_) | Call | CallIter | CallEval(_) | CallDirect
+            | Construct(..) | CallNative(_) | JsGetName(_) | CreateThis(..) => {
+                CLEAN_DIRTY_ERR.to_vec()
+            }
+            // Clean if the callee's baseline rest demoted nothing.
+            ExitInline { .. } => CLEAN_DIRTY_ERR.to_vec(),
+            // Allocations: no kill, so no effect report.
+            JsLambda(_) | LitNew(_) | LitInit(..) => OK_ERR.to_vec(),
+            // The global `this`, or a primitive's wrapper: no user code.
+            JsBoxThis | NewThis(..) => OK_ERR.to_vec(),
+            NewThisInit { .. } => OK_FAIL_ERR.to_vec(),
+            JsRt(_) | ApplyFwd => CLEAN_DIRTY_ERR.to_vec(),
+            ArgsObject | RestArray(_) => OK_ERR.to_vec(),
+            JsThrow => vec![SuccRole::Err],
+            Prim(_) | GetElemData => OK_FAIL_ERR.to_vec(),
+            SetPropData(_) | SetElemData(_) => {
+                vec![
+                    SuccRole::OkClean,
+                    SuccRole::OkDirty,
+                    SuccRole::Fail,
+                    SuccRole::Err,
+                ]
+            }
+            _ => vec![],
+        }
+    }
+
+    pub fn is_terminator(&self) -> bool {
+        matches!(
+            self,
+            Opcode::Return
+                | Opcode::Exit { .. }
+                | Opcode::ExitThrow { .. }
+                | Opcode::GenSuspend { .. }
+                | Opcode::Unreachable
+        ) || !self.roles().is_empty()
+    }
+
+    /// The frame-state split of the operands of an exit, a throw or an
+    /// inline exit.
+    pub fn frame_operands(&self) -> Option<(Pc, u32, u32)> {
+        match *self {
+            Opcode::ExitInline {
+                pc, nargs, nlocals, ..
+            }
+            | Opcode::GenSuspend {
+                pc, nargs, nlocals, ..
+            } => Some((pc, nargs, nlocals)),
+            _ => self.exit_shape(),
+        }
+    }
+
+    /// The frame-state split of an exit's operands, if this is one: an
+    /// op that leaves the function for its own baseline body.
+    pub fn exit_shape(&self) -> Option<(Pc, u32, u32)> {
+        match *self {
+            Opcode::Exit { pc, nargs, nlocals } | Opcode::ExitThrow { pc, nargs, nlocals } => {
+                Some((pc, nargs, nlocals))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// An exit's (or onramp root's) operands split into the frame's parts.
+#[derive(Clone, Copy, Debug)]
+pub struct FrameParts<'a, T> {
+    pub this: &'a T,
+    pub args: &'a [T],
+    pub locals: &'a [T],
+    pub rval: &'a T,
+    pub stack: &'a [T],
+}
+
+/// Split `ops` (`this`, args, locals, rval, stack) by `nargs` and
+/// `nlocals`; `None` if there are too few.
+pub fn frame_parts<T>(ops: &[T], nargs: u32, nlocals: u32) -> Option<FrameParts<'_, T>> {
+    let (na, nl) = (nargs as usize, nlocals as usize);
+    if ops.len() < 2 + na + nl {
+        return None;
+    }
+    Some(FrameParts {
+        this: &ops[0],
+        args: &ops[1..1 + na],
+        locals: &ops[1 + na..1 + na + nl],
+        rval: &ops[1 + na + nl],
+        stack: &ops[2 + na + nl..],
+    })
+}
+
+/// An op's typing: the types of its (non-terminator) results and of its
+/// (terminator) outputs.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Sig {
+    pub results: Vec<Type>,
+    pub outputs: Vec<Type>,
+}
+
+impl Sig {
+    fn result(t: Type) -> Sig {
+        Sig {
+            results: vec![t],
+            outputs: vec![],
+        }
+    }
+
+    fn output(t: Type) -> Sig {
+        Sig {
+            results: vec![],
+            outputs: vec![t],
+        }
+    }
+
+    fn none() -> Sig {
+        Sig::default()
+    }
+}
+
+type SigResult = Result<Sig, String>;
+
+fn arity(args: &[Type], n: usize) -> Result<(), String> {
+    if args.len() != n {
+        return Err(format!("expected {n} operand(s), got {}", args.len()));
+    }
+    Ok(())
+}
+
+fn val(t: &Type, what: &str) -> Result<VSet, String> {
+    match t {
+        Type::Val(v) => Ok(*v),
+        t => Err(format!(
+            "{what}: expected a val, got {}",
+            crate::mir::print::type_str(t)
+        )),
+    }
+}
+
+fn obj(t: &Type, what: &str) -> Result<ObjInfo, String> {
+    match t {
+        Type::Obj(o) => Ok(*o),
+        t => Err(format!(
+            "{what}: expected an obj, got {}",
+            crate::mir::print::type_str(t)
+        )),
+    }
+}
+
+fn i32r(t: &Type, what: &str) -> Result<IRange, String> {
+    match t {
+        Type::I32(r) => Ok(*r),
+        t => Err(format!(
+            "{what}: expected an i32, got {}",
+            crate::mir::print::type_str(t)
+        )),
+    }
+}
+
+fn want(ok: bool, msg: impl FnOnce() -> String) -> Result<(), String> {
+    if ok {
+        Ok(())
+    } else {
+        Err(msg())
+    }
+}
+
+fn want_kind(o: &ObjInfo, k: ObjKind, what: &str) -> Result<(), String> {
+    want(o.kind.le(k), || {
+        format!("{what}: expected an object of kind {k:?}, got {:?}", o.kind)
+    })
+}
+
+/// Interval arithmetic in i128, which no i64 product overflows.
+fn arith_range(op: ArithOp, a: IRange, b: IRange) -> (i128, i128) {
+    let (al, ah, bl, bh) = (a.lo as i128, a.hi as i128, b.lo as i128, b.hi as i128);
+    match op {
+        ArithOp::Add => (al + bl, ah + bh),
+        ArithOp::Sub => (al - bh, ah - bl),
+        ArithOp::Mul => {
+            let p = [al * bl, al * bh, ah * bl, ah * bh];
+            (*p.iter().min().unwrap(), *p.iter().max().unwrap())
+        }
+        ArithOp::Rem => {
+            // |r| < |divisor| and |r| <= |dividend|, with the dividend's
+            // sign.
+            let m = bl.abs().max(bh.abs()) - 1;
+            let m = m.max(0);
+            (al.max(-m).min(0), ah.min(m).max(0))
+        }
+    }
+}
+
+/// Whether range `r` contains 0.
+fn has_zero(r: IRange) -> bool {
+    r.lo <= 0 && 0 <= r.hi
+}
+
+/// Whether an integer `op` on operands in `x` and `y` may give -0 (as a
+/// double), which no integer representation holds: a zero product with a
+/// negative factor, or a zero remainder of a negative dividend.
+pub fn may_neg_zero(op: ArithOp, x: IRange, y: IRange) -> bool {
+    match op {
+        ArithOp::Add | ArithOp::Sub => false,
+        ArithOp::Mul => (has_zero(x) && y.lo < 0) || (has_zero(y) && x.lo < 0),
+        ArithOp::Rem => x.lo < 0,
+    }
+}
+
+/// The result range of integer `op` on operands in `x` and `y`, if every
+/// result is an int32 other than -0 (and, for `%`, the divisor is never
+/// 0): the op then needs no check.
+pub fn i32_exact(op: ArithOp, x: IRange, y: IRange) -> Option<IRange> {
+    if may_neg_zero(op, x, y) || (op == ArithOp::Rem && has_zero(y)) {
+        return None;
+    }
+    let (lo, hi) = arith_range(op, x, y);
+    (lo >= I32_MIN as i128 && hi <= I32_MAX as i128).then(|| IRange::new(lo as i64, hi as i64))
+}
+
+/// The result range of an int32 bit op: `&` with a non-negative operand
+/// is at most it; `>>` by a constant count scales; `|` and `^` of
+/// non-negative operands stay below the next power of two.
+fn bit_range(b: BitOp, x: IRange, y: IRange) -> IRange {
+    let pow2 = |h: i64| {
+        if h <= 0 {
+            0
+        } else {
+            (1i64 << (64 - h.leading_zeros())) - 1
+        }
+    };
+    match b {
+        BitOp::And if x.lo >= 0 && y.lo >= 0 => IRange::new(0, x.hi.min(y.hi)),
+        BitOp::And if x.lo >= 0 => IRange::new(0, x.hi),
+        BitOp::And if y.lo >= 0 => IRange::new(0, y.hi),
+        BitOp::Or | BitOp::Xor if x.lo >= 0 && y.lo >= 0 => IRange::new(0, pow2(x.hi.max(y.hi))),
+        BitOp::Shr if y.lo == y.hi => {
+            let k = y.lo & 31;
+            IRange::new(x.lo >> k, x.hi >> k)
+        }
+        // A shift by a constant that loses no bit of any value in range.
+        BitOp::Shl
+            if y.lo == y.hi
+                && (x.lo << (y.lo & 31)) >= I32_MIN
+                && (x.hi << (y.lo & 31)) <= I32_MAX =>
+        {
+            let k = y.lo & 31;
+            IRange::new(x.lo << k, x.hi << k)
+        }
+        _ => IRange::new(I32_MIN, I32_MAX),
+    }
+}
+
+fn clamp_range(lo: i128, hi: i128, min: i64, max: i64) -> IRange {
+    let lo = lo.clamp(min as i128, max as i128) as i64;
+    let hi = hi.clamp(min as i128, max as i128) as i64;
+    IRange::new(lo, hi)
+}
+
+/// The type a boxed constant has.
+pub fn const_val_type(c: ConstVal) -> Type {
+    match c {
+        ConstVal::Undefined => Type::val(TagSet::prims(PRIM_UNDEFINED)),
+        ConstVal::Null => Type::val(TagSet::prims(PRIM_NULL)),
+        ConstVal::Bool(_) => Type::val(TagSet::BOOLEAN),
+        ConstVal::Int32(n) => Type::Val(VSet::new(
+            TagSet::INT32,
+            NumInfo::int(n.into(), n.into()),
+            ObjInfo::TOP,
+            StrInfo::TOP,
+        )),
+        ConstVal::Double(bits) => Type::Val(VSet::new(
+            TagSet::DOUBLE,
+            NumInfo::exact(f64::from_bits(bits)),
+            ObjInfo::TOP,
+            StrInfo::TOP,
+        )),
+        ConstVal::Uninitialized | ConstVal::IsConstructing | ConstVal::Hole => {
+            Type::val(TagSet::MAGIC)
+        }
+        ConstVal::Dead => Type::VAL_TOP,
+    }
+}
+
+/// Boxing is infallible and keeps every refinement.
+pub fn box_type(t: &Type) -> Result<Type, String> {
+    Ok(match t {
+        Type::I32(r) => Type::Val(VSet::new(
+            TagSet::INT32,
+            r.num(),
+            ObjInfo::TOP,
+            StrInfo::TOP,
+        )),
+        // A raw integer or double may box with either number tag.
+        Type::Int(r) => Type::Val(VSet::new(
+            TagSet::NUMBER,
+            r.num(),
+            ObjInfo::TOP,
+            StrInfo::TOP,
+        )),
+        Type::F64(n) => Type::Val(VSet::new(TagSet::NUMBER, *n, ObjInfo::TOP, StrInfo::TOP)),
+        Type::Bool => Type::val(TagSet::BOOLEAN),
+        Type::Obj(o) => Type::Val(VSet::new(TagSet::OBJECT, NumInfo::TOP, *o, StrInfo::TOP)),
+        Type::Str(s) => Type::Val(VSet::new(TagSet::STRING, NumInfo::TOP, ObjInfo::TOP, *s)),
+        t => {
+            return Err(format!(
+                "box: cannot box {}",
+                crate::mir::print::type_str(t)
+            ))
+        }
+    })
+}
+
+/// The claim a field op on a receiver of type `o` relies on: every layout
+/// in the claim's key range must have `name`, within the supported
+/// prefix. Returns the slot and, per layout, the field's claimed type.
+fn field_claims(
+    o: &ObjInfo,
+    name: AtomId,
+    m: &Module,
+    what: &str,
+) -> Result<(LayoutClaim, Vec<Type>), String> {
+    let c = o
+        .layout
+        .ok_or_else(|| format!("{what}: receiver has no layout claim"))?;
+    let mut claims = vec![];
+    for k in c.keys.keys() {
+        let layout = m
+            .layouts
+            .get(&k)
+            .ok_or_else(|| format!("{what}: layout L{k} is not in the module"))?;
+        // A predicted field (at its slot), or a typed field with no slot
+        // prediction (an access finds it through an IC).
+        match layout.field(name) {
+            Some((slot, f)) => {
+                if let Some(n) = c.state.fields() {
+                    want(n.contains(u32::try_from(slot).unwrap()), || {
+                        format!(
+                            "{what}: field {} (slot {slot}) is not yet added ({:#x})",
+                            m.atoms[name], n.0
+                        )
+                    })?;
+                }
+                claims.push(f.claim);
+            }
+            None => {
+                let f = layout
+                    .named_field(name)
+                    .ok_or_else(|| format!("{what}: layout L{k} has no field {}", m.atoms[name]))?;
+                want(c.state == LayoutState::Published, || {
+                    format!(
+                        "{what}: slotless field {} under construction",
+                        m.atoms[name]
+                    )
+                })?;
+                claims.push(f.claim);
+            }
+        }
+    }
+    Ok((c, claims))
+}
+
+/// The slot of field `name` through a receiver of type `o`, if the type
+/// proves it: a layout claim with SLOTS whose every layout has the field
+/// at one slot (below the prefix, for an object under construction).
+pub fn slot_of(o: &ObjInfo, name: AtomId, m: &Module) -> Option<u32> {
+    let c = o.layout.filter(|c| c.slots)?;
+    let mut slot = None;
+    for k in c.keys.keys() {
+        let (s, _) = m.layouts.get(&k)?.field(name)?;
+        if slot.is_some_and(|x| x != s)
+            || c.state
+                .fields()
+                .is_some_and(|n| !n.contains(u32::try_from(s).unwrap()))
+        {
+            return None;
+        }
+        slot = Some(s);
+    }
+    slot.map(|s| u32::try_from(s).unwrap())
+}
+
+fn math_result(_f: MathFn) -> Type {
+    Type::F64_TOP
+}
+
+/// The typing rule for `op` applied to operands of types `args`.
+pub fn signature(op: &Opcode, args: &[Type], m: &Module) -> SigResult {
+    use Opcode::*;
+    let number_or_bigint = TagSet::prims(PRIM_INT32 | PRIM_DOUBLE | PRIM_BIGINT);
+    Ok(match op {
+        ConstVal(c) => {
+            arity(args, 0)?;
+            Sig::result(const_val_type(*c))
+        }
+        ConstI32(n) => {
+            arity(args, 0)?;
+            Sig::result(Type::I32(IRange::new((*n).into(), (*n).into())))
+        }
+        ConstF64(bits) => {
+            arity(args, 0)?;
+            Sig::result(Type::F64(NumInfo::exact(f64::from_bits(*bits))))
+        }
+        ConstBool(_) => {
+            arity(args, 0)?;
+            Sig::result(Type::Bool)
+        }
+        ConstObj(s) => {
+            arity(args, 0)?;
+            let def = m
+                .snap_objs
+                .get(*s)
+                .ok_or_else(|| format!("const.obj: {s} is not in the module"))?;
+            Sig::result(Type::Obj(ObjInfo {
+                kind: def.kind,
+                singleton: Some(*s),
+                layout: None,
+            }))
+        }
+        ConstStr(a) => {
+            arity(args, 0)?;
+            want(m.atoms.contains(*a), || {
+                format!("const.str: {a} is not in the module")
+            })?;
+            Sig::result(Type::Str(StrInfo { atom: Some(*a) }))
+        }
+
+        Box => {
+            arity(args, 1)?;
+            Sig::result(box_type(&args[0])?)
+        }
+        BoxDouble => {
+            arity(args, 1)?;
+            let Type::F64(n) = args[0] else {
+                return Err("box.double: operand is not f64".into());
+            };
+            Sig::result(Type::Val(VSet::new(
+                TagSet::DOUBLE,
+                n,
+                ObjInfo::TOP,
+                StrInfo::TOP,
+            )))
+        }
+        Unbox(k) => {
+            arity(args, 1)?;
+            let v = val(&args[0], "unbox")?;
+            want(v.tags.is_nonempty_subset_of(k.tags()), || {
+                format!(
+                    "unbox.{}: operand {} is not proven to have tags {}",
+                    k.name(),
+                    crate::mir::print::type_str(&args[0]),
+                    crate::mir::print::tags_str(k.tags())
+                )
+            })?;
+            Sig::result(k.result(&v))
+        }
+        I32ToInt => {
+            arity(args, 1)?;
+            Sig::result(Type::Int(i32r(&args[0], "i32.to_int")?))
+        }
+        I32ToF64 => {
+            arity(args, 1)?;
+            Sig::result(Type::F64(i32r(&args[0], "i32.to_f64")?.num()))
+        }
+        IntToF64 => {
+            arity(args, 1)?;
+            match args[0] {
+                Type::Int(r) => Sig::result(Type::F64(r.num())),
+                _ => return Err("int.to_f64: expected an int".into()),
+            }
+        }
+        Weaken => {
+            arity(args, 1)?;
+            Sig::result(args[0])
+        }
+
+        GuardUnbox(k) => {
+            arity(args, 1)?;
+            let v = val(&args[0], "guard.unbox")?.restrict(k.tags());
+            Sig::output(k.result(&v))
+        }
+        GuardTags(t) => {
+            arity(args, 1)?;
+            Sig::output(Type::Val(val(&args[0], "guard.tags")?.restrict(*t)))
+        }
+        GuardKind(k) => {
+            arity(args, 1)?;
+            let o = obj(&args[0], "guard.kind")?;
+            let kind = if o.kind.le(*k) { o.kind } else { *k };
+            Sig::output(Type::Obj(ObjInfo { kind, ..o }))
+        }
+        GuardLayout {
+            keys,
+            types,
+            slots,
+            closed,
+        } => {
+            arity(args, 1)?;
+            let o = obj(&args[0], "guard.layout")?;
+            let new = LayoutClaim {
+                keys: *keys,
+                types: *types,
+                slots: *slots,
+                closed: *closed,
+                state: LayoutState::Published,
+            };
+            let layout = match o.layout {
+                Some(c) if c.le(&new) => c,
+                _ => new,
+            };
+            Sig::output(Type::Obj(ObjInfo {
+                layout: Some(layout),
+                ..o
+            }))
+        }
+        GuardCtor { key, n, types } => {
+            arity(args, 1)?;
+            let o = obj(&args[0], "guard.ctor")?;
+            Sig::output(Type::Obj(ObjInfo {
+                layout: Some(LayoutClaim {
+                    keys: KeyRange::one(*key),
+                    types: *types,
+                    slots: true,
+                    closed: false,
+                    state: LayoutState::Constructing(*n),
+                }),
+                ..o
+            }))
+        }
+        GuardSingleton(s) => {
+            arity(args, 1)?;
+            let o = obj(&args[0], "guard.singleton")?;
+            let def = m
+                .snap_objs
+                .get(*s)
+                .ok_or_else(|| format!("guard.singleton: {s} is not in the module"))?;
+            Sig::output(Type::Obj(ObjInfo {
+                kind: if o.kind.le(def.kind) {
+                    o.kind
+                } else {
+                    def.kind
+                },
+                singleton: Some(*s),
+                ..o
+            }))
+        }
+        GuardScript(s) => {
+            arity(args, 1)?;
+            let o = obj(&args[0], "guard.script")?;
+            Sig::output(Type::Obj(ObjInfo {
+                kind: ObjKind::Function(Some(*s)),
+                ..o
+            }))
+        }
+        MethodLoad { atom, script, .. } => {
+            arity(args, 1)?;
+            let o = obj(&args[0], "method.load")?;
+            let c = o
+                .layout
+                .ok_or("method.load: receiver has no layout claim")?;
+            want(c.state == LayoutState::Published, || {
+                "method.load: receiver is not of a published layout".into()
+            })?;
+            // Every layout the receiver may be lacks the name: CLOSED (which
+            // the op tests) then says it is not the receiver's own.
+            for k in c.keys.lo.get()..=c.keys.hi.get() {
+                let has = m
+                    .layouts
+                    .get(&crate::ids::LayoutKey::new(k))
+                    .is_some_and(|l| l.fields.iter().flatten().any(|f| f.name == *atom));
+                want(!has, || format!("method.load: layout L{k} has the name"))?;
+            }
+            Sig::output(Type::Obj(ObjInfo::kind(ObjKind::Function(Some(*script)))))
+        }
+        IntToI32 => {
+            arity(args, 1)?;
+            match args[0] {
+                Type::Int(r) => Sig::output(Type::I32(clamp_range(
+                    r.lo.into(),
+                    r.hi.into(),
+                    I32_MIN,
+                    I32_MAX,
+                ))),
+                _ => return Err("int.to_i32: expected an int".into()),
+            }
+        }
+        GuardRange(r) => {
+            arity(args, 1)?;
+            match args[0] {
+                Type::I32(x) => {
+                    let (lo, hi) = (x.lo.max(r.lo), x.hi.min(r.hi));
+                    Sig::output(Type::I32(if lo <= hi { IRange::new(lo, hi) } else { *r }))
+                }
+                _ => return Err("guard.range: expected an i32".into()),
+            }
+        }
+        F64ToIntExact => {
+            arity(args, 1)?;
+            match args[0] {
+                Type::F64(n) => Sig::output(Type::I32(n.int_range(I32_MIN, I32_MAX))),
+                _ => return Err("f64.to_int_exact: expected an f64".into()),
+            }
+        }
+        CheckFuse(f) => {
+            arity(args, 0)?;
+            want(m.fuses.contains(*f), || {
+                format!("check.fuse: {f} is not in the module")
+            })?;
+            Sig::output(Type::Fact(FactKind::Fuse(*f)))
+        }
+        CheckBinding(b, k) => {
+            arity(args, 0)?;
+            let def = m
+                .bindings
+                .get(*b)
+                .ok_or_else(|| format!("check.binding: {b} is not in the module"))?;
+            if *k == BindingCheck::Fn {
+                want(def.pred.is_some(), || {
+                    format!("check.binding.fn: {b} has no predicted function")
+                })?;
+                Sig::output(Type::Fact(FactKind::BindingFn(*b)))
+            } else {
+                Sig::output(Type::Fact(FactKind::Binding(*b)))
+            }
+        }
+        AccessorProbe(..) => {
+            arity(args, 1)?;
+            val(&args[0], "accessor.probe receiver")?;
+            Sig::output(Type::val(TagSet::OBJECT))
+        }
+        // The callee is native `n` (its pristine JSNative).
+        CheckNative(n) => {
+            arity(args, 1)?;
+            val(&args[0], "check.native callee")?;
+            want(m.natives.contains(*n), || {
+                format!("check.native: {n} is not in the module")
+            })?;
+            Sig::output(Type::Fact(FactKind::NativeIntact(*n)))
+        }
+
+        Jump | Unreachable => {
+            arity(args, 0)?;
+            Sig::none()
+        }
+        Br => {
+            arity(args, 1)?;
+            want(args[0] == Type::Bool, || "br: expected a bool".into())?;
+            Sig::none()
+        }
+        Switch(_) => {
+            arity(args, 1)?;
+            i32r(&args[0], "switch")?;
+            Sig::none()
+        }
+        SwitchStr(n) => {
+            arity(args, 1 + *n as usize)?;
+            val(&args[0], "switch.str")?;
+            for a in &args[1..] {
+                want(matches!(a, Type::Str(StrInfo { atom: Some(_) })), || {
+                    "switch.str: cases must be atoms".into()
+                })?;
+            }
+            Sig::none()
+        }
+        Return => {
+            arity(args, 1)?;
+            val(&args[0], "return")?;
+            Sig::none()
+        }
+        InlineEnter => {
+            want(args.len() >= 2, || {
+                "inline.enter: expected callee and this".into()
+            })?;
+            Sig::none()
+        }
+        ExitInline { nargs, nlocals, .. } => {
+            want(frame_parts(args, *nargs, *nlocals).is_some(), || {
+                "exit.inline: fewer operands than this + args + locals + rval".into()
+            })?;
+            for (i, t) in args.iter().enumerate() {
+                if !matches!(t, Type::Val(_)) {
+                    box_type(t).map_err(|e| format!("exit.inline operand {i}: {e}"))?;
+                }
+            }
+            Sig::output(Type::VAL_TOP)
+        }
+        Exit { nargs, nlocals, .. }
+        | ExitThrow { nargs, nlocals, .. }
+        | GenSuspend { nargs, nlocals, .. } => {
+            want(frame_parts(args, *nargs, *nlocals).is_some(), || {
+                "exit: fewer operands than this + args + locals + rval".into()
+            })?;
+            // Any boxable representation: the lowering boxes each operand
+            // once per exit shape (§5.1), not once per exit.
+            for (i, t) in args.iter().enumerate() {
+                if !matches!(t, Type::Val(_)) {
+                    box_type(t).map_err(|e| format!("exit operand {i}: {e}"))?;
+                }
+            }
+            Sig::none()
+        }
+
+        I32Ovf(a) => {
+            arity(args, 2)?;
+            let (x, y) = (i32r(&args[0], "i32 arith")?, i32r(&args[1], "i32 arith")?);
+            let (lo, hi) = arith_range(*a, x, y);
+            Sig::output(Type::I32(clamp_range(lo, hi, I32_MIN, I32_MAX)))
+        }
+        I32Wrap(a) => {
+            arity(args, 2)?;
+            let (x, y) = (i32r(&args[0], "i32 arith")?, i32r(&args[1], "i32 arith")?);
+            // Wasm's `rem_s` traps on 0.
+            want(*a != ArithOp::Rem || !has_zero(y), || {
+                "i32.rem.wrap: the divisor may be 0".into()
+            })?;
+            let (lo, hi) = arith_range(*a, x, y);
+            let fits = lo >= I32_MIN as i128 && hi <= I32_MAX as i128;
+            Sig::result(if fits {
+                Type::I32(IRange::new(lo as i64, hi as i64))
+            } else {
+                Type::I32_TOP
+            })
+        }
+        IntArith(a) => {
+            arity(args, 2)?;
+            let r = |t: &Type| match t {
+                Type::Int(r) => Ok(*r),
+                _ => Err("int arith: expected int operands".to_string()),
+            };
+            let (x, y) = (r(&args[0])?, r(&args[1])?);
+            want(
+                !may_neg_zero(*a, x, y) && (*a != ArithOp::Rem || !has_zero(y)),
+                || "int arith: may give -0 or divide by 0".into(),
+            )?;
+            let (lo, hi) = arith_range(*a, x, y);
+            // `Int` arithmetic is only for interval proofs: an op that may
+            // leave the exact-double domain is ill-typed, not a wraparound.
+            want(lo >= -(INT_LIM as i128) && hi <= INT_LIM as i128, || {
+                format!("int arith: result range [{lo}, {hi}] may leave [-2^53, 2^53]")
+            })?;
+            Sig::result(Type::Int(IRange::new(lo as i64, hi as i64)))
+        }
+        F64Arith(_) => {
+            arity(args, 2)?;
+            for t in args {
+                want(matches!(t, Type::F64(_)), || {
+                    "f64 arith: expected f64 operands".into()
+                })?;
+            }
+            Sig::result(Type::F64_TOP)
+        }
+        F64Neg => {
+            arity(args, 1)?;
+            want(matches!(args[0], Type::F64(_)), || {
+                "f64.neg: expected an f64".into()
+            })?;
+            Sig::result(Type::F64_TOP)
+        }
+        I32Bit(b) => {
+            arity(args, 2)?;
+            let x = i32r(&args[0], "i32 bitop")?;
+            let y = i32r(&args[1], "i32 bitop")?;
+            Sig::result(Type::I32(bit_range(*b, x, y)))
+        }
+        I32Ushr => {
+            arity(args, 2)?;
+            i32r(&args[0], "i32.ushr")?;
+            i32r(&args[1], "i32.ushr")?;
+            Sig::result(Type::Int(IRange::new(0, u32::MAX.into())))
+        }
+        ToInt32 => {
+            arity(args, 1)?;
+            want(matches!(args[0], Type::F64(_) | Type::Int(_)), || {
+                "to_int32: expected an f64 or int".into()
+            })?;
+            Sig::result(Type::I32_TOP)
+        }
+        Cmp(r, _) => {
+            arity(args, 2)?;
+            for t in args {
+                let ok = matches!(
+                    (r, t),
+                    (NumRepr::I32, Type::I32(_))
+                        | (NumRepr::Int, Type::Int(_))
+                        | (NumRepr::F64, Type::F64(_))
+                );
+                want(ok, || format!("cmp: operand is not {r:?}"))?;
+            }
+            Sig::result(Type::Bool)
+        }
+        Math(f) => {
+            arity(args, f.arity())?;
+            for t in args {
+                want(matches!(t, Type::F64(_)), || {
+                    "math: expected f64 operands".into()
+                })?;
+            }
+            Sig::result(math_result(*f))
+        }
+
+        JsAdd => {
+            arity(args, 2)?;
+            val(&args[0], "js.add")?;
+            val(&args[1], "js.add")?;
+            // No string or object operand (whose ToPrimitive might give a
+            // string): no concatenation.
+            let strish = TagSet::STRING.union(TagSet::OBJECT);
+            if free_of(&args[0], strish) && free_of(&args[1], strish) {
+                Sig::output(Type::val(if no_bigint(args) {
+                    TagSet::NUMBER
+                } else {
+                    number_or_bigint
+                }))
+            } else {
+                Sig::output(Type::val(number_or_bigint.union(TagSet::STRING)))
+            }
+        }
+        JsBinop(b) => {
+            arity(args, 2)?;
+            val(&args[0], "js.binop")?;
+            val(&args[1], "js.binop")?;
+            let nb = no_bigint(args);
+            Sig::output(Type::val(match b {
+                self::JsBinop::Ursh => TagSet::NUMBER,
+                self::JsBinop::BitAnd
+                | self::JsBinop::BitOr
+                | self::JsBinop::BitXor
+                | self::JsBinop::Lsh
+                | self::JsBinop::Rsh
+                    if nb =>
+                {
+                    TagSet::INT32
+                }
+                self::JsBinop::BitAnd
+                | self::JsBinop::BitOr
+                | self::JsBinop::BitXor
+                | self::JsBinop::Lsh
+                | self::JsBinop::Rsh => TagSet::prims(PRIM_INT32 | PRIM_BIGINT),
+                _ if nb => TagSet::NUMBER,
+                _ => number_or_bigint,
+            }))
+        }
+        JsUnop(u) => {
+            arity(args, 1)?;
+            val(&args[0], "js.unop")?;
+            Sig::output(Type::val(match u {
+                self::JsUnop::Pos => TagSet::NUMBER,
+                _ => number_or_bigint,
+            }))
+        }
+        JsCompare(_) => {
+            arity(args, 2)?;
+            val(&args[0], "js.compare")?;
+            val(&args[1], "js.compare")?;
+            Sig::output(Type::Bool)
+        }
+        Prim(p) => return signature(&p.generic(), args, m),
+        GetElemData => {
+            arity(args, 2)?;
+            val(&args[0], "getelem.data receiver")?;
+            val(&args[1], "getelem.data key")?;
+            Sig::output(Type::VAL_TOP)
+        }
+        SetElemData(_) => {
+            arity(args, 3)?;
+            for t in args {
+                val(t, "setelem.data operand")?;
+            }
+            Sig::none()
+        }
+        JsTypeof => {
+            arity(args, 1)?;
+            val(&args[0], "js.typeof")?;
+            Sig::result(Type::val(TagSet::STRING))
+        }
+        JsRt(r) => {
+            let (n, out) = match r {
+                RtOp::Instanceof | RtOp::In | RtOp::HasOwn | RtOp::DelElem(_) => {
+                    (2, Some(Type::val(TagSet::BOOLEAN)))
+                }
+                RtOp::DelProp(..) => (1, Some(Type::val(TagSet::BOOLEAN))),
+                RtOp::NewObject(_) | RtOp::NewArray(_) => (0, Some(Type::val(TagSet::OBJECT))),
+                RtOp::InitProp(..) => (2, None),
+                RtOp::InitElem(..) => (3, None),
+                RtOp::ToPropertyKey => (1, Some(Type::VAL_TOP)),
+                RtOp::RegExp(_) => (0, Some(Type::val(TagSet::OBJECT))),
+                RtOp::InitPropGetSet(..) => (2, None),
+                RtOp::Intrinsic(_) | RtOp::GetNameTypeof(_) => (0, Some(Type::VAL_TOP)),
+                RtOp::Iter => (1, Some(Type::val(TagSet::OBJECT))),
+                RtOp::Check(_) => (1, None),
+                RtOp::SetFunName(_) | RtOp::MutateProto => (2, None),
+                RtOp::GlobalThis => (0, Some(Type::val(TagSet::OBJECT))),
+                RtOp::BigInt(_) => (0, Some(Type::VAL_TOP)),
+                RtOp::CheckPrivateField(..) => (2, Some(Type::val(TagSet::BOOLEAN))),
+                RtOp::CheckIsObj(_) | RtOp::CloseIter(_) => (1, None),
+                RtOp::OptimizeSpreadCall => (1, Some(Type::VAL_TOP)),
+                RtOp::PushEnv(..) | RtOp::FreshenEnv(_) | RtOp::BindName(..) | RtOp::BindVar => {
+                    (0, Some(Type::val(TagSet::OBJECT)))
+                }
+                RtOp::EnterWith(_) => (1, Some(Type::val(TagSet::OBJECT))),
+                RtOp::GetName(..) => (0, Some(Type::VAL_TOP)),
+                RtOp::DelName(_) => (0, Some(Type::val(TagSet::BOOLEAN))),
+                RtOp::SetName(..) => (2, None),
+                RtOp::InitElemGetSet(_) => (3, None),
+                RtOp::SuperBase | RtOp::SuperFun => (1, Some(Type::VAL_TOP)),
+                RtOp::GetPropSuper(_) | RtOp::CheckReturn => (2, Some(Type::VAL_TOP)),
+                RtOp::GetElemSuper | RtOp::SetPropSuper(..) => (3, Some(Type::VAL_TOP)),
+                RtOp::SetElemSuper(_) => (4, Some(Type::VAL_TOP)),
+                RtOp::InitHomeObject => (2, None),
+                RtOp::AddDisposable(_) => (3, None),
+                RtOp::TakeDisposeCapability => (0, Some(Type::VAL_TOP)),
+                RtOp::CreateSuppressedError | RtOp::DynamicImport => {
+                    (2, Some(Type::val(TagSet::OBJECT)))
+                }
+                RtOp::GetBoundName(_) => (1, Some(Type::VAL_TOP)),
+                RtOp::ObjWithProto => (1, Some(Type::val(TagSet::OBJECT))),
+                RtOp::NewPrivateName(_) => {
+                    (0, Some(Type::val(TagSet::prims(crate::opsem::PRIM_SYMBOL))))
+                }
+                RtOp::SpreadEval(_) => (3, Some(Type::VAL_TOP)),
+                RtOp::CreateGenerator => (0, Some(Type::val(TagSet::OBJECT))),
+                RtOp::GenFinal => (1, None),
+                RtOp::GenCheckResume => (3, None),
+                RtOp::AsyncAwait(_) | RtOp::MaybeExtractAwait => (2, Some(Type::VAL_TOP)),
+                RtOp::AsyncReject | RtOp::Resume => (3, Some(Type::VAL_TOP)),
+                RtOp::CanSkipAwait => (1, Some(Type::val(TagSet::BOOLEAN))),
+                RtOp::FunWithProto(_) => (1, Some(Type::val(TagSet::OBJECT))),
+                RtOp::SpreadCall(0) => (4, Some(Type::VAL_TOP)),
+                RtOp::SpreadCall(_) => (4, Some(Type::val(TagSet::OBJECT))),
+                RtOp::ToString => (1, Some(Type::val(TagSet::STRING))),
+                RtOp::Symbol(_) => (0, Some(Type::val(TagSet::prims(crate::opsem::PRIM_SYMBOL)))),
+                RtOp::BuiltinObject(_) => (0, Some(Type::val(TagSet::OBJECT))),
+            };
+            arity(args, n)?;
+            for t in args {
+                val(t, "js.rt operand")?;
+            }
+            match out {
+                Some(t) => Sig::output(t),
+                None => Sig::none(),
+            }
+        }
+        JsThrow => {
+            arity(args, 1)?;
+            val(&args[0], "js.throw")?;
+            Sig::none()
+        }
+        ArgsObject | RestArray(_) => {
+            arity(args, 0)?;
+            Sig::output(Type::val(TagSet::OBJECT))
+        }
+        ArgsLength => {
+            arity(args, 0)?;
+            Sig::result(Type::I32(IRange::new(0, i64::from(i32::MAX))))
+        }
+        FrameNewTarget => {
+            arity(args, 0)?;
+            Sig::result(Type::VAL_TOP)
+        }
+        FrameCallee => {
+            arity(args, 0)?;
+            Sig::result(Type::val(TagSet::OBJECT))
+        }
+        IterMore => {
+            arity(args, 1)?;
+            val(&args[0], "iter.more")?;
+            Sig::result(Type::VAL_TOP)
+        }
+        IsGenClosing => {
+            arity(args, 1)?;
+            val(&args[0], "is_gen_closing")?;
+            Sig::result(Type::Bool)
+        }
+        IterIsDone => {
+            arity(args, 1)?;
+            val(&args[0], "iter.done")?;
+            Sig::result(Type::Bool)
+        }
+        IterEnd => {
+            arity(args, 1)?;
+            val(&args[0], "iter.end")?;
+            Sig::none()
+        }
+        IterOptimizable => {
+            arity(args, 1)?;
+            val(&args[0], "iter.optimizable")?;
+            Sig::result(Type::Bool)
+        }
+        ActualArg => {
+            arity(args, 1)?;
+            i32r(&args[0], "args.actual")?;
+            Sig::result(Type::VAL_TOP)
+        }
+        ActualArgOr(_) => {
+            arity(args, 0)?;
+            Sig::result(Type::VAL_TOP)
+        }
+        JsIsBuiltin(_) => {
+            arity(args, 1)?;
+            val(&args[0], "js.is_builtin")?;
+            Sig::result(Type::Bool)
+        }
+        ApplyFwd => {
+            arity(args, 3)?;
+            for t in args {
+                val(t, "js.apply_fwd operand")?;
+            }
+            Sig::output(Type::VAL_TOP)
+        }
+        JsToBool => {
+            arity(args, 1)?;
+            val(&args[0], "js.tobool")?;
+            Sig::result(Type::Bool)
+        }
+        JsTypeofEq(_) | JsConstantStrictEq(_) => {
+            arity(args, 1)?;
+            val(&args[0], "js leaf compare")?;
+            Sig::result(Type::Bool)
+        }
+        ArgsMapped(_) => {
+            arity(args, 0)?;
+            Sig::result(Type::VAL_TOP)
+        }
+        ArgsMappedSet(_) => {
+            arity(args, 1)?;
+            val(&args[0], "args.mapped_set")?;
+            Sig::none()
+        }
+        JsToNumeric => {
+            arity(args, 1)?;
+            val(&args[0], "js.tonumeric")?;
+            Sig::output(Type::val(number_or_bigint))
+        }
+        GetPropData(_) => {
+            arity(args, 1)?;
+            val(&args[0], "getprop.data receiver")?;
+            Sig::output(Type::VAL_TOP)
+        }
+        SetPropData(_) => {
+            arity(args, 2)?;
+            val(&args[0], "setprop.data receiver")?;
+            val(&args[1], "setprop.data value")?;
+            Sig::none()
+        }
+        JsGetProp(_) | JsGetElem | JsSetProp(..) | JsSetElem(..) => {
+            let n = match op {
+                JsGetProp(_) => 1,
+                JsGetElem | JsSetProp(..) => 2,
+                _ => 3,
+            };
+            arity(args, n)?;
+            for t in args {
+                val(t, "js prop op")?;
+            }
+            if matches!(op, JsGetProp(_) | JsGetElem) {
+                Sig::output(Type::VAL_TOP)
+            } else {
+                Sig::none()
+            }
+        }
+        JsGetName(_) => {
+            arity(args, 0)?;
+            Sig::output(Type::VAL_TOP)
+        }
+        JsBoxThis => {
+            arity(args, 1)?;
+            val(&args[0], "js.box_this")?;
+            Sig::output(Type::val(TagSet::OBJECT))
+        }
+        JsBindGName(_) => {
+            arity(args, 0)?;
+            Sig::output(Type::val(TagSet::OBJECT))
+        }
+        FrameStore(_) => {
+            arity(args, 1)?;
+            want(
+                matches!(
+                    args[0],
+                    Type::Val(_) | Type::I32(_) | Type::F64(_) | Type::Bool | Type::Obj(_)
+                ),
+                || "frame.store: expected a val, i32, f64, bool or obj".into(),
+            )?;
+            Sig::none()
+        }
+        CreateThis(..) => {
+            arity(args, 2)?;
+            val(&args[0], "create_this callee")?;
+            val(&args[1], "create_this new.target")?;
+            Sig::output(Type::val(TagSet::OBJECT))
+        }
+        NewThis(..) => {
+            arity(args, 2)?;
+            let o = obj(&args[0], "new_this callee")?;
+            want(matches!(o.kind, ObjKind::Function(Some(_))), || {
+                "new_this: callee's script is not known".into()
+            })?;
+            val(&args[1], "new_this proto")?;
+            Sig::output(Type::val(TagSet::OBJECT))
+        }
+        NewThisInit { key, types, n, .. } => {
+            arity(args, 2 + *n as usize)?;
+            let o = obj(&args[0], "new_this.init callee")?;
+            want(matches!(o.kind, ObjKind::Function(Some(_))), || {
+                "new_this.init: callee's script is not known".into()
+            })?;
+            val(&args[1], "new_this.init proto")?;
+            let layout = m
+                .layouts
+                .get(key)
+                .ok_or_else(|| format!("new_this.init: layout {key} is not in the module"))?;
+            for (i, t) in args[2..].iter().enumerate() {
+                let f = layout
+                    .fields
+                    .get(i)
+                    .and_then(Option::as_ref)
+                    .ok_or_else(|| format!("new_this.init: field {i} of {key} is not described"))?;
+                want(is_subtype(t, &f.claim), || {
+                    format!("new_this.init: value {i} does not conform to the field's claim")
+                })?;
+            }
+            Sig::output(Type::Obj(ObjInfo {
+                layout: Some(LayoutClaim {
+                    keys: KeyRange::one(*key),
+                    types: *types,
+                    slots: true,
+                    closed: false,
+                    state: LayoutState::Constructing(FieldSet::prefix(*n)),
+                }),
+                ..ObjInfo::TOP
+            }))
+        }
+        FnIsCtor => {
+            arity(args, 1)?;
+            obj(&args[0], "fn.is_ctor")?;
+            Sig::result(Type::Bool)
+        }
+        ObjEmulatesUndef => {
+            arity(args, 1)?;
+            obj(&args[0], "obj.emulates_undef")?;
+            Sig::result(Type::Bool)
+        }
+        Restamp(_) => {
+            arity(args, 1)?;
+            val(&args[0], "restamp")?;
+            Sig::none()
+        }
+        StampFresh(_) => {
+            arity(args, 1)?;
+            val(&args[0], "stamp.fresh")?;
+            Sig::none()
+        }
+        CtorStamp(..) | CtorPublish(..) => {
+            arity(args, 1)?;
+            val(&args[0], "ctor.stamp")?;
+            Sig::none()
+        }
+        JsLambda(_) => {
+            arity(args, 1)?;
+            want_kind(&obj(&args[0], "js.lambda")?, ObjKind::Env, "js.lambda")?;
+            Sig::output(Type::val(TagSet::OBJECT))
+        }
+        JsSetName(..) => {
+            arity(args, 2)?;
+            val(&args[0], "js.setname env")?;
+            val(&args[1], "js.setname value")?;
+            Sig::none()
+        }
+
+        LoadField(name) => {
+            arity(args, 1)?;
+            let o = obj(&args[0], "load_field")?;
+            let (c, claims) = field_claims(&o, *name, m, "load_field")?;
+            // `types` backs a field's claim: without it (the identity
+            // alone) the value is any `Val`, to be guarded at the def.
+            if !c.types {
+                return Ok(Sig::output(Type::VAL_TOP));
+            }
+            let mut t = claims[0];
+            for c in &claims[1..] {
+                t = join(&t, c).ok_or("load_field: field claims disagree in representation")?;
+            }
+            Sig::output(t.shallow())
+        }
+        LoadSlot(name) => {
+            arity(args, 1)?;
+            let o = obj(&args[0], "load_slot")?;
+            want(slot_of(&o, *name, m).is_some(), || {
+                format!(
+                    "load_slot: the receiver does not prove field {}'s slot",
+                    m.atoms[*name]
+                )
+            })?;
+            Sig::result(signature(&LoadField(*name), args, m)?.outputs[0])
+        }
+        StoreSlot(name) => {
+            arity(args, 2)?;
+            let o = obj(&args[0], "store_slot")?;
+            want(slot_of(&o, *name, m).is_some(), || {
+                "store_slot: the receiver's type does not prove the slot".into()
+            })?;
+            let (c, claims) = field_claims(&o, *name, m, "store_slot")?;
+            want(c.types, || {
+                "store_slot: the receiver's claim has no TYPES".into()
+            })?;
+            for claim in &claims {
+                want(is_subtype(&args[1], claim), || {
+                    "store_slot: value does not conform to the field's claim".into()
+                })?;
+            }
+            Sig::none()
+        }
+        StoreField(name) => {
+            arity(args, 2)?;
+            let o = obj(&args[0], "store_field")?;
+            let (c, claims) = field_claims(&o, *name, m, "store_field")?;
+            // Without `types` there is no claim to keep: any value, and
+            // the store's own check maintains the bits (§4.3).
+            if !c.types {
+                val(&args[1], "store_field value")?;
+                return Ok(Sig::none());
+            }
+            for claim in &claims {
+                want(is_subtype(&args[1], claim), || {
+                    format!(
+                        "store_field: value {} does not conform to the claim {}",
+                        crate::mir::print::type_str(&args[1]),
+                        crate::mir::print::type_str(claim)
+                    )
+                })?;
+            }
+            Sig::none()
+        }
+        InitField(name) => {
+            arity(args, 2)?;
+            let o = obj(&args[0], "init_field")?;
+            let c = o.layout.ok_or("init_field: receiver has no layout claim")?;
+            let n = match c.state {
+                LayoutState::Constructing(n) => n,
+                _ => return Err("init_field: receiver is not under construction".into()),
+            };
+            want(c.keys.lo == c.keys.hi, || {
+                "init_field: receiver's layout is not exact".into()
+            })?;
+            let layout = m
+                .layouts
+                .get(&c.keys.lo)
+                .ok_or_else(|| format!("init_field: layout L{} is not in the module", c.keys.lo))?;
+            let (i, f) = layout
+                .field(*name)
+                .ok_or_else(|| format!("init_field: the layout has no field {}", m.atoms[*name]))?;
+            let i = u32::try_from(i).unwrap();
+            want(n.may_add(i), || {
+                format!(
+                    "init_field: field {} may not be added to {:#x}",
+                    m.atoms[*name], n.0
+                )
+            })?;
+            want(is_subtype(&args[1], &f.claim), || {
+                "init_field: value does not conform to the field's claim".into()
+            })?;
+            Sig::output(Type::Obj(ObjInfo {
+                layout: Some(LayoutClaim {
+                    state: LayoutState::Constructing(n.with(i)),
+                    ..c
+                }),
+                ..o
+            }))
+        }
+        PublishLayout => {
+            arity(args, 1)?;
+            let o = obj(&args[0], "publish_layout")?;
+            let c = o
+                .layout
+                .ok_or("publish_layout: receiver has no layout claim")?;
+            let n = match c.state {
+                LayoutState::Constructing(n) => n,
+                _ => return Err("publish_layout: receiver is not under construction".into()),
+            };
+            let layout = m.layouts.get(&c.keys.lo).ok_or_else(|| {
+                format!("publish_layout: layout L{} is not in the module", c.keys.lo)
+            })?;
+            want(
+                c.keys.lo == c.keys.hi
+                    && n == FieldSet::prefix(u32::try_from(layout.fields.len()).unwrap()),
+                || "publish_layout: not every field is initialized".into(),
+            )?;
+            // Exactly the row (a constructing state is exact: anything
+            // that might add to the object kills it), so CLOSED where the
+            // layout may be.
+            Sig::result(Type::Obj(ObjInfo {
+                layout: Some(LayoutClaim {
+                    state: LayoutState::Published,
+                    closed: layout.closed,
+                    ..c
+                }),
+                ..o
+            }))
+        }
+        LitNew(_) => {
+            arity(args, 0)?;
+            Sig::output(Type::val(TagSet::OBJECT))
+        }
+        LitInit(..) => {
+            arity(args, 2)?;
+            val(&args[0], "lit.init object")?;
+            val(&args[1], "lit.init value")?;
+            Sig::none()
+        }
+        NewObject(k) => {
+            arity(args, 0)?;
+            want(m.layouts.contains_key(k), || {
+                format!("new_object: layout L{k} is not in the module")
+            })?;
+            Sig::result(Type::Obj(ObjInfo {
+                kind: ObjKind::Plain,
+                singleton: None,
+                layout: Some(LayoutClaim {
+                    keys: KeyRange::one(*k),
+                    types: true,
+                    slots: true,
+                    closed: false,
+                    state: LayoutState::Constructing(FieldSet::EMPTY),
+                }),
+            }))
+        }
+        NewArray => {
+            arity(args, 1)?;
+            i32r(&args[0], "new_array")?;
+            Sig::result(Type::Obj(ObjInfo::kind(ObjKind::Array)))
+        }
+        LoadElem | StoreElem(..) => {
+            arity(args, if *op == LoadElem { 2 } else { 3 })?;
+            want_kind(&obj(&args[0], "elem op")?, ObjKind::Native, "elem op")?;
+            i32r(&args[1], "elem op index")?;
+            if *op == LoadElem {
+                Sig::output(Type::VAL_TOP)
+            } else {
+                val(&args[2], "store_elem value")?;
+                Sig::none()
+            }
+        }
+        LoadTa | StoreTa => {
+            arity(args, if *op == LoadTa { 2 } else { 3 })?;
+            let o = obj(&args[0], "typed array op")?;
+            let k = match o.kind {
+                ObjKind::TypedArray(k) => k,
+                _ => {
+                    return Err(
+                        "typed array op: receiver is not a typed array of known kind".into(),
+                    )
+                }
+            };
+            i32r(&args[1], "typed array op index")?;
+            if *op == LoadTa {
+                Sig::output(match (k, k.proven_range()) {
+                    (TaKind::Float32 | TaKind::Float64, _) => Type::F64_TOP,
+                    (TaKind::Uint32, Some((lo, hi))) => Type::Int(IRange::new(lo, hi)),
+                    (_, Some((lo, hi))) => Type::I32(IRange::new(lo, hi)),
+                    (_, None) => Type::I32_TOP,
+                })
+            } else {
+                want(
+                    matches!(args[2], Type::I32(_) | Type::Int(_) | Type::F64(_)),
+                    || "store_ta: value must be a raw number".into(),
+                )?;
+                Sig::none()
+            }
+        }
+        LengthArray => {
+            arity(args, 1)?;
+            want_kind(
+                &obj(&args[0], "length.array")?,
+                ObjKind::Array,
+                "length.array",
+            )?;
+            Sig::result(Type::Int(IRange::new(0, u32::MAX.into())))
+        }
+        LengthString => {
+            arity(args, 1)?;
+            want(matches!(args[0], Type::Str(_)), || {
+                "length.string: expected a str".into()
+            })?;
+            Sig::result(Type::I32(IRange::new(0, (1 << 30) - 2)))
+        }
+        LengthTa => {
+            arity(args, 1)?;
+            let o = obj(&args[0], "length.ta")?;
+            want(matches!(o.kind, ObjKind::TypedArray(_)), || {
+                "length.ta: expected a typed array".into()
+            })?;
+            // A wasm32 engine's typed arrays are shorter than 2^31.
+            Sig::result(Type::I32(IRange::new(0, I32_MAX)))
+        }
+        ElementsPtr => {
+            arity(args, 1)?;
+            want_kind(
+                &obj(&args[0], "elements_ptr")?,
+                ObjKind::Native,
+                "elements_ptr",
+            )?;
+            Sig::result(Type::Raw(RawKind::Elements))
+        }
+        StrCharCodeAt => {
+            arity(args, 2)?;
+            want(matches!(args[0], Type::Str(_)), || {
+                "str.char_code_at: expected a str".into()
+            })?;
+            i32r(&args[1], "str.char_code_at index")?;
+            Sig::output(Type::I32(IRange::new(0, 0xffff)))
+        }
+
+        LoadGName(b) | StoreGName(b) => {
+            let def = m
+                .bindings
+                .get(*b)
+                .ok_or_else(|| format!("gname op: {b} is not in the module"))?;
+            let typed = matches!(op, LoadGName(_))
+                && args.first() == Some(&Type::Fact(FactKind::BindingFn(*b)));
+            want(
+                typed || args.first() == Some(&Type::Fact(FactKind::Binding(*b))),
+                || format!("gname op: first operand must be the fact.binding({b}) ghost"),
+            )?;
+            if let LoadGName(_) = op {
+                arity(args, 1)?;
+                match def.pred.filter(|_| typed) {
+                    // The predicted function (`check.binding.fn`).
+                    Some(k) => Sig::result(Type::Val(VSet::new(
+                        TagSet::OBJECT,
+                        NumInfo::TOP,
+                        ObjInfo::kind(ObjKind::Function(Some(k))),
+                        StrInfo::TOP,
+                    ))),
+                    None => Sig::result(def.claim),
+                }
+            } else {
+                arity(args, 2)?;
+                want(is_subtype(&args[1], &def.claim), || {
+                    "store_gname: value does not conform to the binding's claim".into()
+                })?;
+                Sig::none()
+            }
+        }
+        GlobalObject => {
+            arity(args, 0)?;
+            Sig::result(Type::val(TagSet::OBJECT))
+        }
+        EnvCurrent => {
+            arity(args, 0)?;
+            Sig::result(Type::Obj(ObjInfo::kind(ObjKind::Env)))
+        }
+        EnvCallee(_) | ObjectLit(_) => {
+            arity(args, 0)?;
+            Sig::result(Type::val(TagSet::OBJECT))
+        }
+        EnvSet => {
+            arity(args, 1)?;
+            val(&args[0], "env.set")?;
+            Sig::none()
+        }
+        EnvPop => {
+            arity(args, 0)?;
+            Sig::none()
+        }
+        EnvParent => {
+            arity(args, 1)?;
+            want_kind(&obj(&args[0], "env.parent")?, ObjKind::Env, "env.parent")?;
+            Sig::result(Type::Obj(ObjInfo::kind(ObjKind::Env)))
+        }
+        EnvLoad(_) => {
+            arity(args, 1)?;
+            want_kind(&obj(&args[0], "env.load")?, ObjKind::Env, "env.load")?;
+            Sig::result(Type::VAL_TOP)
+        }
+        EnvStore(_) => {
+            arity(args, 2)?;
+            want_kind(&obj(&args[0], "env.store")?, ObjKind::Env, "env.store")?;
+            val(&args[1], "env.store value")?;
+            Sig::none()
+        }
+
+        Call | CallIter | CallEval(_) | Construct(..) => {
+            want(args.len() >= 2, || "call: expected callee and this".into())?;
+            for t in args {
+                val(t, "call operand")?;
+            }
+            Sig::output(if matches!(op, Construct(..)) {
+                Type::val(TagSet::OBJECT)
+            } else {
+                Type::VAL_TOP
+            })
+        }
+        CallDirect => {
+            want(args.len() >= 2, || {
+                "call_direct: expected callee and this".into()
+            })?;
+            let o = obj(&args[0], "call_direct callee")?;
+            want(matches!(o.kind, ObjKind::Function(Some(_))), || {
+                "call_direct: callee's script is not known".into()
+            })?;
+            for t in &args[1..] {
+                val(t, "call operand")?;
+            }
+            Sig::output(Type::VAL_TOP)
+        }
+        CallNative(n) => {
+            want(m.natives.contains(*n), || {
+                format!("call_native: {n} is not in the module")
+            })?;
+            want(!args.is_empty(), || "call_native: expected this".into())?;
+            for t in args {
+                val(t, "call operand")?;
+            }
+            Sig::output(Type::VAL_TOP)
+        }
+    })
+}
+
+/// The effect-flags contribution of an op (`wasm/mir/abi.rs` names the bits).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub struct FlagBits(u8);
+
+impl FlagBits {
+    pub const NONE: FlagBits = FlagBits(0);
+    pub const MUT_THIS: FlagBits = FlagBits(1);
+    pub const MUT_OTHER: FlagBits = FlagBits(2);
+    pub const STAMPS: FlagBits = FlagBits(4);
+    pub const BIND: FlagBits = FlagBits(8);
+    pub const ALL: FlagBits = FlagBits(15);
+
+    pub const fn union(self, o: FlagBits) -> FlagBits {
+        FlagBits(self.0 | o.0)
+    }
+
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+}
+
+/// How an op contributes to the flow-carried flags word (§6).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum FlagsEffect {
+    Bits(FlagBits),
+    /// Whatever the helper reports at runtime (at most `ALL`).
+    Dynamic,
+    /// The callee's returned flags.
+    Callee,
+}
+
+/// Where an op's kill pattern applies, which follows from its shape.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum KillSite {
+    /// The op kills nothing.
+    None,
+    /// A single-successor op: a fence at the op itself.
+    Op,
+    /// On the `ok` edge (and the `err` edge): a static kill.
+    OkEdge,
+    /// On the `ok_dirty` edge (and `err`) only: a dynamic kill.
+    DirtyEdge,
+}
+
+/// An op's effect summary.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Effects {
+    pub reads: Vec<Region>,
+    pub writes: Vec<Region>,
+    pub may_gc: bool,
+    pub may_run_js: bool,
+    pub may_throw: bool,
+    pub kill: KillPattern,
+    pub flags: FlagsEffect,
+}
+
+impl Effects {
+    pub const PURE: Effects = Effects {
+        reads: vec![],
+        writes: vec![],
+        may_gc: false,
+        may_run_js: false,
+        may_throw: false,
+        kill: KillPattern::NONE,
+        flags: FlagsEffect::Bits(FlagBits::NONE),
+    };
+
+    /// Arbitrary JS may run: every region, every killable component.
+    fn generic(flags: FlagsEffect) -> Effects {
+        Effects {
+            reads: vec![Region::Unknown],
+            writes: vec![Region::Unknown],
+            may_gc: true,
+            may_run_js: true,
+            may_throw: true,
+            kill: KillPattern::ALL,
+            flags,
+        }
+    }
+
+    pub fn is_pure(&self) -> bool {
+        *self == Effects::PURE
+    }
+}
+
+impl Opcode {
+    /// Where this op's kill pattern (if any) applies.
+    pub fn kill_site(&self, fx: &Effects) -> KillSite {
+        if fx.kill.is_empty() {
+            return KillSite::None;
+        }
+        let roles = self.roles();
+        if roles.contains(&SuccRole::OkDirty) {
+            KillSite::DirtyEdge
+        } else if roles.contains(&SuccRole::Ok) {
+            KillSite::OkEdge
+        } else {
+            KillSite::Op
+        }
+    }
+}
+
+/// The field region an access through a receiver of type `o` touches:
+/// specific when a layout claim proves the receiver's class, the
+/// `Field(*, name)` wildcard otherwise.
+fn field_region(o: Option<&ObjInfo>, name: AtomId) -> Region {
+    Region::Field {
+        name,
+        keys: o.and_then(|o| o.layout).map(|c| c.keys),
+    }
+}
+
+/// What a by-name data read of `name` through an unproven receiver may
+/// read: the field in any class, the global binding of that name (the
+/// receiver may be the global object), and for `length`/`byteLength` the
+/// array, string and typed-array lengths the runtime's pure arms serve.
+fn prop_regions(name: AtomId, m: &Module) -> Vec<Region> {
+    let mut r = vec![Region::Field { name, keys: None }];
+    r.extend(
+        m.bindings
+            .iter()
+            .filter(|(_, d)| d.name == name)
+            .map(|(b, _)| Region::Global(b)),
+    );
+    let chars = m.atoms.get(name).map(|a| a.chars());
+    let is = |s: &str| chars.is_some_and(|c| c.iter().copied().eq(s.encode_utf16()));
+    if is("length") || is("byteLength") {
+        r.push(Region::ArrayLength(None));
+        r.push(Region::TypedArrayLength);
+    }
+    r
+}
+
+/// Whether atom `name` is `length`.
+fn is_length(name: AtomId, m: &Module) -> bool {
+    m.atoms
+        .get(name)
+        .is_some_and(|a| a.chars().iter().copied().eq("length".encode_utf16()))
+}
+
+/// The elements root a receiver's layout claim proves, if every layout in
+/// its range names the same one.
+fn elements_root(o: Option<&ObjInfo>, m: &Module) -> Option<crate::ids::RegionRoot> {
+    let c = o?.layout?;
+    let mut root = None;
+    for k in c.keys.keys() {
+        let r = m.layouts.get(&k)?.elements?;
+        if root.is_some_and(|x| x != r) {
+            return None;
+        }
+        root = Some(r);
+    }
+    root
+}
+
+/// The effect summary of `op` on operands of types `args`. Total: an
+/// ill-typed op gets the summary its opcode implies with wildcard regions.
+/// Whether value type `t` has none of `tags`.
+fn free_of(t: &Type, tags: TagSet) -> bool {
+    match t {
+        Type::Val(v) => v.tags.intersect(tags).is_empty(),
+        _ => false,
+    }
+}
+
+/// Whether a numeric operator on `args` cannot yield a BigInt: that needs
+/// both operands BigInt after ToNumeric, and one that is no BigInt and no
+/// object (whose valueOf might give one) makes the result a Number, or a
+/// TypeError for mixing.
+fn no_bigint(args: &[Type]) -> bool {
+    let big = TagSet::prims(PRIM_BIGINT).union(TagSet::OBJECT);
+    args.iter().any(|t| free_of(t, big))
+}
+
+pub fn effects(op: &Opcode, args: &[Type], m: &Module) -> Effects {
+    use Opcode::*;
+    let recv = args.first().and_then(|t| t.obj_info());
+    let mut fx = Effects::PURE;
+    match op {
+        JsAdd | JsBinop(_) | JsUnop(_) | JsCompare(_) | JsToNumeric | JsGetProp(_)
+        | JsSetProp(..) | JsGetElem | JsSetElem(..) | JsBindGName(_) | JsSetName(..) => {
+            return Effects::generic(FlagsEffect::Dynamic)
+        }
+        JsGetName(_) => return Effects::generic(FlagsEffect::Dynamic),
+        // No user code runs: a concatenation or a BigInt allocates.
+        Prim(_) => fx.may_gc = true,
+        // Any location; interning the key or a string's char allocates.
+        GetElemData => {
+            fx.reads = vec![Region::Unknown];
+            fx.may_gc = true;
+        }
+        // An int32 key names an element: the elements, an array's length,
+        // a typed array's data; any other key may name a field.
+        SetElemData(_) => {
+            let int_key = matches!(args.get(1), Some(Type::Val(v)) if v.tags.is_nonempty_subset_of(TagSet::INT32));
+            fx.writes = if int_key {
+                [Region::Elements(None), Region::ArrayLength(None)]
+                    .into_iter()
+                    .chain(TaKind::ALL.iter().map(|&k| Region::TypedArrayData(k)))
+                    .collect()
+            } else {
+                vec![Region::Unknown]
+            };
+            fx.may_gc = true;
+            fx.kill = KillPattern::ALL;
+            fx.flags = FlagsEffect::Dynamic;
+        }
+        JsRt(_) => return Effects::generic(FlagsEffect::Dynamic),
+        ApplyFwd => return Effects::generic(FlagsEffect::Callee),
+        // Allocations: they run no JS and change no class word (a GC moves
+        // objects but keeps their words), so they kill nothing.
+        ArgsObject | RestArray(_) | JsLambda(_) | JsBoxThis | NewThis(..) | NewThisInit { .. } => {
+            fx.may_gc = true;
+            fx.may_throw = true;
+        }
+        JsThrow => return Effects::generic(FlagsEffect::Bits(FlagBits::ALL)),
+        // `.prototype` of the callee: generic, reported.
+        CreateThis(..) => return Effects::generic(FlagsEffect::Dynamic),
+        // Writes the class word of an object no guard can have proven.
+        CtorStamp(..) | CtorPublish(..) => {
+            fx.writes = vec![Region::Unknown];
+            fx.flags = FlagsEffect::Bits(FlagBits::MUT_THIS);
+        }
+        // The object is fresh: no fact about its word exists yet.
+        StampFresh(_) => fx.flags = FlagsEffect::Bits(FlagBits::MUT_THIS),
+        // Advances a prefix key to its full one: slots stay put, so a
+        // fact about the prefix stays true; a prefix-key guard just misses.
+        Restamp(_) => {
+            fx.writes = vec![Region::Unknown];
+            fx.flags = FlagsEffect::Bits(FlagBits::MUT_OTHER);
+        }
+        // The rest of the callee, in baseline: anything.
+        ExitInline { .. } => return Effects::generic(FlagsEffect::Dynamic),
+        Call | CallIter | CallEval(_) | CallDirect | Construct(..) | CallNative(_) => {
+            return Effects::generic(FlagsEffect::Callee)
+        }
+        // The atom's string: its lowering calls a may-GC helper.
+        ConstStr(_) => fx.may_gc = true,
+        LoadField(name) => {
+            // SLOTS is tested locally; the IC arm may GC and reports dirt.
+            fx.reads = vec![field_region(recv, *name)];
+            fx.may_gc = true;
+            fx.may_throw = true;
+            fx.kill = KillPattern::ALL;
+            fx.flags = FlagsEffect::Dynamic;
+        }
+        StoreField(name) => {
+            // Not a fence for `types` (§4.3): the value conforms by type.
+            // The IC arm (add transition) reports dirt dynamically.
+            fx.writes = vec![field_region(recv, *name)];
+            fx.may_gc = true;
+            fx.may_throw = true;
+            fx.kill = KillPattern::ALL;
+            fx.flags = FlagsEffect::Dynamic;
+        }
+        LoadSlot(name) => fx.reads = vec![field_region(recv, *name)],
+        StoreSlot(name) => {
+            fx.writes = vec![field_region(recv, *name)];
+            fx.flags = FlagsEffect::Bits(FlagBits::MUT_THIS.union(FlagBits::MUT_OTHER));
+        }
+        GetPropData(name) => fx.reads = prop_regions(*name, m),
+        // A field (never the global's), or an array's length (which may
+        // drop elements): an add may grow the slots; a demotion takes the
+        // dirty edge.
+        SetPropData(name) => {
+            fx.writes = prop_regions(*name, m)
+                .into_iter()
+                .filter(|r| !matches!(r, Region::Global(_)))
+                .chain(is_length(*name, m).then_some(Region::Elements(None)))
+                .collect();
+            fx.may_gc = true;
+            fx.kill = KillPattern::ALL;
+            fx.flags = FlagsEffect::Dynamic;
+        }
+        InitField(name) => {
+            fx.writes = vec![field_region(recv, *name)];
+            fx.may_gc = true;
+            fx.flags = FlagsEffect::Bits(FlagBits::MUT_THIS);
+        }
+        PublishLayout => {
+            fx.kill = KillPattern::of(KillSet::CONSTRUCTING);
+        }
+        NewObject(_) | NewArray => fx.may_gc = true,
+        LitNew(_) => {
+            fx.may_gc = true;
+            fx.may_throw = true;
+        }
+        LitInit(name, k) => {
+            fx.writes = vec![Region::Field {
+                name: *name,
+                keys: Some(KeyRange::one(*k)),
+            }];
+            fx.may_gc = true;
+            fx.may_throw = true;
+            fx.flags = FlagsEffect::Bits(FlagBits::MUT_OTHER);
+        }
+        LoadElem => fx.reads = vec![Region::Elements(elements_root(recv, m))],
+        ArgsMapped(_) => fx.reads = vec![Region::Unknown],
+        ArgsMappedSet(_) => {
+            fx.writes = vec![Region::Unknown];
+            fx.flags = FlagsEffect::Bits(FlagBits::MUT_OTHER);
+        }
+        StoreElem(_, append) => {
+            // An overwrite, or an append (the lengths too).
+            let root = elements_root(recv, m);
+            fx.writes = vec![Region::Elements(root)];
+            if *append {
+                fx.writes.push(Region::ArrayLength(root));
+                // The runtime's append may grow the elements.
+                fx.may_gc = true;
+            }
+            fx.flags = FlagsEffect::Bits(FlagBits::MUT_OTHER);
+        }
+        LoadTa | StoreTa => {
+            let r = match recv.map(|o| o.kind) {
+                Some(ObjKind::TypedArray(k)) => Region::TypedArrayData(k),
+                _ => Region::Unknown,
+            };
+            if *op == LoadTa {
+                fx.reads = vec![r, Region::TypedArrayLength];
+            } else {
+                fx.reads = vec![Region::TypedArrayLength];
+                fx.writes = vec![r];
+                fx.flags = FlagsEffect::Bits(FlagBits::MUT_OTHER);
+            }
+        }
+        LengthArray => fx.reads = vec![Region::ArrayLength(elements_root(recv, m))],
+        // The iterator's own state, which nothing else reads.
+        IterMore | IterEnd => {
+            fx.reads = vec![Region::Unknown];
+            fx.writes = vec![Region::Unknown];
+        }
+        // The value's shape and the realm's iteration fuses.
+        IterOptimizable => fx.reads = vec![Region::Unknown],
+        LengthTa => fx.reads = vec![Region::TypedArrayLength],
+        ElementsPtr => fx.reads = vec![Region::Elements(elements_root(recv, m))],
+        // Reading a rope's chars flattens it, which allocates.
+        StrCharCodeAt => fx.may_gc = true,
+        LoadGName(b) => fx.reads = vec![Region::Global(*b)],
+        // Its cell, which the runtime arms and unarms.
+        MethodLoad { .. } => fx.reads = vec![Region::Unknown],
+        StoreGName(b) => {
+            fx.writes = vec![Region::Global(*b)];
+            fx.kill = KillPattern::of(store_gname_kills(*b, m));
+            fx.flags = FlagsEffect::Bits(FlagBits::BIND);
+        }
+        // The frame's current environment, which a scope's entry and exit
+        // replace.
+        EnvCurrent | EnvCallee(_) => fx.reads = vec![Region::FrameEnv],
+        EnvSet => fx.writes = vec![Region::FrameEnv],
+        EnvPop => {
+            fx.reads = vec![Region::FrameEnv];
+            fx.writes = vec![Region::FrameEnv];
+        }
+        EnvLoad(s) => fx.reads = vec![Region::Env(*s)],
+        EnvStore(s) => {
+            fx.writes = vec![Region::Env(*s)];
+            fx.flags = FlagsEffect::Bits(FlagBits::MUT_OTHER);
+        }
+        _ => {}
+    }
+    fx
+}
+
+/// What `store_gname` to binding `b` kills: every fuse (a fused literal's
+/// may blow), and, for a binding with a predicted function, the binding
+/// facts (the value may no longer be that function).
+pub fn store_gname_kills(b: BindingId, m: &Module) -> KillSet {
+    match m.bindings.get(b).and_then(|d| d.pred) {
+        Some(_) => KillSet::FUSE.union(KillSet::BINDING),
+        None => KillSet::FUSE,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mir::module::{FieldDef, Layout};
+
+    fn m() -> Module {
+        let mut m = Module::default();
+        let x = m.intern_atom(&crate::ids::JsString::from("x"));
+        let o = m.intern_atom(&crate::ids::JsString::from("o"));
+        m.layouts.insert(
+            LayoutKey::new(3),
+            Layout {
+                fields: vec![
+                    Some(FieldDef {
+                        name: x,
+                        claim: Type::val(TagSet::INT32),
+                    }),
+                    Some(FieldDef {
+                        name: o,
+                        claim: Type::Val(VSet::new(
+                            TagSet::OBJECT,
+                            NumInfo::TOP,
+                            ObjInfo {
+                                kind: ObjKind::Plain,
+                                singleton: None,
+                                layout: Some(LayoutClaim {
+                                    keys: KeyRange::one(LayoutKey::new(4)),
+                                    types: true,
+                                    slots: true,
+                                    closed: false,
+                                    state: LayoutState::Published,
+                                }),
+                            },
+                            StrInfo::TOP,
+                        )),
+                    }),
+                ],
+                named: vec![],
+                elements: None,
+                closed: false,
+            },
+        );
+        m
+    }
+
+    fn k3(types: bool) -> Type {
+        Type::Obj(ObjInfo {
+            kind: ObjKind::Plain,
+            singleton: None,
+            layout: Some(LayoutClaim {
+                keys: KeyRange::one(LayoutKey::new(3)),
+                types,
+                slots: true,
+                closed: false,
+                state: LayoutState::Published,
+            }),
+        })
+    }
+
+    #[test]
+    fn every_opcode_has_a_shape() {
+        // Terminators with successors, exiting terminators, and plain ops
+        // are disjoint, and the kill site follows from the shape.
+        let m = m();
+        let ops = [
+            Opcode::Jump,
+            Opcode::GuardTags(TagSet::INT32),
+            Opcode::Call,
+            Opcode::JsGetName(AtomId::from_u32(0)),
+            Opcode::StoreGName(BindingId::from_u32(0)),
+            Opcode::Box,
+        ];
+        let sites: Vec<_> = ops
+            .iter()
+            .map(|op| op.kill_site(&effects(op, &[], &m)))
+            .collect();
+        assert_eq!(
+            sites,
+            [
+                KillSite::None,
+                KillSite::None,
+                KillSite::DirtyEdge,
+                KillSite::DirtyEdge,
+                KillSite::Op,
+                KillSite::None
+            ]
+        );
+        assert!(Opcode::Return.is_terminator());
+        assert!(!Opcode::Box.is_terminator());
+    }
+
+    #[test]
+    fn unbox_requires_proof() {
+        let m = m();
+        let n = Type::val(TagSet::NUMBER);
+        assert!(signature(&Opcode::Unbox(UnboxKind::I32), &[n], &m).is_err());
+        assert!(signature(&Opcode::Unbox(UnboxKind::F64Num), &[n], &m).is_ok());
+        let g = signature(&Opcode::GuardUnbox(UnboxKind::I32), &[n], &m).unwrap();
+        assert_eq!(g.outputs, vec![Type::I32_TOP]);
+        let b = signature(&Opcode::Box, &[Type::i32_range(0, 9)], &m).unwrap();
+        let u = signature(&Opcode::Unbox(UnboxKind::I32), &b.results, &m).unwrap();
+        assert_eq!(u.results, vec![Type::i32_range(0, 9)]);
+    }
+
+    #[test]
+    fn magic_is_boundary_only() {
+        // `Val(⊤)` includes magic values (a frame slot can hold one):
+        // nothing unboxes it, and a tag guard without `magic` removes it.
+        let m = m();
+        assert!(TagSet::MAGIC.subset_of(VSet::TOP.tags));
+        let js = Type::val(TagSet::JS);
+        assert!(is_subtype(&js, &Type::VAL_TOP));
+        assert!(!is_subtype(&Type::VAL_TOP, &js));
+        let g = signature(&Opcode::GuardTags(TagSet::JS), &[Type::VAL_TOP], &m).unwrap();
+        assert_eq!(g.outputs, vec![js]);
+        for k in UnboxKind::ALL {
+            assert!(signature(&Opcode::Unbox(k), &[Type::val(TagSet::MAGIC)], &m).is_err());
+            let g = signature(&Opcode::GuardUnbox(k), &[Type::VAL_TOP], &m).unwrap();
+            assert!(!matches!(g.outputs[0], Type::Val(v) if v.tags.magic));
+        }
+        // Boxing never yields magic.
+        let b = signature(&Opcode::Box, &[Type::I32_TOP], &m).unwrap();
+        assert!(!matches!(b.results[0], Type::Val(v) if v.tags.magic));
+    }
+
+    #[test]
+    fn arith_ranges() {
+        let m = m();
+        let s = signature(
+            &Opcode::I32Ovf(ArithOp::Add),
+            &[Type::i32_range(0, 10), Type::i32_range(-5, 5)],
+            &m,
+        )
+        .unwrap();
+        assert_eq!(s.outputs, vec![Type::i32_range(-5, 15)]);
+        let big = Type::int_range(0, 1 << 52);
+        assert!(signature(&Opcode::IntArith(ArithOp::Add), &[big, big], &m).is_ok());
+        assert!(signature(&Opcode::IntArith(ArithOp::Mul), &[big, big], &m).is_err());
+    }
+
+    #[test]
+    fn field_ops_follow_the_claim() {
+        let m = m();
+        let x = AtomId::from_u32(0);
+        let o = AtomId::from_u32(1);
+        let s = signature(&Opcode::LoadField(x), &[k3(true)], &m).unwrap();
+        assert_eq!(s.outputs, vec![Type::val(TagSet::INT32)]);
+        // Shallow: the child's layout claim is not carried.
+        let s = signature(&Opcode::LoadField(o), &[k3(true)], &m).unwrap();
+        assert_eq!(s.outputs[0].obj_info().unwrap().layout, None);
+        assert_eq!(s.outputs[0].obj_info().unwrap().kind, ObjKind::Plain);
+        // Without `types`, the identity alone: any val.
+        let s = signature(&Opcode::LoadField(x), &[k3(false)], &m).unwrap();
+        assert_eq!(s.outputs, vec![Type::VAL_TOP]);
+        // Stores require conformance.
+        assert!(signature(
+            &Opcode::StoreField(x),
+            &[k3(true), Type::val(TagSet::INT32)],
+            &m
+        )
+        .is_ok());
+        assert!(signature(
+            &Opcode::StoreField(x),
+            &[k3(true), Type::val(TagSet::NUMBER)],
+            &m
+        )
+        .is_err());
+    }
+}

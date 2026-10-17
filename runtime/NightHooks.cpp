@@ -4,10 +4,12 @@
 #include "runtime/NightHooks.h"
 
 #include "runtime/Night.h"
+#include "runtime/NightContext.h"
 #include "runtime/NightEntry.h"
 #include "runtime/NightEnv.h"
 #include "runtime/NightObjectWord.h"
 #include "runtime/NightRegExp.h"
+#include "runtime/NightRegistration.h"
 #include "runtime/NightStack.h"
 #include "vm/GeneratorObject.h"
 #include "vm/Interpreter.h"
@@ -41,13 +43,43 @@ static uint32_t BumpSiteOf(JS::ExternalObjectMutation why) {
 // NightMonkey keeps its state process-wide (one runtime per wasm instance),
 // so the per-context state is unused; the slot is there for a tier that
 // keeps state per context.
-static void* NightNewContext(JSContext* cx) { return nullptr; }
+// The tier's per-context state (NightStack.h): the context's value stack.
+// A context whose state cannot be made (or whose stack region cannot) runs
+// no compiled code: every entry checks for it.
+static void NightDestroyContext(JSContext* cx, void* state) {
+  auto* s = static_cast<nightrt::NightContextState*>(state);
+  // The module's tables outlive this context's heap (JS::NightClearCaches).
+  // The engine calls this hook before it tears the heap down, with the
+  // state still attached.
+  if (s->runtime && nightrt::NightStateOf(cx) == s) {
+    JS::NightClearCaches(cx);
+  }
+  if (s->runtime) {
+    js::night::DeleteNightRuntimeState(s->runtime);
+  }
+  js_delete(s);
+}
 
-static void NightDestroyContext(JSContext* cx, void* state) {}
+static void* NightNewContext(JSContext* cx) {
+  auto* state = js_new<nightrt::NightContextState>();
+  if (!state) {
+    return nullptr;
+  }
+  state->runtime = js::night::NewNightRuntimeState();
+  if (!state->stack.valid() || !state->runtime) {
+    NightDestroyContext(cx, state);
+    return nullptr;
+  }
+  return state;
+}
+
+extern "C" void NightCensusTraceConstructing(uint32_t oldWord,
+                                             uint32_t newWord, uint32_t site);
 
 static void ObjectDemoted(JSContext* cx, JSObject* obj, uintptr_t oldWord,
                           JS::ExternalObjectMutation why) {
   NightNoteDemotion(oldWord, BumpSiteOf(why));
+  NightCensusTraceConstructing(oldWord, obj->externalWord(), BumpSiteOf(why));
 }
 
 static void PropertyAdded(JSContext* cx, NativeObject* obj, JS::PropertyKey id,
@@ -66,6 +98,11 @@ static void GlobalDataStored(JSContext* cx, JS::PropertyKey id,
 
 static void GlobalLexicalShadowAdded(JSContext* cx, uint64_t idBits) {
   night_runtime_global_lexical_shadow_added(uintptr_t(idBits));
+}
+
+static void ObjectFuseInvalidated(JSContext* cx, js::ObjectFuse* fuse,
+                                  uint32_t propSlot) {
+  NightObjectFuseInvalidated(fuse, propSlot);
 }
 
 static JS::ExternalEnterStatus Convert(EnterNightStatus status) {
@@ -105,9 +142,8 @@ static void TraceRoots(JSContext* cx, JSTracer* trc) {
   // args/this/locals/operands are boxed JS::Values living there, not in the
   // GC heap); the engine calls this on every GC, minor and major, so a
   // nursery collection forwards the nursery pointers it holds.
-  nightrt::NightStack& stack = nightrt::TheNightStack();
-  if (stack.valid()) {
-    stack.trace(trc);
+  if (nightrt::NightContextState* state = nightrt::NightStateOf(cx)) {
+    state->stack.trace(trc);
   }
 }
 
@@ -120,9 +156,11 @@ JS::ExternalCompilerHooks js::night::gNightHooks = {
     /* storeClearMask */ kStoreClearMask,
     /* storeNonNumberClearMask */ kStoreNonNumberClearMask,
     /* propertyAdded */ PropertyAdded,
+    /* shapeForAdd */ NightShapeForAdd,
     /* globalKeyChanged */ GlobalKeyChanged,
     /* globalDataStored */ GlobalDataStored,
     /* globalLexicalShadowAdded */ GlobalLexicalShadowAdded,
+    /* objectFuseInvalidated */ ObjectFuseInvalidated,
     /* enterScript */ EnterScript,
     /* enterCall */ EnterCall,
     /* isForeignGenerator */ IsForeignGenerator,

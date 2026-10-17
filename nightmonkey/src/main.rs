@@ -26,7 +26,7 @@ use night_compiler::wasm::{
 };
 use night_compiler::Options;
 use night_snapshot::registration::{OFF_COMPILED, OFF_REGION_TABLE, OFF_TOOL_VERSION};
-use night_snapshot::{walk, Field, Registration, SliceMem};
+use night_snapshot::{walk, walk_compile_input, Field, Registration, SliceMem};
 use std::path::PathBuf;
 use waffle::{
     FrontendOptions, FuncDecl, FunctionBody, Module, Operator, SignatureData, Type, ValueDef,
@@ -70,45 +70,43 @@ Output
   --keep-names             keep the name and DWARF sections (stripped by default)
 
 Compilation
-  --force-interp           leave every script interpreted
+  --pipeline <p>           which tiers compile scripts: mir (default; MIR
+                           over baseline) or baseline (baseline only); a
+                           script no tier takes is interpreted
+  --strict-coverage        fail if any script ends up interpreted for a
+                           reason other than ForceInterpreter
+  --mir-stress <n>         fail every n-th MIR guard as well (exit testing)
 
 Diagnostics
   --stats                  report phase timings and counts
   --dump-opsize            per-op emitted-IR census (static code size)
-  --dump-ctxedge           per-continuation-edge ctx fact census
-  --dump-clsfact           per-consumer class-fact availability census
   --trace-cell <c>         trace every raise into one analysis cell,
                            arg:<sid>:<n> or local:<sid>:<n>
   --trace-field <name>     trace every heap read/write of one property name
+  --verify-fixpoint        re-evaluate every constraint after the analysis
+                           fixpoint and report cells that still grow
   --trace-site <sid>:<pc>  trace the per-context evaluation of one read site
   --dump-propgap           per-site census of why a property access got no
                            class-fact row (the coverage half of code size)
-  --dump-cfg               the CFG, dominator tree and loop nest over the
-                           unified pc space, with the loop-extent audit
-  --dump-peel              per loop header, the read slots whose single-
-                           version join is weaker than the back edge's
-                           arrival (the peel rule's census)
-  --dump-redundant         per-op census of box round trips, dead boxes and
-                           frame round trips in the emitted IR
+  --dump-tiers             per-script tier coverage (the tier that compiled
+                           it, or interp, and every decline) and a summary
+  --dump-mir               print each MIR body (and an invalid one in full)
+  --dump-facts <path>      write the analysis fact tables to <path>
+  --viz <path>             write the visualizer's records (bytecode, MIR,
+                           waffle IR, and their links) to <path>; see
+                           tools/viz.py
+  --dump-graph             print the walked script graph and exit
 
 Instrumentation (CHANGES the generated code; never on in production)
-  --census                 emit night_runtime_census calls: per-track version
-                           entries and per-arm fork takes, dumped at exit
-  --guard-census           emit night_runtime_census calls on every arm of
-                           every property/arith speculation point: the
-                           per-site guard hit rate, dumped at exit
+  --mir-exit-census        emit night_runtime_census calls at every MIR
+                           exit: per-exit take counts, dumped at exit
   --block-census           emit night_runtime_census calls at the head of
-                           every block an op's lowering created, with a
-                           static per-block record: executed IR per op
-  --dump-bytecode[=IDS]    disassemble each script's bytecode; IDS is a
-                           comma-separated source-id list (default: all)
-  --dump-bbv               dump the per-version BBV state
-  --dump-facts <path>      write the analysis fact tables to <path>
-  --dump-graph             print the walked script graph and exit
-  --viz                    emit the speculation trace for tools/viz.py
-  --viz-lower              with --viz, also dump the per-op lowering
-  --viz-facts <path>       write the analysis half of the trace to <path>
-                           instead of stderr
+                           every MIR block: executed blocks, dumped at exit
+  --guard-census           bucket the dense-append helper's misses by
+                           reason, dumped at exit
+  --root-census            emit night_runtime_census calls at every rooting
+                           site that stores (GC calls, edges, retain
+                           flushes): executed rooting stores by site
   -h, --help               print this message
 "
     )
@@ -144,42 +142,9 @@ fn parse_args() -> Result<Args> {
             }
             "--keep-names" => keep_names = true,
             "--dump-graph" => dump_graph = true,
-            "--force-interp" => opts.force_interp = true,
-            "--stats" => opts.diagnostics.stats = true,
-            "--dump-opsize" => opts.diagnostics.opsize = true,
-            "--dump-ctxedge" => opts.diagnostics.ctxedge = true,
-            "--dump-clsfact" => opts.diagnostics.clsfact = true,
-            "--dump-propgap" => opts.diagnostics.propgap = true,
-            "--dump-cfg" => opts.diagnostics.cfg = true,
-            "--dump-peel" => opts.diagnostics.peel = true,
-            "--dump-redundant" => opts.diagnostics.redundant = true,
-            "--trace-cell" => opts.diagnostics.trace_cell = Some(val(&mut it, "--trace-cell")?),
-            "--trace-field" => opts.diagnostics.trace_field = Some(val(&mut it, "--trace-field")?),
-            "--trace-site" => opts.diagnostics.trace_site = Some(val(&mut it, "--trace-site")?),
-            "--census" => opts.instrument.census = true,
-            "--guard-census" => opts.instrument.guards = true,
-            "--block-census" => opts.instrument.blocks = true,
-            "--dump-bytecode" => opts.diagnostics.disasm = Some(Vec::new()),
-            _ if a.starts_with("--dump-bytecode=") => {
-                let list = &a["--dump-bytecode=".len()..];
-                let ids = list
-                    .split(',')
-                    .filter(|s| !s.is_empty())
-                    .map(|s| {
-                        s.parse::<u32>()
-                            .with_context(|| format!("bad source id `{s}` in `{a}`"))
-                    })
-                    .collect::<Result<Vec<u32>>>()?;
-                opts.diagnostics.disasm = Some(ids);
-            }
-            "--dump-bbv" => opts.diagnostics.bbv = true,
-            "--dump-facts" => opts.diagnostics.facts = Some(val(&mut it, "--dump-facts")?),
-            "--viz" => opts.diagnostics.viz = true,
-            "--viz-facts" => opts.diagnostics.viz_facts = Some(val(&mut it, "--viz-facts")?),
-            "--viz-lower" => {
-                opts.diagnostics.viz = true;
-                opts.diagnostics.viz_lower = true;
-            }
+            _ if opts
+                .apply_flag(&a, &mut || it.next())
+                .map_err(anyhow::Error::msg)? => {}
             _ if a.starts_with('-') && a != "-" => {
                 bail!("unknown option `{a}`\n\n{}", usage())
             }
@@ -204,6 +169,14 @@ fn parse_args() -> Result<Args> {
 }
 
 fn main() -> Result<()> {
+    // Rayon workers run MIR's per-script front half and waffle's backend,
+    // both recursive over nested code: give them the main thread's stack
+    // budget rather than the 2 MiB default. First thing, before wizer's
+    // wasmtime can build the global pool.
+    #[cfg(feature = "parallel")]
+    let _ = rayon::ThreadPoolBuilder::new()
+        .stack_size(64 << 20)
+        .build_global();
     let args = parse_args()?;
     let opts = args.opts;
     let stats = opts.diagnostics.stats;
@@ -265,25 +238,14 @@ fn main() -> Result<()> {
     let output = args.output.context("-o <out.wasm> is required")?;
 
     // Walk the user roots plus the engine-recorded self-hosted roots.
-    let n_reg_roots = reg.roots.len();
     let mut wreg = reg;
-    for &(addr, _) in &wreg.selfhosted {
-        wreg.roots.push(addr);
-    }
+    let n_regex = wreg.regex_programs.len();
     let walk_out = {
         let mem = SliceMem(&img.bytes);
-        walk(&mem, &wreg)?
+        walk_compile_input(&mem, &mut wreg)?
     };
-    let mut source: Source = walk_out.source;
+    let source: Source = walk_out.source;
     let root_id = walk_out.root_ids[0];
-    for (i, (_, name)) in wreg.selfhosted.iter().enumerate() {
-        let id = walk_out.root_ids[n_reg_roots + i];
-        if !source.selfhosted.iter().any(|(sid, _)| *sid == id) {
-            source.selfhosted.push((id, name.clone()));
-        }
-    }
-    let n_regex = wreg.regex_programs.len();
-    source.regex_programs = std::mem::take(&mut wreg.regex_programs);
     if stats {
         eprintln!(
             "nightmonkey: walked {} objects ({} selfhosted roots, {} regex programs), \
@@ -344,7 +306,8 @@ fn main() -> Result<()> {
     };
     let (ta_get_poly, ta_set_poly) =
         translate::build_ta_poly_helpers(&mut m, mem_id, env.ta_class_base);
-    let ic_get_poly = translate::build_ic_get_helper(&mut m, mem_id, env.mega_get_base);
+    let ic_get_poly =
+        translate::build_ic_get_helper(&mut m, mem_id, env.mega_get_base, env.strlit_slot);
     let ic_set_cold =
         night_compiler::wasm::build_ic_set_cold_helper(&mut m, mem_id, env.mega_set_base);
     let (elem_mega_get, elem_mega_set_probe) = night_compiler::wasm::build_elem_mega_helpers(
@@ -399,6 +362,11 @@ fn main() -> Result<()> {
             body,
         ))
     };
+    // A whole module: the regex matchers' own functype, structurally.
+    let regex_matcher_sig = m.signatures.push(waffle::SignatureData {
+        params: vec![waffle::Type::I32; 6],
+        returns: vec![waffle::Type::I32],
+    });
     let helpers = resolve_helpers(
         &mut m,
         &mut |m, name| find_export_func(m, name),
@@ -417,9 +385,9 @@ fn main() -> Result<()> {
             direct_call_stub,
             night_abi_sig2,
             direct_call_stub2,
+            regex_matcher_sig,
         },
         env.helper_bases(),
-        opts.diagnostics.viz,
     )
     .map_err(|e| anyhow!(e))?;
 
@@ -460,9 +428,45 @@ fn main() -> Result<()> {
                 .iter()
                 .map(|&n| names.get(n).chars().to_vec())
                 .collect();
-            // First row wins on duplicate field lists (layout_ctors is
-            // sorted, so the pick is stable).
-            row_of.entry(chars).or_insert(u32::try_from(lid).unwrap());
+            // A field list two rows share names no row by itself: the
+            // object's constructor decides (below), or nothing does.
+            row_of
+                .entry(chars)
+                .and_modify(|r| *r = u32::MAX)
+                .or_insert(u32::try_from(lid).unwrap());
+        }
+        // A prototype object -> the layout row of the constructor whose
+        // `prototype` it is (`ctor_stamps`): a layout key names a class,
+        // and objects of two classes can carry the same field list.
+        let lid_of_key: std::collections::HashMap<_, u32> = env
+            .layout_ctors
+            .iter()
+            .enumerate()
+            .map(|(lid, &k)| (k, u32::try_from(lid).unwrap()))
+            .collect();
+        let mut row_of_proto: std::collections::HashMap<u32, u32> =
+            std::collections::HashMap::new();
+        for o in &source.objects {
+            let SourceObject::Object(od) = o else {
+                continue;
+            };
+            let Some(sc) = od.script else { continue };
+            let Some(&key) = env
+                .facts
+                .ctor_stamps
+                .get(&night_compiler::ids::ScriptId::new(sc.id()))
+            else {
+                continue;
+            };
+            let Some(&lid) = lid_of_key.get(&key) else {
+                continue;
+            };
+            for &(nid, vid) in &od.properties {
+                if matches!(source.object(nid), SourceObject::String(st) if st.chars() == "prototype".encode_utf16().collect::<Vec<u16>>().as_slice())
+                {
+                    row_of_proto.insert(vid.id(), lid);
+                }
+            }
         }
         let global = source.global_object.map(|g| g.id());
         let mut out = Vec::new();
@@ -494,8 +498,32 @@ fn main() -> Result<()> {
             if !ok {
                 continue;
             }
-            let Some(&lid) = row_of.get(&chars) else {
-                continue;
+            let by_proto = od.proto.and_then(|p| row_of_proto.get(&p.id())).copied();
+            let row_chars = |lid: u32| -> Vec<Vec<u16>> {
+                env.likely_class_layouts[&env.layout_ctors[lid as usize]]
+                    .iter()
+                    .map(|&n| names.get(n).chars().to_vec())
+                    .collect()
+            };
+            let lid = match by_proto {
+                Some(lid) => {
+                    // The constructor's row, if the object has exactly it;
+                    // else the one row of its clump (a row extending the
+                    // constructor's: a two-phase or filled object) it has.
+                    if row_chars(lid) != chars {
+                        let base = row_chars(lid);
+                        match row_of.get(&chars) {
+                            Some(&ext) if ext != u32::MAX && chars.starts_with(&base) => ext,
+                            _ => continue,
+                        }
+                    } else {
+                        lid
+                    }
+                }
+                None => match row_of.get(&chars) {
+                    Some(&lid) if lid != u32::MAX => lid,
+                    _ => continue,
+                },
             };
             let Some(&addr) = walk_out.object_addr.get(&(i as u32)) else {
                 continue;
@@ -514,7 +542,39 @@ fn main() -> Result<()> {
             if (nfixed as usize) < ext_len[lid as usize] {
                 snapshot_stamps_short += 1;
             }
-            out.push((addr, (lid + 1) | night_compiler::wasm::stamp::SLOTS));
+            // TYPES (MIR.md §4.6, the any-type meaning of the MIR and
+            // baseline tiers): the image holds every field's value, so the stamp can check
+            // each against its layout's predicted type exactly, as a
+            // conforming store would keep the bit.
+            let key = env.layout_ctors[lid as usize];
+            let types = env
+                .layout_field_types_tx
+                .get(&key.stamp())
+                .is_some_and(|claims| {
+                    let fields = &env.likely_class_layouts[&key];
+                    claims.values().any(|c| !c.is_none())
+                        && od.properties.iter().zip(fields).all(|(&(_, vid), n)| {
+                            claims
+                                .get(n)
+                                .is_none_or(|&c| c.is_none() || value_conforms(&source, vid, c))
+                        })
+                });
+            let types = if types {
+                night_compiler::wasm::stamp::TYPES
+            } else {
+                0
+            };
+            // CLOSED: its properties are exactly the row's, of a layout that
+            // may be.
+            let closed = if env.closed_layouts_tx.contains(&lid) {
+                night_compiler::wasm::stamp::CLOSED
+            } else {
+                0
+            };
+            out.push((
+                addr,
+                (lid + 1) | night_compiler::wasm::stamp::SLOTS | types | closed,
+            ));
         }
         out
     };
@@ -546,7 +606,6 @@ fn main() -> Result<()> {
     let TranslateOut {
         mut atoms,
         sid_to_index,
-        fuse_binding_index,
         strlit_patches,
         regex_entries,
         prop_ic_base,
@@ -580,7 +639,7 @@ fn main() -> Result<()> {
     }
     let atom_bytes = serialize_atom_table(&atoms);
     let gbind_bytes =
-        serialize_global_binding_table(&atoms.names, &env.syn_gname_names, &fuse_binding_index);
+        serialize_global_binding_table(&atoms.names, &env.syn_gname_names, &env.binding_preds);
     let fuse_bytes = serialize_fuse_table(&env, &mut atoms);
     let regex_bytes = serialize_regex_table(&regex_entries);
     let strlit_bytes = atoms.strlit_blob().to_vec();
@@ -662,7 +721,11 @@ fn main() -> Result<()> {
         eprintln!(
             "nightmonkey: {n_sized} ctor-nslots entries, {patched} scripts armed, \
              {stamped} snapshot objects stamped ({snapshot_stamps_short} with fewer fixed \
-             slots than their clump's longest row)"
+             slots than their clump's longest row, {} with TYPES)",
+            snapshot_stamps
+                .iter()
+                .filter(|&&(_, w)| w & night_compiler::wasm::stamp::TYPES != 0)
+                .count()
         );
     }
 
@@ -698,6 +761,8 @@ fn main() -> Result<()> {
         mathNativesPtr: env.math_natives_base,
         appendCachePtr: env.append_cache_base,
         accessorCachePtr: env.accessor_cache_base,
+        methodCellsPtr: env.method_cells_base,
+        methodCellsLen: env.method_cells_len,
     }
     .to_words();
     for (i, w) in region_table.iter().enumerate() {
@@ -735,4 +800,36 @@ fn main() -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Whether snapshot value `vid` is of claimed type `c` (its tag; an
+/// object of a typed-array claim must be a typed array of that kind).
+fn value_conforms(
+    source: &night_compiler::source::Source,
+    vid: night_compiler::source::SourceObjectId,
+    c: night_compiler::facts::Claim,
+) -> bool {
+    use night_compiler::opsem::*;
+    use night_compiler::source::{ObjectKind, Primitive, SourceObject};
+    if vid.is_other() {
+        return false;
+    }
+    let prim = |p: Prims| p.subset_of(c.prims());
+    match source.object(vid) {
+        SourceObject::Primitive(Primitive::Undefined) => prim(PRIM_UNDEFINED),
+        SourceObject::Primitive(Primitive::Null) => prim(PRIM_NULL),
+        SourceObject::Primitive(Primitive::Boolean(_)) => prim(PRIM_BOOLEAN),
+        SourceObject::Primitive(Primitive::Int32(_)) => prim(PRIM_INT32),
+        SourceObject::Primitive(Primitive::Double(_)) => prim(PRIM_DOUBLE),
+        SourceObject::String(_) => prim(PRIM_STRING),
+        SourceObject::Symbol => prim(PRIM_SYMBOL),
+        SourceObject::Object(od) => {
+            c.bits() & night_compiler::facts::Claim::OBJECT.bits() != 0
+                && match c.ta_kind() {
+                    None => true,
+                    Some(k) => od.kind == ObjectKind::TypedArray(k.code()),
+                }
+        }
+        SourceObject::Script(_) | SourceObject::Scope(_) => false,
+    }
 }

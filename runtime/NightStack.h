@@ -3,13 +3,18 @@
 
 // The AOT value stack: a single contiguous, upward-growing array of boxed
 // JS::Values that is the *sole* GC root for object references held by
-// AOT-compiled Wasm code. Owned by JSRuntime (like the interpreter stack;
-// reached as js::nightrt::TheNightStack()) rather than a global, and traced (and, under a
-// moving GC, forwarded) as a root region over [base, top). Traced from
-// JSContext::trace on EVERY GC (minor and major), exactly like the interpreter
-// and JIT stacks -- an embedding extra-roots tracer would be skipped on minor
-// (nursery) GC, leaving freshly-allocated nursery pointers in AOT frame slots
-// stale. See js/src/night/docs/DESIGN.md section 8.2.
+// AOT-compiled Wasm code. One per JSContext, in the context's external-tier
+// state (NightContextState, made by the ExternalCompilerHooks newContext
+// hook; reached as js::nightrt::TheNightStack(cx)), and traced (and, under
+// a moving GC, forwarded) as a root region over [base, top) by the
+// traceRoots hook on EVERY GC (minor and major), exactly like the
+// interpreter and JIT stacks -- an embedding extra-roots tracer would be
+// skipped on minor (nursery) GC, leaving freshly-allocated nursery pointers
+// in AOT frame slots stale. See docs/DESIGN.md section 9.
+//
+// The region is 1 << Night_valueStackLog2 bytes, aligned to its size: a
+// frame [sp, end) fits iff its last byte has sp's high bits, which compiled
+// code tests with no load of the limit.
 //
 // Rooting / re-entrancy contract:
 //   - `top` is the current free slot; [base, top) is live and rooted.
@@ -31,27 +36,34 @@
 #define night_runtime_NightStack_h
 
 #include "mozilla/Attributes.h"  // MOZ_RAII
+#include "mozilla/Likely.h"      // MOZ_LIKELY
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include "js/TypeDecls.h"  // JSContext, JSTracer (correct public-API visibility)
 #include "js/Value.h"      // JS::Value
+#include "runtime/NightRegionShape.h"
 
 namespace js {
 namespace nightrt {
 
 // Headroom a compiled body may use above its incoming frame without a
-// check: the compiled call guard (compiler/src/wasm/bbv/call.rs,
-// NIGHT_STACK_HEADROOM) admits a direct call only when frame top + this
+// check: the compiled call guard (compiler/src/wasm/mir/lower.rs
+// and baseline/codegen.rs, HEADROOM) admits a direct call only when frame top + this
 // stays below the limit, and the engine-side entry paths must reserve the
 // same, or a body entered near the limit writes past the stack.
 static constexpr size_t kNightStackHeadroomSlots = (64 * 1024) / sizeof(JS::Value);
 
+// The region's size in bytes and in slots.
+static constexpr size_t kNightStackBytes = size_t(1) << js::night::Night_valueStackLog2;
+static constexpr size_t kNightStackSlots = kNightStackBytes / sizeof(JS::Value);
+
 class NightStack {
  public:
-  // Allocates the backing region (so it exists from runtime construction,
-  // before any AOT frame runs). Tracing is wired in via JSContext::trace; there
-  // is no separate registration step.
+  // Allocates the backing region (so it exists from the context's creation,
+  // before any AOT frame runs), aligned to its size. Tracing is wired in via
+  // the traceRoots hook; there is no separate registration step.
   NightStack();
   ~NightStack();
 
@@ -68,18 +80,24 @@ class NightStack {
   // for non-GC Values (numbers, undefined, ...).
   void trace(JSTracer* trc);
 
+  // `NIGHT_GC_STATS`: the traces of the stack, and the slots they covered.
+  uint64_t traces() const { return traces_; }
+  uint64_t tracedSlots() const { return tracedSlots_; }
+
  private:
+  uint64_t traces_ = 0;
+  uint64_t tracedSlots_ = 0;
   JS::Value* base_;
   JS::Value* top_;
   JS::Value* limit_;
 };
 
+// The context's value stack (runtime/NightContext.h).
+NightStack& TheNightStack(JSContext* cx);
+
 // RAII guard for a native -> AOT re-entry: saves the free top on entry and
 // restores it on scope exit (see the re-entrancy contract above). frameBase()
 // is the sp the re-entered frame should be built at.
-// The process-wide AOT value stack (one runtime per wasm instance).
-NightStack& TheNightStack();
-
 class MOZ_RAII AutoNightReentry {
  public:
   explicit AutoNightReentry(JSContext* cx);

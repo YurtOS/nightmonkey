@@ -5,7 +5,7 @@
 // resolves: the resolve_helpers list in js/src/night/compiler/src/wasm/mod.rs
 // (in order), plus night_runtime_regex_ci_compare (resolved separately in
 // translate_all). The in-process driver expands it into the {name, funcptr,
-// sig} import table passed to night_inproc_build; the signature string is
+// sig} import table the night_compile hostcall reads; the signature string is
 // derived from the helper's real C++ type (see NightHelperSig), so the table
 // can never drift from the declarations in NightRuntime.h.
 
@@ -19,7 +19,6 @@
 #include "runtime/NightRuntime.h"
 
 #define FOR_EACH_NIGHT_RUNTIME_HELPER(NIGHT_RUNTIME_HELPER)       \
-  NIGHT_RUNTIME_HELPER(night_runtime_callee_night_target)         \
   NIGHT_RUNTIME_HELPER(night_runtime_add)                         \
   NIGHT_RUNTIME_HELPER(night_runtime_concat)                      \
   NIGHT_RUNTIME_HELPER(night_runtime_call)                        \
@@ -27,7 +26,6 @@
   NIGHT_RUNTIME_HELPER(night_runtime_native_dispatch)             \
   NIGHT_RUNTIME_HELPER(night_runtime_apply_fwd)                   \
   NIGHT_RUNTIME_HELPER(night_runtime_construct)                   \
-  NIGHT_RUNTIME_HELPER(night_runtime_get_property)                \
   NIGHT_RUNTIME_HELPER(night_runtime_set_property)                \
   NIGHT_RUNTIME_HELPER(night_runtime_get_prop_ic_miss)            \
   NIGHT_RUNTIME_HELPER(night_runtime_set_prop_ic_miss)            \
@@ -40,7 +38,6 @@
   NIGHT_RUNTIME_HELPER(night_runtime_get_intrinsic)               \
   NIGHT_RUNTIME_HELPER(night_runtime_get_intrinsic_cell)          \
   NIGHT_RUNTIME_HELPER(night_runtime_census)                      \
-  NIGHT_RUNTIME_HELPER(night_runtime_strlit_verify)               \
   NIGHT_RUNTIME_HELPER(night_runtime_str_chars_eq)                \
   NIGHT_RUNTIME_HELPER(night_runtime_tonumeric)                   \
   NIGHT_RUNTIME_HELPER(night_runtime_pos)                         \
@@ -52,7 +49,6 @@
   NIGHT_RUNTIME_HELPER(night_runtime_box_nonstrict_this)          \
   NIGHT_RUNTIME_HELPER(night_runtime_get_mapped_arg)              \
   NIGHT_RUNTIME_HELPER(night_runtime_set_mapped_arg)              \
-  NIGHT_RUNTIME_HELPER(night_runtime_validate_this_layout)        \
   NIGHT_RUNTIME_HELPER(night_runtime_in)                          \
   NIGHT_RUNTIME_HELPER(night_runtime_has_own)                     \
   NIGHT_RUNTIME_HELPER(night_runtime_to_property_key)             \
@@ -107,6 +103,7 @@
   NIGHT_RUNTIME_HELPER(night_runtime_typeof)                      \
   NIGHT_RUNTIME_HELPER(night_runtime_typeof_eq)                   \
   NIGHT_RUNTIME_HELPER(night_runtime_constant_strict_eq)          \
+  NIGHT_RUNTIME_HELPER(night_runtime_regexp_leaf)                 \
   NIGHT_RUNTIME_HELPER(night_runtime_bind_unqualified_gname)      \
   NIGHT_RUNTIME_HELPER(night_runtime_set_name)                    \
   NIGHT_RUNTIME_HELPER(night_runtime_new_object)                  \
@@ -128,6 +125,7 @@
   NIGHT_RUNTIME_HELPER(night_runtime_iter)                        \
   NIGHT_RUNTIME_HELPER(night_runtime_more_iter)                   \
   NIGHT_RUNTIME_HELPER(night_runtime_end_iter)                    \
+  NIGHT_RUNTIME_HELPER(night_runtime_post_whole_cell)             \
   NIGHT_RUNTIME_HELPER(night_runtime_close_iter_for_exception)    \
   NIGHT_RUNTIME_HELPER(night_runtime_symbol)                      \
   NIGHT_RUNTIME_HELPER(night_runtime_optimize_get_iterator)       \
@@ -136,14 +134,24 @@
   NIGHT_RUNTIME_HELPER(night_runtime_spread_call)                 \
   NIGHT_RUNTIME_HELPER(night_runtime_optimize_spread_call)        \
   NIGHT_RUNTIME_HELPER(night_runtime_object)                      \
+  NIGHT_RUNTIME_HELPER(night_runtime_bigint)                      \
+  NIGHT_RUNTIME_HELPER(night_runtime_non_syntactic_global_this)   \
+  NIGHT_RUNTIME_HELPER(night_runtime_set_intrinsic)               \
+  NIGHT_RUNTIME_HELPER(night_runtime_env_callee)                  \
+  NIGHT_RUNTIME_HELPER(night_runtime_eval)                        \
+  NIGHT_RUNTIME_HELPER(night_runtime_spread_eval)                 \
+  NIGHT_RUNTIME_HELPER(night_runtime_dynamic_import)              \
+  NIGHT_RUNTIME_HELPER(night_runtime_import_meta)                 \
+  NIGHT_RUNTIME_HELPER(night_runtime_get_import)                  \
+  NIGHT_RUNTIME_HELPER(night_runtime_add_disposable)              \
+  NIGHT_RUNTIME_HELPER(night_runtime_take_dispose_capability)     \
+  NIGHT_RUNTIME_HELPER(night_runtime_create_suppressed_error)     \
+  NIGHT_RUNTIME_HELPER(night_runtime_resume)                      \
   NIGHT_RUNTIME_HELPER(night_runtime_post_write_barrier)          \
   NIGHT_RUNTIME_HELPER(night_runtime_post_write_barrier_elem)     \
   NIGHT_RUNTIME_HELPER(night_runtime_pre_write_barrier)           \
-  NIGHT_RUNTIME_HELPER(night_runtime_resolve_global_slot)         \
   NIGHT_RUNTIME_HELPER(night_runtime_resolve_global_slot_guarded) \
-  NIGHT_RUNTIME_HELPER(night_runtime_set_global)                  \
   NIGHT_RUNTIME_HELPER(night_runtime_binding_written)             \
-  NIGHT_RUNTIME_HELPER(night_runtime_binding_value)               \
   NIGHT_RUNTIME_HELPER(night_runtime_math_unary)                  \
   NIGHT_RUNTIME_HELPER(night_runtime_math_pow)                    \
   NIGHT_RUNTIME_HELPER(night_runtime_fmod)                        \
@@ -155,15 +163,28 @@
   NIGHT_RUNTIME_HELPER(night_runtime_obj_with_proto)              \
   NIGHT_RUNTIME_HELPER(night_runtime_fun_with_proto)              \
   NIGHT_RUNTIME_HELPER(night_runtime_set_fun_name)                \
-  NIGHT_RUNTIME_HELPER(night_runtime_no_extra_indexed)            \
   NIGHT_RUNTIME_HELPER(night_runtime_gen_is_closing)              \
+  NIGHT_RUNTIME_HELPER(night_runtime_mir_stress)                  \
+  NIGHT_RUNTIME_HELPER(night_runtime_slots_covered)               \
+  NIGHT_RUNTIME_HELPER(night_runtime_ctor_stamp)                  \
+  NIGHT_RUNTIME_HELPER(night_runtime_ctor_restamp)                \
+  NIGHT_RUNTIME_HELPER(night_runtime_init_field)                  \
+  NIGHT_RUNTIME_HELPER(night_runtime_elem_grow)                   \
+  NIGHT_RUNTIME_HELPER(night_runtime_get_prop_pure)               \
+  NIGHT_RUNTIME_HELPER(night_runtime_set_prop_pure)               \
+  NIGHT_RUNTIME_HELPER(night_runtime_to_primitive_pure)           \
+  NIGHT_RUNTIME_HELPER(night_runtime_get_elem_pure)               \
+  NIGHT_RUNTIME_HELPER(night_runtime_set_elem_pure)               \
+  NIGHT_RUNTIME_HELPER(night_runtime_new_this)                    \
+  NIGHT_RUNTIME_HELPER(night_runtime_new_this_init)               \
+  NIGHT_RUNTIME_HELPER(night_runtime_method_arm)                  \
   NIGHT_RUNTIME_HELPER(night_runtime_regex_ci_compare)
 
 namespace js {
 namespace night {
 
-// Wasm value-type letter for a C ABI type (the night-compiler.h
-// signature-string encoding: i=i32, j=i64, f=f32, d=f64, v=void return).
+// Wasm value-type letter for a C ABI type (the signature-string encoding
+// `parse_sig_str` reads: i=i32, j=i64, f=f32, d=f64, v=void return).
 template <typename T>
 struct NightSigChar;
 template <typename T>

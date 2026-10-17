@@ -140,6 +140,7 @@ pub unsafe extern "C" fn night_source_add_script(
         is_class_ctor: false,
         strict: false,
         has_mapped_args: false,
+        pos: None,
     };
     source.push(SourceObject::Script(script)).id()
 }

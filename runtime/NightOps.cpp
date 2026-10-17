@@ -378,26 +378,41 @@ bool NightEnvSetup(JSContext* cx, void* spPtr, void* scriptPtr, uint64_t* out) {
   }
   JS::Value* frame = reinterpret_cast<JS::Value*>(spPtr);
   RootedFunction callee(cx, &frame[0].toObject().as<JSFunction>());
-  // Named-lambda / extra-body-var environments are gated out at compile time
-  // (translate.rs `env_unsupported`); assert the model holds.
-  MOZ_RELEASE_ASSERT(!callee->needsNamedLambdaEnvironment(),
-                     "AOT env model does not handle named-lambda environments");
+  RootedObject enclosing(cx, callee->environment());
+  // A named lambda that captures its own name gets that binding's
+  // environment first, as js::InitFunctionEnvironmentObjects does. (The
+  // baseline tier compiles such functions.)
+  if (callee->needsNamedLambdaEnvironment()) {
+    NamedLambdaObject* declEnv = NamedLambdaObject::createWithoutEnclosing(
+        cx, callee, gc::Heap::Default);
+    if (!declEnv) {
+      return false;
+    }
+    declEnv->initEnclosingEnvironment(enclosing);
+    enclosing = declEnv;
+  }
   if (callee->needsCallObject()) {
-    RootedObject enclosing(cx, callee->environment());
     RootedScript script(cx, callee->nonLazyScript());
-    // createTemplateObject builds the CallObject with the FunctionScope's
-    // environment shape (bindings undefined); the callee slot and the aliased
-    // formals are filled below / by the body's bytecode, as createForFrame and
-    // the interpreter prologue do.
-    CallObject* callobj =
-        CallObject::createTemplateObject(cx, script, enclosing);
+    // The CallObject with the FunctionScope's environment shape (bindings
+    // undefined), allocated where the JITs' NewCallObject allocates it: the
+    // nursery. (createTemplateObject would allocate it tenured, and every
+    // store of a nursery value into it -- the callee below, the aliased
+    // formals and vars the body writes -- would be a store-buffer edge; on
+    // closure-heavy code those filled the slot buffer and forced minor GCs
+    // long before the nursery was full.) The callee slot and the aliased
+    // formals are filled below / by the body's bytecode, as createForFrame
+    // and the interpreter prologue do.
+    Rooted<SharedShape*> shape(
+        cx, script->bodyScope()->as<FunctionScope>().environmentShape());
+    CallObject* callobj = CallObject::createWithShape(cx, shape);
     if (!callobj) {
       return false;
     }
+    callobj->initEnclosingEnvironment(enclosing);
     callobj->initFixedSlot(CallObject::calleeSlot(), ObjectValue(*callee));
     *out = ObjectValue(*callobj).asRawBits();
   } else {
-    *out = ObjectValue(*callee->environment()).asRawBits();
+    *out = ObjectValue(*enclosing).asRawBits();
   }
   return true;
 }
@@ -512,6 +527,20 @@ uint64_t NightCalleeNightTarget(uint64_t calleeBits) {
   }
   return (uint64_t(uint32_t(reinterpret_cast<uintptr_t>(script))) << 32) |
          uint64_t(index);
+}
+
+bool NightIsCompiledFunctionOf(uint64_t bits, uint32_t scriptAddr) {
+  JS::Value v = JS::Value::fromRawBits(bits);
+  if (!v.isObject() || !v.toObject().is<JSFunction>()) {
+    return false;
+  }
+  JSFunction* fun = &v.toObject().as<JSFunction>();
+  if (!fun->hasBaseScript()) {
+    return false;
+  }
+  BaseScript* script = fun->baseScript();
+  return uint32_t(reinterpret_cast<uintptr_t>(script)) == scriptAddr &&
+         script->externalTierWord() != 0;
 }
 
 // `Exception` op: get and clear the pending exception, boxed into *out.
@@ -694,6 +723,23 @@ bool NightConstruct(JSContext* cx, void* spPtr, uint32_t argc, uint32_t nSlots,
 // base constructors compile (derived use `SuperCall`, unsupported), so
 // `CreateThis` yields a real object, never the derived-class uninitialized-this
 // magic.
+bool NightNewThis(JSContext* cx, uint64_t calleeBits, uint64_t protoBits,
+                  uint32_t nSlots, uint64_t* out, uint32_t stampWord) {
+  RootedValue cv(cx, JS::Value::fromRawBits(calleeBits));
+  RootedFunction callee(cx, &cv.toObject().as<JSFunction>());
+  JS::Value pv = JS::Value::fromRawBits(protoBits);
+  RootedObject proto(cx, pv.isObject() ? &pv.toObject() : nullptr);
+  RootedObject thisObj(
+      cx, AllocNSlots(cx, callee, nSlots == NIGHT_NO_NSLOTS ? 0 : nSlots, proto));
+  if (!thisObj) {
+    return false;
+  }
+  js::night::NightSetClassWord(thisObj, stampWord,
+                               js::night::NightBumpSite::ConstructStamp);
+  *out = ObjectValue(*thisObj).asRawBits();
+  return true;
+}
+
 bool NightCreateThis(JSContext* cx, uint64_t calleeBits, uint64_t newTargetBits,
                      uint32_t nSlots, uint64_t* out, uint32_t stampWord) {
   RootedValue ntv(cx, JS::Value::fromRawBits(newTargetBits));

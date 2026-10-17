@@ -44,13 +44,10 @@ extern "C" {
 // rooted region). The leaf helpers (to_boolean, get_aliased/set_aliased,
 // get_exception_for_finally) take no `top`: they neither GC nor throw.
 
-// Generic property get/set by atom id (the property-IC fallback path).
-NIGHT_RUNTIME_EXPORT(night_runtime_get_property)
-bool night_runtime_get_property(JSContext* cx, uint32_t top, uint64_t recv,
-                                uint32_t atomId);
+// Generic property set by atom id (the property-IC fallback path).
 NIGHT_RUNTIME_EXPORT(night_runtime_set_property)
 bool night_runtime_set_property(JSContext* cx, uint32_t top, uint64_t recv,
-                                uint32_t atomId, uint64_t val, uint32_t strict);
+                                uint32_t atomId, uint64_t val, uint32_t flags);
 
 // Property inline cache by atom id + per-site cache index. The hit
 // path is emitted inline in the compiled body (a shape/generation/holder guard
@@ -85,7 +82,7 @@ NIGHT_RUNTIME_EXPORT(night_runtime_set_prop_ic_miss)
 uint32_t night_runtime_set_prop_ic_miss(JSContext* cx, uint32_t top,
                                         uint64_t recv, uint32_t atomId,
                                         uint64_t val, uint32_t cacheIdx,
-                                        uint32_t strict);
+                                        uint32_t flags);
 
 // Static fixed-slot store post-write (generational) barrier slow path. The
 // driver inlines the raw `store_i64` and the is-GC-thing/is-nursery check, and
@@ -139,20 +136,10 @@ NIGHT_RUNTIME_EXPORT(night_runtime_get_gname)
 bool night_runtime_get_gname(JSContext* cx, uint32_t top, uint32_t atomId,
                              uint32_t forTypeof);
 
-// Global binding resolution. `night_runtime_resolve_global_slot` is the
-// cold resolve-once path behind the inlined `GetGName`: on first access the
-// binding's `gGlobalSlots` entry is 0 (unresolved), so the inline code calls
-// this, which `lookupPure`s the pre-interned binding name on the global object
-// (non-allocating, never GCs), writes the encoded entry (`bit0` resolved,
-// `bit1` is-dynamic-slot, `bits[31:2]` slot index) into
-// `gGlobalSlots[bindingId]`, and returns it. A leaf -- no `top`, no rooting
-// handshake.
-NIGHT_RUNTIME_EXPORT(night_runtime_resolve_global_slot)
-uint32_t night_runtime_resolve_global_slot(JSContext* cx, uint32_t bindingId);
-
-// GUARDED variant for syntactically-collected (no-TI) bindings: unlike the
-// TI-proven resolve above, the name may be anything a `GetGName` can mention,
-// so resolution can fail. Caches (and returns) the encoded entry ONLY when the
+// Global binding resolution: the cold resolve-once path behind the inlined
+// `GetGName`. On first access the binding's `gGlobalSlots` entry is 0
+// (unresolved), so the inline code calls this; the name may be anything a
+// `GetGName` can mention, so resolution can fail. Caches (and returns) the encoded entry ONLY when the
 // name is an own plain data slot of the global object NOT shadowed by a global
 // lexical binding; also caches the global's shape word, which the inline read
 // guards against (any global-object reshape -- delete, redefine-as-accessor --
@@ -163,24 +150,10 @@ NIGHT_RUNTIME_EXPORT(night_runtime_resolve_global_slot_guarded)
 uint32_t night_runtime_resolve_global_slot_guarded(JSContext* cx,
                                                    uint32_t bindingId);
 
-// Inlined `SetGName` for a resolved global-object binding: store `valBits`
-// into the binding's slot with the engine's `setSlot` write barriers (a store +
-// barriers never move objects, so a leaf -- no rooting handshake). Also warms
-// the `gGlobalSlots` cache so a following inline read avoids the cold resolve.
-NIGHT_RUNTIME_EXPORT(night_runtime_set_global)
-void night_runtime_set_global(JSContext* cx, uint32_t bindingId,
-                              uint64_t valBits);
 // The inline `SetGName` store unarmed the binding's value-fuse cell (its
 // value changed): re-arm it from the stored value. A leaf.
 NIGHT_RUNTIME_EXPORT(night_runtime_binding_written)
 void night_runtime_binding_written(uint32_t bindingId);
-// The binding's current value for a compiled re-proof of a carried
-// per-binding value fact: the armed cell's bits, else the guarded resolve
-// (refilling the gGlobalSlots row and re-arming the cell) and the slot it
-// names; a name that is no longer an own plain data slot of the global
-// yields a magic Value. A leaf (lookupPure + slot read).
-NIGHT_RUNTIME_EXPORT(night_runtime_binding_value)
-uint64_t night_runtime_binding_value(JSContext* cx, uint32_t bindingId);
 
 // Direct construct: create the `this` object for a specialized `new` (the
 // callee is a single resolved scripted constructor, direct-called inline).
@@ -217,11 +190,6 @@ bool night_runtime_string(JSContext* cx, uint32_t top, uint32_t atomId);
 // lazily clone the intrinsic from the self-hosting zone (GC/throw).
 NIGHT_RUNTIME_EXPORT(night_runtime_get_intrinsic)
 bool night_runtime_get_intrinsic(JSContext* cx, uint32_t top, uint32_t atomId);
-
-// Validate an inline-materialized string literal (debug compiles only).
-NIGHT_RUNTIME_EXPORT(night_runtime_strlit_verify)
-bool night_runtime_strlit_verify(JSContext* cx, uint32_t strPtr,
-                                 uint32_t atomId);
 
 // Track census (diagnostic builds only): count one occurrence of (kind, id).
 // The compiler emits these calls only under its `--census` switch, so a
@@ -266,6 +234,10 @@ NIGHT_RUNTIME_EXPORT(night_runtime_more_iter)
 uint64_t night_runtime_more_iter(JSContext* cx, uint64_t iter);
 NIGHT_RUNTIME_EXPORT(night_runtime_end_iter)
 void night_runtime_end_iter(JSContext* cx, uint64_t iter);
+// The whole-cell post barrier for a tenured cell (a cached iterator) a
+// compiled for-in start stored a nursery object in (leaf).
+NIGHT_RUNTIME_EXPORT(night_runtime_post_whole_cell)
+void night_runtime_post_whole_cell(JSContext* cx, uint32_t cell);
 
 // Destructuring try-note unwind: when an exception unwinds through a
 // destructuring pattern, close its iterator unless it is already done.
@@ -381,16 +353,128 @@ NIGHT_RUNTIME_EXPORT(night_runtime_set_fun_name)
 bool night_runtime_set_fun_name(JSContext* cx, uint32_t top, uint64_t fun,
                                 uint64_t name, uint32_t prefixKind);
 
-// `1` iff neither `obj` nor anything on its prototype chain may have extra
-// indexed properties (js::ObjectMayHaveExtraIndexedProperties): the inline
-// dense-append (Array.prototype.push) arm's proto guard. Leaf (pure walk).
-NIGHT_RUNTIME_EXPORT(night_runtime_no_extra_indexed)
-int32_t night_runtime_no_extra_indexed(uint32_t obj);
+// `1` iff every slot of native object `obj` below `n` holds a property: the
+// stamp gates' coverage test for a shape with permuted slots, whose span
+// alone does not say it (holes). Leaf (a walk of the shape, no GC).
+NIGHT_RUNTIME_EXPORT(night_runtime_slots_covered)
+int32_t night_runtime_slots_covered(uint32_t obj, uint32_t n);
 
 // Peek-only generator-closing check (the pending magic is NOT cleared):
 // the catch-pad closing split. Leaf.
 NIGHT_RUNTIME_EXPORT(night_runtime_gen_is_closing)
 int32_t night_runtime_gen_is_closing(JSContext* cx);
+NIGHT_RUNTIME_EXPORT(night_runtime_mir_stress)
+int32_t night_runtime_mir_stress(uint32_t period);
+// The ctor-exit stamp for the baseline and MIR tiers: stamp a completed
+// constructor `this` (boxed) with layout `layoutId` when its word still
+// carries the CONSTRUCTING sentinel with our early key (or none) and its
+// slot span covers the layout's `nFields`, keeping the `keepBits` validity
+// bits that survived construction. Leaf.
+// MIR's dense append slow path (`store_elem.append`): append `val` at index
+// `idx` of native object `recv` (boxed), `idx` its initialized length, when
+// that is an ordinary dense append (extensible, not frozen, a writable
+// length, no indexed property on it or its prototypes), growing the
+// elements as needed. Runs no JS. 1 iff it stored. The object to the
+// out-slot. May GC.
+NIGHT_RUNTIME_EXPORT(night_runtime_elem_grow)
+uint32_t night_runtime_elem_grow(JSContext* cx, uint32_t top, uint64_t recv,
+                                 uint32_t idx, uint64_t val);
+// MIR's `getprop.data` miss (leaf: no GC, no JS): `recv.atomId` where
+// the lookup runs no code -- an own or prototype data property, an absent
+// one, or a pure builtin length -- filling the site's inline ways as the
+// IC miss does. A magic value where the lookup would run code (a getter, a
+// proxy, a resolve hook) or throw.
+NIGHT_RUNTIME_EXPORT(night_runtime_get_prop_pure)
+uint64_t night_runtime_get_prop_pure(JSContext* cx, uint64_t recv,
+                                     uint32_t atomId, uint32_t cacheIdx);
+// MIR's `setprop.data` miss: `recv.atomId = val` where the set runs no
+// code (an own writable data property of a native object, or an add with
+// no setter, read-only property or hook on the chain; never the global or
+// a Watchtower-watched object), through the IC miss path (filling the
+// site's way). `flags` bit 1 (2): the compiled vouch, as
+// `night_runtime_set_prop_ic_miss`'s. 1 once stored, 2 once stored where
+// it demoted a claim of the object's published class MIR reads (TYPES,
+// SLOTS, the class), 0 where it would not be such a set (nothing done), 3
+// on an engine error. May GC.
+// Whether ToPrimitive of `v` (boxed) runs no user code: a primitive, or
+// an object whose conversion is Object.prototype's own (no @@toPrimitive,
+// the builtin valueOf and toString, a data @@toStringTag or none), found
+// by pure lookups (MIR's `prim.*`). Leaf.
+NIGHT_RUNTIME_EXPORT(night_runtime_to_primitive_pure)
+int32_t night_runtime_to_primitive_pure(JSContext* cx, uint64_t v);
+// MIR's `getelem.data` miss: `recv[key]` where the read runs no code (a
+// primitive key; a data property, an element of a dense, typed-array,
+// arguments object or string, or nothing, by pure lookups). 1 with the
+// value in the out-slot, 0 where it would run code or throw (nothing
+// done), 2 on an engine error. May GC (interning the key, a char).
+NIGHT_RUNTIME_EXPORT(night_runtime_get_elem_pure)
+uint32_t night_runtime_get_elem_pure(JSContext* cx, uint32_t top,
+                                     uint64_t recv, uint64_t key);
+// MIR's `setelem.data` miss: `recv[key] = val` for an int32 key where the
+// set runs no code (an element of a native object or array, writable or
+// added with nothing on the chain to refuse or run; a number to a typed
+// array's element; never the global, an arguments object or a watched
+// object). Codes as `night_runtime_set_prop_pure`'s. May GC.
+NIGHT_RUNTIME_EXPORT(night_runtime_set_elem_pure)
+uint32_t night_runtime_set_elem_pure(JSContext* cx, uint32_t top,
+                                     uint64_t recv, uint64_t key,
+                                     uint64_t val);
+// MIR's `new_this`: `this` for a proven scripted constructor that is its
+// own new.target, with `prototype` already read (`protoBits`; a non-object
+// means Object.prototype). Fills the site's construct cell. Runs no code.
+// May GC.
+NIGHT_RUNTIME_EXPORT(night_runtime_new_this)
+bool night_runtime_new_this(JSContext* cx, uint32_t top, uint64_t calleeBits,
+                            uint64_t protoBits, uint32_t nSlots,
+                            uint32_t cellAddr, uint32_t stampWord);
+// MIR's `new_this.init` slow path: `night_runtime_new_this`, then the plain
+// adds (as `night_runtime_init_field`'s, its rows `cache0 + i`) of the
+// first `n` fields of the layout the stamp word's early key names, with the
+// boxed values at `valsAddr` (below `top`); then the construct cell's final
+// part. 1 = made (the object to the out-slot), 0 = error, 2 = an add that
+// is not plain (the caller exits before the `new`). Runs no code. May GC.
+NIGHT_RUNTIME_EXPORT(night_runtime_new_this_init)
+uint32_t night_runtime_new_this_init(JSContext* cx, uint32_t top,
+                                     uint64_t calleeBits, uint64_t protoBits,
+                                     uint32_t nSlots, uint32_t cellAddr,
+                                     uint32_t stampWord, uint32_t valsAddr,
+                                     uint32_t n, uint32_t cache0,
+                                     uint32_t wantBits);
+// `method.load`'s miss: arm the predicted-method cell at `cellAddr` for
+// receiver `recvBits` (its name `atomId`, its predicted script at
+// `scriptAddr`). 1 = armed for this receiver's prototype; 0 = not (the cell
+// stays unarmable until a GC). A leaf.
+NIGHT_RUNTIME_EXPORT(night_runtime_method_arm)
+int32_t night_runtime_method_arm(uint64_t recvBits, uint32_t cellAddr,
+                                 uint32_t atomId, uint32_t scriptAddr);
+NIGHT_RUNTIME_EXPORT(night_runtime_set_prop_pure)
+uint32_t night_runtime_set_prop_pure(JSContext* cx, uint32_t top,
+                                     uint64_t recv, uint32_t atomId,
+                                     uint64_t val, uint32_t cacheIdx,
+                                     uint32_t flags);
+// MIR's `init_field` slow path: the plain add of a predicted field to an
+// object under construction; 1 iff it is then `constructing(expectSet)`
+// (exactly those fields of its layout, bit i field i; `wantBits` kept).
+// The object to the out-slot. May GC.
+NIGHT_RUNTIME_EXPORT(night_runtime_init_field)
+uint32_t night_runtime_init_field(JSContext* cx, uint32_t top, uint64_t recv,
+                                  uint32_t atomId, uint64_t val,
+                                  uint32_t cacheIdx, uint32_t expectSet,
+                                  uint32_t wantBits);
+NIGHT_RUNTIME_EXPORT(night_runtime_ctor_stamp)
+void night_runtime_ctor_stamp(uint64_t thisBits, uint32_t layoutId,
+                              uint32_t nFields, uint32_t keepBits);
+// The two-phase restamp at an init delegate's returns (the restamp form
+// of the ctor-exit stamp): advance `this` to layout `layoutId` when it is
+// already that layout (no-op), still under the CONSTRUCTING sentinel with
+// an early key of ours, a prefix layout's, or none, or stamped with a
+// prefix layout and eligible to advance; and its slot span covers the
+// layout. `prefixN` are prefix layout ids + 1 (0: none). Leaf.
+NIGHT_RUNTIME_EXPORT(night_runtime_ctor_restamp)
+void night_runtime_ctor_restamp(uint64_t thisBits, uint32_t layoutId,
+                                uint32_t nFields, uint32_t keepBits,
+                                uint32_t prefix0, uint32_t prefix1,
+                                uint32_t prefix2, uint32_t prefix3);
 
 // `key in obj` (JSOp::In): boxed boolean to the out-slot; throws when `obj`
 // is not an object. May GC (proxy hooks).
@@ -646,8 +730,6 @@ NIGHT_RUNTIME_EXPORT(night_runtime_get_mapped_arg)
 uint64_t night_runtime_get_mapped_arg(uint64_t objBits, uint32_t i);
 NIGHT_RUNTIME_EXPORT(night_runtime_set_mapped_arg)
 void night_runtime_set_mapped_arg(uint64_t objBits, uint32_t i, uint64_t val);
-NIGHT_RUNTIME_EXPORT(night_runtime_validate_this_layout)
-void night_runtime_validate_this_layout(uint64_t thisBits, uint32_t layoutId);
 
 // `RegExp`: clone the regexp literal `gcthing[index]` of `script`. May GC.
 NIGHT_RUNTIME_EXPORT(night_runtime_regexp)
@@ -675,6 +757,11 @@ uint64_t night_runtime_typeof(JSContext* cx, uint64_t a);
 // byte (low bits = JSType, 0x80 = `!==`). Infallible leaf; returns 0/1.
 NIGHT_RUNTIME_EXPORT(night_runtime_typeof_eq)
 int32_t night_runtime_typeof_eq(JSContext* cx, uint64_t a, uint32_t operand);
+// The pristine RegExp.prototype.exec (forTest 0) / .test (1) called on `re`
+// with `str`, decided by a leaf: the result, or magic bits to take the call.
+NIGHT_RUNTIME_EXPORT(night_runtime_regexp_leaf)
+uint64_t night_runtime_regexp_leaf(JSContext* cx, uint64_t re, uint64_t str,
+                                   uint32_t forTest);
 // Strict-equality of `a` against an immediate constant (`StrictConstantEq`;
 // `operand` is the ConstantCompareOperand uint16). Infallible leaf; returns 0/1
 // (the `Ne` form is the translator negating this).
@@ -702,7 +789,8 @@ bool night_runtime_set_name(JSContext* cx, uint32_t top, uint64_t env,
 // fills it from the object it allocates so the compiled site can bump-allocate
 // inline next time.
 NIGHT_RUNTIME_EXPORT(night_runtime_new_object)
-bool night_runtime_new_object(JSContext* cx, uint32_t top, uint32_t cell);
+bool night_runtime_new_object(JSContext* cx, uint32_t top, uint32_t cell,
+                              uint32_t nslots);
 NIGHT_RUNTIME_EXPORT(night_runtime_new_array)
 bool night_runtime_new_array(JSContext* cx, uint32_t top, uint32_t length,
                              uint32_t cell);
@@ -745,10 +833,12 @@ bool night_runtime_new_private_name(JSContext* cx, uint32_t top,
 // GC/throw). `night_runtime_lambda` clones the function template
 // `script->getFunction(funcIndex)` capturing `env`. `night_runtime_env_setup`
 // takes the body's own `script` (compiled-body ABI 5th arg) so it returns the
-// global lexical environment for a global script (spec 2b).
+// global lexical environment for a global script (spec 2b). Both take a row
+// address (`NightLambdaCell` / `NightEnvCell`; 0: none) that the first
+// allocation they make fills, for the compiled body's inline replay.
 NIGHT_RUNTIME_EXPORT(night_runtime_env_setup)
 bool night_runtime_env_setup(JSContext* cx, uint32_t top, uint32_t sp,
-                             uint32_t script);
+                             uint32_t script, uint32_t cellAddr);
 
 // Top-level (global) script support (spec 2c / Object).
 // `night_runtime_global_decl_ instantiation` runs the global script's pc-0 op
@@ -770,7 +860,8 @@ void night_runtime_set_aliased(JSContext* cx, uint64_t env, uint32_t hops,
                                uint32_t slot, uint64_t val);
 NIGHT_RUNTIME_EXPORT(night_runtime_lambda)
 bool night_runtime_lambda(JSContext* cx, uint32_t top, uint64_t env,
-                          uint32_t script, uint32_t funcIndex);
+                          uint32_t script, uint32_t funcIndex,
+                          uint32_t cellAddr);
 
 // Exceptions. `night_runtime_exception` gets and clears the
 // pending exception (the `Exception` op), boxed into the out-slot (false on
@@ -797,14 +888,6 @@ bool night_runtime_add(JSContext* cx, uint32_t top, uint64_t a, uint64_t b);
 
 NIGHT_RUNTIME_EXPORT(night_runtime_concat)
 bool night_runtime_concat(JSContext* cx, uint32_t top, uint64_t a, uint64_t b);
-
-// Call-site specialization: classify the runtime callee `calleeBits`
-// (a boxed Value). Returns `(JSScript* << 32) | nightFuncIndex` (non-zero low
-// half) when it is an interpreted JSFunction with a compiled AOT body, so the
-// caller can dispatch via `call_indirect`; returns 0 for native / not-compiled
-// callees (fall back to `night_runtime_call`). Leaf: no GC, no allocation.
-NIGHT_RUNTIME_EXPORT(night_runtime_callee_night_target)
-uint64_t night_runtime_callee_night_target(uint64_t calleeBits);
 
 // Generic call: invoke the callee in the frame at `sp` with `argc` args
 // Writes the return value to the out-slot at `top`.
@@ -869,6 +952,49 @@ bool night_runtime_get_intrinsic_cell(JSContext* cx, uint32_t top,
 NIGHT_RUNTIME_EXPORT(night_runtime_regex_ci_compare)
 int32_t night_runtime_regex_ci_compare(uint32_t a_ptr, uint32_t b_ptr,
                                        uint32_t byte_len, uint32_t unicode);
+
+// Baseline-tier helpers (docs/BASELINE.md §6): the interpreter's cases for
+// the ops no other lowering covers, with the frame state passed in.
+NIGHT_RUNTIME_EXPORT(night_runtime_bigint)
+bool night_runtime_bigint(JSContext* cx, uint32_t top, uint32_t script,
+                          uint32_t gcthingIndex);
+NIGHT_RUNTIME_EXPORT(night_runtime_non_syntactic_global_this)
+bool night_runtime_non_syntactic_global_this(JSContext* cx, uint32_t top,
+                                             uint64_t env);
+NIGHT_RUNTIME_EXPORT(night_runtime_set_intrinsic)
+bool night_runtime_set_intrinsic(JSContext* cx, uint32_t top, uint32_t script,
+                                 uint32_t pcOffset, uint64_t val);
+NIGHT_RUNTIME_EXPORT(night_runtime_env_callee)
+uint64_t night_runtime_env_callee(JSContext* cx, uint64_t env, uint32_t hops);
+NIGHT_RUNTIME_EXPORT(night_runtime_eval)
+bool night_runtime_eval(JSContext* cx, uint32_t top, uint32_t sp,
+                        uint32_t argc, uint64_t env, uint32_t script,
+                        uint32_t pcOffset);
+NIGHT_RUNTIME_EXPORT(night_runtime_spread_eval)
+bool night_runtime_spread_eval(JSContext* cx, uint32_t top, uint64_t callee,
+                               uint64_t thisv, uint64_t arr, uint64_t env,
+                               uint32_t script, uint32_t pcOffset);
+NIGHT_RUNTIME_EXPORT(night_runtime_dynamic_import)
+bool night_runtime_dynamic_import(JSContext* cx, uint32_t top, uint32_t script,
+                                  uint64_t specifier, uint64_t options);
+NIGHT_RUNTIME_EXPORT(night_runtime_import_meta)
+bool night_runtime_import_meta(JSContext* cx, uint32_t top, uint32_t script);
+NIGHT_RUNTIME_EXPORT(night_runtime_get_import)
+bool night_runtime_get_import(JSContext* cx, uint32_t top, uint64_t env,
+                              uint32_t script, uint32_t pcOffset);
+NIGHT_RUNTIME_EXPORT(night_runtime_add_disposable)
+bool night_runtime_add_disposable(JSContext* cx, uint32_t top, uint64_t env,
+                                  uint64_t val, uint64_t method,
+                                  uint64_t needsClosure, uint32_t hint);
+NIGHT_RUNTIME_EXPORT(night_runtime_take_dispose_capability)
+bool night_runtime_take_dispose_capability(JSContext* cx, uint32_t top,
+                                           uint64_t env);
+NIGHT_RUNTIME_EXPORT(night_runtime_create_suppressed_error)
+bool night_runtime_create_suppressed_error(JSContext* cx, uint32_t top,
+                                           uint64_t error, uint64_t suppressed);
+NIGHT_RUNTIME_EXPORT(night_runtime_resume)
+bool night_runtime_resume(JSContext* cx, uint32_t top, uint64_t gen,
+                          uint64_t val, uint64_t kind);
 
 }  // extern "C"
 
