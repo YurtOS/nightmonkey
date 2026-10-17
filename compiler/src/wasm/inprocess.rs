@@ -835,6 +835,12 @@ mod tests {
         build_toy().0
     }
 
+    #[test]
+    fn reservation_matches_emitted_blob_count() {
+        let (out, _) = build_toy();
+        assert_eq!(max_inprocess_blobs(&toy_source()) as usize, out.blobs.len());
+    }
+
     fn build_toy() -> (InprocOut, usize) {
         let source = toy_source();
         let specs: Vec<HelperImportSpec> = HELPER_NAMES
