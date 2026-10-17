@@ -1,0 +1,156 @@
+name: Engine integration
+
+on:
+  workflow_call:
+    inputs:
+      full_jstests:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+# Resolve the supported engine branch once and record its exact SHA.
+# Every engine cache includes that revision; no neighboring build is reused.
+env:
+  FIREFOX_REPO: bytecodealliance/firefox
+  FIREFOX_REF: wasi-ff147
+  SM_OBJDIR: obj-nightmonkey-sm
+
+jobs:
+  jit-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        # Long suites get separate jobs so each lane has its own time budget.
+        lane: ${{ inputs.full_jstests && fromJSON('["aot", "interpreter"]') || fromJSON('["both"]') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: wasm32-wasip1
+          components: rust-src
+      - name: Prepare logs
+        run: mkdir -p "$RUNNER_TEMP/nightmonkey-logs"
+
+      - name: Resolve the SpiderMonkey revision
+        id: smrev
+        run: |
+          sha=$(git ls-remote "https://github.com/$FIREFOX_REPO" "refs/heads/$FIREFOX_REF" | cut -f1)
+          if [ -z "$sha" ]; then
+            echo "::error::branch $FIREFOX_REF not found on https://github.com/$FIREFOX_REPO"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "SpiderMonkey: $FIREFOX_REPO@$sha" | tee "$RUNNER_TEMP/nightmonkey-logs/engine.txt"
+          echo "SpiderMonkey: $FIREFOX_REPO@$sha" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cache the SpiderMonkey checkout
+        id: cache-src
+        uses: actions/cache@v4
+        with:
+          path: firefox
+          key: firefox-src-${{ steps.smrev.outputs.sha }}
+
+      - name: Fetch SpiderMonkey (shallow)
+        if: steps.cache-src.outputs.cache-hit != 'true'
+        run: |
+          git init firefox
+          cd firefox
+          git remote add origin "https://github.com/$FIREFOX_REPO"
+          git fetch --depth 1 origin "${{ steps.smrev.outputs.sha }}"
+          git checkout --detach FETCH_HEAD
+
+      - name: Verify cached engine identity
+        env:
+          EXPECTED_SHA: ${{ steps.smrev.outputs.sha }}
+        run: test "$(git -C firefox rev-parse HEAD)" = "$EXPECTED_SHA"
+
+      - name: Cache the mach toolchains
+        uses: actions/cache@v4
+        with:
+          path: ~/.mozbuild
+          key: mozbuild-${{ runner.os }}-${{ steps.smrev.outputs.sha }}
+          restore-keys: mozbuild-${{ runner.os }}-
+
+      - name: Bootstrap SpiderMonkey
+        run: |
+          cd firefox
+          ./mach --no-interactive bootstrap --application-choice=js
+          # mach bootstrap only fetches host-target toolchains; the wasm32-wasi
+          # sysroot (crt1.o, libc) must be fetched explicitly into ~/.mozbuild.
+          cd ~/.mozbuild && "$GITHUB_WORKSPACE/firefox/mach" --log-no-times artifact toolchain --from-build sysroot-wasm32-wasi
+
+      - name: Cache the SpiderMonkey objdir
+        uses: actions/cache@v4
+        with:
+          path: firefox/${{ env.SM_OBJDIR }}
+          key: firefox-obj-v2-ubuntu-24.04-rust-1.99.1-${{ steps.smrev.outputs.sha }}-${{ hashFiles('spidermonkey/mozconfig', 'configs/**', 'scripts/build-spidermonkey.sh') }}
+
+      - name: Build SpiderMonkey
+        run: scripts/build-spidermonkey.sh firefox
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> build/cargo
+          key: engine-ubuntu-24.04
+
+      - name: Build NightMonkey
+        id: build
+        run: |
+          cmake -S . -B build -DSPIDERMONKEY_DIST="$GITHUB_WORKSPACE/firefox/$SM_OBJDIR/dist"
+          cmake --build build
+          test -x build/bin/inproc-shell.sh
+
+      - name: Local regressions (AOT)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.lane != 'interpreter' }}
+        timeout-minutes: 30
+        run: scripts/run-night-tests.sh build 2>&1 | tee "$RUNNER_TEMP/nightmonkey-logs/local-aot.log"
+
+      - name: Local regressions (interpreter)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.lane != 'aot' }}
+        timeout-minutes: 30
+        env:
+          NIGHT_INPROCESS_OFF: '1'
+        run: scripts/run-night-tests.sh build 2>&1 | tee "$RUNNER_TEMP/nightmonkey-logs/local-interpreter.log"
+
+      - name: jit-tests (AOT)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.lane != 'interpreter' }}
+        timeout-minutes: 60
+        run: scripts/run-jit-tests.sh firefox build -- --format=automation 2>&1 | tee "$RUNNER_TEMP/nightmonkey-logs/jit-aot.log"
+
+      - name: jit-tests (interpreter)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.lane != 'aot' }}
+        timeout-minutes: 60
+        env:
+          NIGHT_INPROCESS_OFF: '1'
+        run: scripts/run-jit-tests.sh firefox build -- --format=automation 2>&1 | tee "$RUNNER_TEMP/nightmonkey-logs/jit-interpreter.log"
+
+      - name: Full jstests (AOT)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.full_jstests && matrix.lane == 'aot' }}
+        timeout-minutes: 120
+        run: scripts/run-jstests.sh firefox build -- --format=automation 2>&1 | tee "$RUNNER_TEMP/nightmonkey-logs/jstests-aot.log"
+
+      - name: Full jstests (interpreter)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.full_jstests && matrix.lane == 'interpreter' }}
+        timeout-minutes: 120
+        env:
+          NIGHT_INPROCESS_OFF: '1'
+        run: scripts/run-jstests.sh firefox build -- --format=automation 2>&1 | tee "$RUNNER_TEMP/nightmonkey-logs/jstests-interpreter.log"
+
+      - name: Upload execution logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightmonkey-execution-${{ matrix.lane }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nightmonkey-logs
+          if-no-files-found: error
+          retention-days: 7

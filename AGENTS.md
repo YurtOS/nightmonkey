@@ -58,19 +58,19 @@ cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
-Baseline caveats at `751695b` (the initial `yurt` head): workspace fmt reports
+Historical baseline caveats at `751695b` (the initial `yurt` head): workspace fmt reports
 differences in the generated `compiler/src/opcodes/ff147.rs`. Do not run a
 formatting rewrite on that generated file to hide the failure; repair the
 generator in a separate change and regenerate its output. Clippy reports
 `clippy::needless_late_init` in `compiler/src/wasm/regex.rs:1510` under
-`-D warnings`. Both failures were reproduced with the source files unchanged
-from this base; recheck the current base before attributing them to a PR. These failures are not passes
-and do not waive applicable gates. Documentation-only changes use the focused
-checks below; Rust changes with failing gates remain blocked under org policy.
+`-D warnings`. Both were reproduced unchanged from that base. The CI setup
+repairs the generator's digest formatting, regenerates the table and initializes
+the regex bounds as a tuple. Recheck the current base before attributing a
+failure to a PR; historical failures do not waive applicable gates.
+Documentation-only changes use the focused checks below.
 
-These are local development checks; the current hosted workflow does not run
-them as separate gates. Rust checks alone do not exercise C++ integration or
-prove JavaScript execution correctness.
+Rust checks alone do not exercise C++ integration or prove JavaScript execution
+correctness.
 
 After a successful CMake build, confirm `build/bin/inproc-shell.sh` exists
 before running execution tests. A missing wrapper is a setup failure, not a
@@ -103,12 +103,17 @@ Compare observable results with the interpreter. For shell/workflow edits run
 and skill-only changes need link/path, frontmatter and diff checks rather than
 rebuilding the engine.
 
-The current `.github/workflows/ci.yml` job `jit-test` builds SpiderMonkey and
-Nightmonkey and runs **AOT jit-tests only** on PRs, pushes to `main` and manual
-dispatch. It does not run baseline jit-tests, local regressions, jstests or the
-shipping snapshot flow. Check live branch protection before describing any
-hosted job as required. Report skipped lanes, missing prerequisites, test
-exclusions and base-reproduced failures explicitly.
+`.github/workflows/ci.yml` runs independent Rust fmt/check/test/Clippy jobs,
+workflow lint and script checks on PRs, pushes to `yurt` and manual dispatch.
+It calls `engine.yml` to build SpiderMonkey and Nightmonkey and run local
+regressions and jit-tests in both AOT and interpreter lanes. `jstests.yml`
+calls the same engine workflow nightly and manually with full jstests enabled;
+the long suites have separate jobs per lane. Execution logs and the resolved
+engine revision are uploaded as artifacts. Existing WASI-wide and AOT-only
+exclusion lists still apply. The shipping snapshot flow is not a hosted gate.
+Check live branch protection before describing any hosted job as required.
+Report skipped lanes, missing prerequisites, test exclusions and
+base-reproduced failures explicitly.
 
 ## Correctness and integration rules
 
