@@ -4,7 +4,7 @@ Gate 2 approved by user "go" for plan b4a98b29e89655878c0186b7b9c477369eb06a35.
 Implementation is in progress; no merge readiness claim.
 
 Recorded inputs: compiler upstream 8f5360d70707679a9080edf6a4dcd4f65d89aa71;
-NightMonkey parent PR2 dda91dc5243720d297abd07caf81d8f756da9ebc, still open;
+NightMonkey parent PR2 37706817fb6f25aa532e366e7a86960473e9a5e9, still open;
 Firefox yurt/original engine f0c060c52260d41fc631a14cda05372ad1c2cbe1;
 required engine delta head 08702e6f7b6c6d9a2ebf9c0cfc37ccebdd395706.
 
@@ -24,9 +24,23 @@ check. Extracted only in the plan workspace. Manifest identifies LLVM revision
 to the audited release-tag header. This establishes payload/source consistency,
 not guest runtime behavior.
 
-Quality prerequisite at e8e3664: generator regression committed red0815c97
+Quality prerequisite PR6 at 17a177bb38b9f31c22bef50072e2eb9e604ffa7a:
+generator regression committed red0815c97
 (rustfmt rejects emitted digest declaration), green after generator3b0d3b7;
 ff147 regenerated separately c094a07 and matches the pinned engine header.
 Regex Clippy lint reproduced and removed by tuple initialization cc59c0a;
-focused compiler Clippy, workspace fmt and actionlint pass. Full workspace gates
-and engine build remain in progress.
+full workspace fmt/check/test/clippy pass, with 58 compiler tests and no failed
+tests. Python generator unittest, pinned engine-table check, actionlint and shell
+syntax checks pass. Mutation to the base generator makes the same CI test fail
+on the digest formatting, and restoring the fixed generator makes it pass.
+Snapshot inherits the existing workspace Rust version to preserve its intended
+MSRV during Clippy checks. The Linux-only stdcxx option is conditional on host
+Linux. Claude and Codex approved the e8e3664 full diff; Codex approved the small
+17a177b metadata/configuration delta. Hosted jit-test is pending.
+
+Engine build: unchanged f0c060c, isolated Mozilla bootstrap/sysroot. macOS27 SDK
+TAPI arm64e.x1 is unsupported by bundled LLVM20's host linker. Explicit
+`HOST_LDFLAGS=--ld-path=/usr/bin/ld` in `mach configure` uses the system linker
+for host utilities, retaining the original Wasm target compiler/linker. This
+fixes the observed nsinstall link failure. The baseline build is still running;
+no CMake wrapper, JS execution, snapshot or Yurt qualification is claimed.
