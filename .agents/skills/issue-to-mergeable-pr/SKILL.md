@@ -13,8 +13,7 @@ workflow below; repository and organization policy remain in those files.
 The user is in the design; agents review documents and code in bounded loops.
 Ends at a ready report; this workflow does not merge.
 
-The phases add gates and review loops. They do not replace AGENTS.md and memory
-rules (worktree, red test first, benchmark-before-building, etc.).
+The phases add gates and review loops to `AGENTS.md` and `docs/agents/org.md`.
 
 ## Phase 0: Issue
 
@@ -35,17 +34,11 @@ rules (worktree, red test first, benchmark-before-building, etc.).
 
 ## Bounded path
 
-1. Own worktree off the default branch (superpowers:using-git-worktrees). Read the
-   code; list what the change must preserve.
-2. **Gate 1, in chat**: short design (approach, files, what is preserved or
-   changed, test strategy, risk). No spec or plan files, no document review.
-   Wait for the user's yes.
-3. Build: superpowers:test-driven-development (red test first). For a pure
-   refactor with no behaviour change: record the test names before, prove they
-   still pass after, and mutation-check that the new code is exercised (break
-   it, watch the tests go red, revert).
-4. superpowers:verification-before-completion, open a **draft** PR (`Closes #N`;
-   session attribution lines), then Phase 5.
+Use the Full path below with a proportionate spec and plan. A small change
+narrows the documents and review surface; it does not remove organization
+workflow or test-first requirements. Do not invent a refactor exemption from
+those requirements. If a requirement cannot apply to the requested change,
+report the conflict to the user under `docs/agents/org.md` before proceeding.
 
 ## Full path
 

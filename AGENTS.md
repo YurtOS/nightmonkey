@@ -29,8 +29,10 @@ the upstream CI workflow's `main` push trigger.
 ## Build
 
 This repository uses stock Cargo and `wasm32-wasip1`, not `cargo-yurt` or the
-Yurt guest SDK. The workspace declares Rust 1.82.0 as its minimum; it does not
-pin a toolchain. Use `--locked` for reproducible host Rust commands.
+Yurt guest SDK. The workspace declares Rust 1.82.0, but this is not the effective
+minimum for the locked workspace: Wasmtime 45.0.3 and Cranelift 0.132.3 require
+Rust 1.93.0. Check dependency MSRVs when updating the lockfile; no toolchain is
+pinned. Use `--locked` for reproducible host Rust commands.
 
 ```sh
 cargo build --workspace --locked
@@ -56,11 +58,23 @@ cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
+Baseline caveats at `751695b` (the initial `yurt` head): workspace fmt reports
+differences in the generated `compiler/src/opcodes/ff147.rs`. Do not run a
+formatting rewrite on that generated file to hide the failure; repair the
+generator in a separate change and regenerate its output. Clippy reports
+`clippy::needless_late_init` in `compiler/src/wasm/regex.rs:1510` under
+`-D warnings`. Both failures were reproduced with the source files unchanged
+from this base; recheck the current base before attributing them to a PR. These failures are not passes
+and do not waive applicable gates. Documentation-only changes use the focused
+checks below; Rust changes with failing gates remain blocked under org policy.
+
 These are local development checks; the current hosted workflow does not run
 them as separate gates. Rust checks alone do not exercise C++ integration or
 prove JavaScript execution correctness.
 
-After an integrated build, run local regressions and SpiderMonkey jit-tests in
+After a successful CMake build, confirm `build/bin/inproc-shell.sh` exists
+before running execution tests. A missing wrapper is a setup failure, not a
+JavaScript regression. Run local regressions and SpiderMonkey jit-tests in
 both AOT and interpreter lanes:
 
 ```sh

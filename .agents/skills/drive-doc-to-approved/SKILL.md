@@ -21,9 +21,10 @@ Every round, give each reviewer the repo-local path
 (`docs/superpowers/specs|plans/...`) in the worktree, plus the commit SHA it was
 committed at. Commit each revision first, so "latest" is unambiguous. Reviewers
 read that exact version (`git show <sha>:<path>`), not the working tree or a
-pasted copy, and are told they are read-only: no edits, no commits. Alternative
-when asked: a draft PR titled "[DRAFT SPEC]"/"[DRAFT PLAN]", never marked ready,
-closed or converted once the plan is executed.
+pasted copy, and are told they are read-only: no edits, no commits. When requested, use a draft PR titled "[DRAFT SPEC]" or "[DRAFT PLAN]"
+as the review artifact and keep it in draft during document review. After
+execution, propose its disposition to the user; apply the PR closure rule in
+`docs/agents/org.md` before closing it.
 
 ## Loop
 
