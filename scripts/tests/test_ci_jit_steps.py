@@ -1,7 +1,6 @@
 """Run the workflow's jit-test commands against harness-output fixtures."""
 
 import os
-import re
 import subprocess
 import tempfile
 import unittest
@@ -28,15 +27,16 @@ class JitWorkflowTests(unittest.TestCase):
             harness = root / "scripts/run-jit-tests.sh"
             harness.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$HARNESS_OUTPUT"\nexit "$HARNESS_STATUS"\n')
             harness.chmod(0o755)
+            results = []
             for lane, command in self.commands():
-                with self.subTest(lane=lane, output=output, status=status):
-                    result = subprocess.run(
-                        ["bash", "-e", "-o", "pipefail", "-c", command],
-                        cwd=root, capture_output=True, text=True, check=False,
-                        env={**os.environ, "RUNNER_TEMP": directory,
-                             "HARNESS_OUTPUT": output, "HARNESS_STATUS": str(status)},
-                    )
-                    yield result
+                result = subprocess.run(
+                    ["bash", "-e", "-o", "pipefail", "-c", command],
+                    cwd=root, capture_output=True, text=True, check=False,
+                    env={**os.environ, "RUNNER_TEMP": directory,
+                         "HARNESS_OUTPUT": output, "HARNESS_STATUS": str(status)},
+                )
+                results.append(result)
+            return results
 
     def test_no_tests_is_rejected(self):
         for result in self.run_commands("No tests found matching command line arguments.", 0):
