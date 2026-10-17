@@ -6,9 +6,15 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#ifdef NDEBUG
+#error "The host contract test requires assertions enabled"
+#endif
+
 static uint32_t reservedLen = 3, blobCount = 2;
 static int fd, mounts;
 static int32_t mountRc;
+static bool moduleAvailable = true;
+static int32_t mountedBase = 40;
 extern "C" int32_t yurt_jit_reserve(uint32_t, yurt_jit_info* info) {
   fd = dup(STDOUT_FILENO);
   *info = {40, reservedLen};
@@ -19,7 +25,7 @@ extern "C" uint32_t night_inproc_num_blobs(night_inproc_out_t*) { return blobCou
 extern "C" const uint8_t* night_inproc_module(night_inproc_out_t*, uint32_t* len) {
   static uint8_t bytes[8] = {};
   *len = sizeof(bytes);
-  return bytes;
+  return moduleAvailable ? bytes : nullptr;
 }
 extern "C" int32_t yurt_jit_mount_module_reserved(const void*, uint32_t,
     uint32_t, int32_t reservation, yurt_jit_module_t* mod) {
@@ -30,7 +36,7 @@ extern "C" int32_t yurt_jit_mount_module_reserved(const void*, uint32_t,
   return mountRc;
 }
 extern "C" int32_t yurt_jit_query_module(yurt_jit_module_t, yurt_jit_info* info) {
-  *info = {40, reservedLen};
+  *info = {mountedBase, reservedLen};
   return 0;
 }
 int main() {
@@ -56,4 +62,28 @@ int main() {
   InprocHostRelease();
   assert(fcntl(replacement, F_GETFD) != -1);
   close(replacement);
+
+  // Pre-mount failures release the reservation without attempting a mount.
+  mountRc = 0;
+  assert(InprocHostReserve(4, &base));
+  blobCount = 5;
+  assert(!InprocHostInstall(nullptr, base));
+  assert(fcntl(fd, F_GETFD) == -1 && mounts == 2);
+  blobCount = 2;
+  assert(InprocHostReserve(4, &base));
+  moduleAvailable = false;
+  assert(!InprocHostInstall(nullptr, base));
+  assert(fcntl(fd, F_GETFD) == -1 && mounts == 2);
+  moduleAvailable = true;
+
+  // Never arm code whose published range differs from its baked indices.
+  assert(InprocHostReserve(4, &base));
+  mountedBase = 41;
+  assert(!InprocHostInstall(nullptr, base));
+  mountedBase = 40;
+  assert(InprocHostReserve(4, &base));
+  reservedLen = 1;
+  assert(!InprocHostInstall(nullptr, base));
+  InprocHostRelease();
+  assert(mounts == 4);
 }
