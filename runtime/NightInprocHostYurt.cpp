@@ -101,15 +101,22 @@ bool js::night::InprocHostInstall(night_inproc_out_t* out,
   rc = yurt_jit_query_module(mod, &info);
   if (rc < 0) {
     JitError("yurt_jit_query_module", rc);
-    return false;
-  }
-  // Entry i is at INFO.base + i; the code was compiled for tableBase + i.
-  if (static_cast<uint32_t>(info.base) != tableBase || info.len < nblobs) {
+  } else if (static_cast<uint32_t>(info.base) == tableBase &&
+             info.len >= nblobs) {
+    // Entry i is at INFO.base + i, as baked into the compiled code.
+    return true;
+  } else {
     fprintf(stderr,
             "night: inprocess: module mounted at table[%d..+%u], compiled for "
             "table[%u..+%u]\n",
             info.base, info.len, tableBase, nblobs);
-    return false;
   }
-  return true;
+  // Nothing has been armed yet, but the mount published callable entries.
+  // Unpublish them before the driver frees the batch and stays interpreted.
+  rc = yurt_jit_unmount_module(mod);
+  if (rc < 0) {
+    JitError("unmounting invalid published module; module is still live", rc);
+    abort();
+  }
+  return false;
 }
