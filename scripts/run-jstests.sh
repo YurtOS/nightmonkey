@@ -9,6 +9,7 @@
 # tests/jstests-excludes.txt; NIGHT_INPROCESS_OFF=1 runs the tier-off
 # baseline lane.
 # The full suite takes hours; pass a path filter to narrow it.
+# Automation output is required to verify actual passing execution results.
 set -euo pipefail
 
 if [ $# -lt 1 ]; then
@@ -32,7 +33,14 @@ if [ "${NIGHT_INPROCESS_OFF:-0}" != 1 ]; then
   excludes+=(--exclude-file "$here/tests/jstests-excludes.txt")
 fi
 
-exec python3 "$firefox/js/src/tests/jstests.py" \
+log=$(mktemp)
+trap 'rm -f "$log"' EXIT
+python3 "$firefox/js/src/tests/jstests.py" \
+  --format=automation \
   "${excludes[@]}" \
   --wpt=disabled \
-  "$build/bin/inproc-shell.sh" "$@"
+  "$build/bin/inproc-shell.sh" "$@" | tee "$log"
+if ! grep -Eq '^TEST-PASS( \(EXPECTED RANDOM\))? \|' "$log"; then
+  echo "no passing jstests results" >&2
+  exit 2
+fi

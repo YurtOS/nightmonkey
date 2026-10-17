@@ -109,7 +109,9 @@ workflow lint and script checks on PRs, pushes to `yurt` and manual dispatch.
 It calls `engine.yml` to build SpiderMonkey and Nightmonkey and run local
 regressions and jit-tests in both AOT and interpreter lanes. `jstests.yml`
 calls the same engine workflow nightly and manually with full jstests enabled;
-the long suites have separate jobs per lane. Execution logs and the resolved
+the caller gives the long suites separate jobs per lane. `scripts/ci-suite.sh`
+owns lane selection, per-lane time limits and independent failure collection;
+the upstream harness wrappers own nonempty-suite validation. Execution logs and the resolved
 engine revision are uploaded as artifacts. Existing WASI-wide and AOT-only
 exclusion lists still apply. The shipping snapshot flow is not a hosted gate.
 Check live branch protection before describing any hosted job as required.

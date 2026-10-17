@@ -61,3 +61,9 @@
 Ruling: pin host Rust 1.98.1, matching sibling yurt-rust CI, for reproducible local and hosted checks. The initial hypothesis that this pin would avoid the snapshot Clippy lint was disproved: both 1.98.1 and 1.99.1 report it without crate MSRV metadata. Prerequisite PR #6 supplies the owning metadata fix; CI is stacked on its head `17a177b`, and duplicated quality-fix commits were dropped during rebase. The resolved workflow conflict preserves the new script gate, which runs #6's generator regression. Cost if the pin becomes too old: dependency updates will require a deliberate toolchain update.
 
 Final local validation after rebasing on #6: Rust 1.98.1 fmt/check/test/Clippy all pass; workspace tests report 58 passed and zero failed. All nine Python tests, actionlint 1.7.12, Bash syntax checks and whitespace checks pass. Claude approval remains unavailable; final Codex review and hosted results will be recorded on the draft PR.
+
+## Review follow-up at 92a6e66
+
+The posted strict review identified duplicated lane policy and a real fixture blind spot: swapping the workflow's jit/jstests grep contracts still passed all four old tests. The follow-up moves each nonempty check into its owning harness, replaces YAML-fragment parsing with direct wrapper fixtures using separate output contracts, and adds CI lane orchestration tests. A single ci-suite.sh runs requested lanes with individual GNU timeout caps and collects failures after both lanes. Engine workflow has no matrix; nightly caller owns two independent lane jobs. Rustup installs from rust-toolchain.toml, and the engine cache key hashes that file.
+
+Red evidence: wrapper tests reject the previously accepted empty/mismatched output contracts; orchestration tests fail before ci-suite.sh exists. Green evidence: 16 Python tests pass after implementation.

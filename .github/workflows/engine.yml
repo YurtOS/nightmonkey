@@ -6,6 +6,10 @@ on:
       full_jstests:
         type: boolean
         default: false
+      lane:
+        description: 'aot, interpreter, or both'
+        type: string
+        default: both
 
 permissions:
   contents: read
@@ -25,19 +29,17 @@ jobs:
   jit-test:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
-    strategy:
-      fail-fast: false
-      matrix:
-        # Long suites get separate jobs so each lane has its own time budget.
-        lane: ${{ inputs.full_jstests && fromJSON('["aot", "interpreter"]') || fromJSON('["both"]') }}
+    env:
+      CI_LANE: ${{ inputs.lane }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@1.98.1
-        with:
-          targets: wasm32-wasip1
-          components: rust-src
+      - name: Install Rust from rust-toolchain.toml
+        run: |
+          rustup show
+          rustup target add wasm32-wasip1
+          rustup component add rust-src
       - name: Prepare logs
         run: mkdir -p "$RUNNER_TEMP/nightmonkey-logs"
 
@@ -93,7 +95,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: firefox/${{ env.SM_OBJDIR }}
-          key: firefox-obj-v2-ubuntu-24.04-rust-1.98.1-${{ steps.smrev.outputs.sha }}-${{ hashFiles('spidermonkey/mozconfig', 'configs/**', 'scripts/build-spidermonkey.sh') }}
+          key: firefox-obj-v3-ubuntu-24.04-${{ steps.smrev.outputs.sha }}-${{ hashFiles('rust-toolchain.toml', 'spidermonkey/mozconfig', 'configs/**', 'scripts/build-spidermonkey.sh') }}
 
       - name: Build SpiderMonkey
         run: scripts/build-spidermonkey.sh firefox
@@ -110,67 +112,26 @@ jobs:
           cmake --build build
           test -x build/bin/inproc-shell.sh
 
-      - name: Local regressions (AOT)
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.lane != 'interpreter' }}
-        timeout-minutes: 30
-        run: scripts/run-night-tests.sh build 2>&1 | tee "$RUNNER_TEMP/nightmonkey-logs/local-aot.log"
+      - name: Local regressions
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 65
+        run: scripts/ci-suite.sh local "$CI_LANE"
 
-      - name: Local regressions (interpreter)
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.lane != 'aot' }}
-        timeout-minutes: 30
-        env:
-          NIGHT_INPROCESS_OFF: '1'
-        run: scripts/run-night-tests.sh build 2>&1 | tee "$RUNNER_TEMP/nightmonkey-logs/local-interpreter.log"
+      - name: jit-tests
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 125
+        run: scripts/ci-suite.sh jit "$CI_LANE"
 
-      - name: jit-tests (AOT)
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.lane != 'interpreter' }}
-        timeout-minutes: 60
-        run: |
-          scripts/run-jit-tests.sh firefox build -- --format=automation 2>&1 | tee "$RUNNER_TEMP/nightmonkey-logs/jit-aot.log"
-          grep -Eq '^Passed: [1-9][0-9]*$' "$RUNNER_TEMP/nightmonkey-logs/jit-aot.log" || {
-            echo "::error::jit-tests produced no positive test total"
-            exit 1
-          }
-
-      - name: jit-tests (interpreter)
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.lane != 'aot' }}
-        timeout-minutes: 60
-        env:
-          NIGHT_INPROCESS_OFF: '1'
-        run: |
-          scripts/run-jit-tests.sh firefox build -- --format=automation 2>&1 | tee "$RUNNER_TEMP/nightmonkey-logs/jit-interpreter.log"
-          grep -Eq '^Passed: [1-9][0-9]*$' "$RUNNER_TEMP/nightmonkey-logs/jit-interpreter.log" || {
-            echo "::error::jit-tests produced no positive test total"
-            exit 1
-          }
-
-      - name: Full jstests (AOT)
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.full_jstests && matrix.lane == 'aot' }}
-        timeout-minutes: 120
-        run: |
-          scripts/run-jstests.sh firefox build -- --format=automation 2>&1 | tee "$RUNNER_TEMP/nightmonkey-logs/jstests-aot.log"
-          grep -Eq '^TEST-PASS( \(EXPECTED RANDOM\))? \|' "$RUNNER_TEMP/nightmonkey-logs/jstests-aot.log" || {
-            echo "::error::jstests produced no passing test results"
-            exit 1
-          }
-
-      - name: Full jstests (interpreter)
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.full_jstests && matrix.lane == 'interpreter' }}
-        timeout-minutes: 120
-        env:
-          NIGHT_INPROCESS_OFF: '1'
-        run: |
-          scripts/run-jstests.sh firefox build -- --format=automation 2>&1 | tee "$RUNNER_TEMP/nightmonkey-logs/jstests-interpreter.log"
-          grep -Eq '^TEST-PASS( \(EXPECTED RANDOM\))? \|' "$RUNNER_TEMP/nightmonkey-logs/jstests-interpreter.log" || {
-            echo "::error::jstests produced no passing test results"
-            exit 1
-          }
+      - name: Full jstests
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.full_jstests }}
+        timeout-minutes: 245
+        run: scripts/ci-suite.sh jstests "$CI_LANE"
 
       - name: Upload execution logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nightmonkey-execution-${{ matrix.lane }}-${{ github.run_attempt }}
+          name: nightmonkey-execution-${{ inputs.lane }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/nightmonkey-logs
           if-no-files-found: error
           retention-days: 7

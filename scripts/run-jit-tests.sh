@@ -7,6 +7,7 @@
 # shell cannot run at all). The AOT lane (default) compiles every test
 # in-process and also skips tests/jit-test-excludes.txt; NIGHT_INPROCESS_OFF=1
 # runs the same shell with the tier off (the baseline lane).
+# Automation output is required to verify a nonempty executed suite.
 set -euo pipefail
 
 if [ $# -lt 1 ]; then
@@ -26,13 +27,20 @@ if [ $# -ge 1 ] && [ "$1" = "--" ]; then
 fi
 
 # jit_test.py takes one --exclude-from; combine the lists.
-combined=$(mktemp)
-trap 'rm -f "$combined"' EXIT
+work=$(mktemp -d)
+combined=$work/excludes
+log=$work/output
+trap 'rm -rf "$work"' EXIT
 cat "$here/tests/wasi-jit-test-excludes.txt" > "$combined"
 if [ "${NIGHT_INPROCESS_OFF:-0}" != 1 ]; then
   cat "$here/tests/jit-test-excludes.txt" >> "$combined"
 fi
 
 python3 "$firefox/js/src/jit-test/jit_test.py" \
+  --format=automation \
   --exclude-from "$combined" \
-  "$build/bin/inproc-shell.sh" "$@"
+  "$build/bin/inproc-shell.sh" "$@" | tee "$log"
+if ! grep -Eq '^Passed: [1-9][0-9]*$' "$log"; then
+  echo "no jit-tests executed: missing positive test total" >&2
+  exit 2
+fi

@@ -15,7 +15,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  engine:
+  aot:
     uses: ./.github/workflows/engine.yml
     with:
+      lane: aot
+      full_jstests: true
+  interpreter:
+    uses: ./.github/workflows/engine.yml
+    with:
+      lane: interpreter
       full_jstests: true
