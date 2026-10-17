@@ -177,7 +177,7 @@ void night_source_script_set_body_scope(night_source_t* source,
                                         night_source_object_t scope);
 
 // In-process AOT batch build. Compiles the Source graph into wasm-jit-runner
-// function blobs (blob i is predicted at funcref-table index table_base + i)
+// function blobs (blob i lands at night_inproc_table_base(out) + i)
 // plus a serialized environment descriptor.
 //
 // Helper signature strings ("i(ii)" style): "<ret>(<params>)", one char per

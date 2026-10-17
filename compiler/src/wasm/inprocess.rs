@@ -4,7 +4,8 @@
 //! (`0x60 functype ++ code-entry body`, no size prefix). The runner
 //! reassembles them with the extern imports at function indices
 //! `0..nextern` and blob `i` at `nextern + i`, and appends blob `i` to the
-//! live funcref table at `table_base + i` -- both index spaces match this
+//! live funcref table at `table_base + i`, where the reservation callback
+//! chooses `table_base` once all functions exist -- both index spaces match this
 //! module by construction, so call/const immediates are correct as
 //! emitted. All region addresses come from a caller-supplied allocator
 //! (two calls: the fixed layout region, then the post-translation prop-IC/
@@ -410,7 +411,7 @@ pub fn build_inprocess_batch(
         &mut |id, index| {
             if let Some((_, sh_name)) = source.selfhosted.iter().find(|(sid, _)| *sid == id) {
                 log::trace!(
-                    "night: compiled selfhosted script#{} ({sh_name}) -> table[{index}]",
+                    "night: compiled selfhosted script#{} ({sh_name}) -> logical table[{index}]",
                     id.id()
                 );
             }
@@ -804,7 +805,10 @@ mod tests {
     }
 
     fn build_toy() -> (InprocOut, usize, u32) {
-        let source = toy_source();
+        build_toy_source(&toy_source())
+    }
+
+    fn build_toy_source(source: &Source) -> (InprocOut, usize, u32) {
         let specs: Vec<HelperImportSpec> = HELPER_NAMES
             .iter()
             .enumerate()
@@ -818,7 +822,7 @@ mod tests {
         let mut reserved = 0;
         let mut bump = 0x1000_0000u32;
         let out = build_inprocess_batch(
-            &source,
+            source,
             SourceObjectId::new(0),
             &Options::default(),
             &specs,
@@ -836,6 +840,30 @@ mod tests {
         )
         .expect("build_inprocess_batch");
         (out, n_allocs, reserved)
+    }
+
+    #[test]
+    fn regex_matcher_uses_reserved_base_and_preserves_missing_variant() {
+        let mut source = toy_source();
+        source.regex_programs.push(crate::source::RegexProgramSrc {
+            pattern: crate::ids::JsString::from_chars(vec![]),
+            flags: 0,
+            latin1_bytecode: vec![13, 0, 0, 0], // irregexp SUCCEED (empty pattern).
+            twobyte_bytecode: vec![],
+            num_registers: 2,
+            pair_count: 1,
+        });
+        let (out, _, reserved) = build_toy_source(&source);
+        assert_eq!(reserved as usize, out.blobs.len());
+        let word = |i: usize| u32::from_le_bytes(out.env_desc[i..i + 4].try_into().unwrap());
+        let field = crate::env_regions::REGION_NAMES
+            .iter()
+            .position(|&n| n == "regexPtr")
+            .unwrap();
+        let offset = word(4 * (ENV_DESC_HEADER_WORDS + field)) as usize;
+        assert_eq!(word(offset), 1, "regex must actually compile");
+        assert_eq!(word(offset + 8), out.table_base + reserved - 1);
+        assert_eq!(word(offset + 12), 0, "absent twobyte matcher is a sentinel");
     }
 
     #[test]

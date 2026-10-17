@@ -79,8 +79,9 @@ pub use options::{Diagnostics, Options};
 /// serialized environment descriptor. `helper_*` describe the engine helpers
 /// (parallel arrays of length `n_helpers`): NUL-terminated name,
 /// NUL-terminated signature string (see night_compiler.h), and live funcref-table
-/// index. `table_base` is the current table size (`wasm_table_size()`);
-/// blob `i` is predicted at `table_base + i`. `alloc` is called exactly
+/// index. `reserve` receives the exact defined-function count and chooses the
+/// base reported by `night_inproc_table_base`; blob `i` lands at base + i.
+/// `alloc` is called exactly
 /// twice and must return zeroed, 8-aligned, non-null memory (calloc-style;
 /// it may be called with size 0). Returns null on failure (message on
 /// stderr); free with `night_inproc_delete`.
