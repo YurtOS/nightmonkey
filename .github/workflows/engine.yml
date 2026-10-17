@@ -147,14 +147,24 @@ jobs:
       - name: Full jstests (AOT)
         if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.full_jstests && matrix.lane == 'aot' }}
         timeout-minutes: 120
-        run: scripts/run-jstests.sh firefox build -- --format=automation 2>&1 | tee "$RUNNER_TEMP/nightmonkey-logs/jstests-aot.log"
+        run: |
+          scripts/run-jstests.sh firefox build -- --format=automation 2>&1 | tee "$RUNNER_TEMP/nightmonkey-logs/jstests-aot.log"
+          grep -Eq '^TEST-PASS( \(EXPECTED RANDOM\))? \|' "$RUNNER_TEMP/nightmonkey-logs/jstests-aot.log" || {
+            echo "::error::jstests produced no passing test results"
+            exit 1
+          }
 
       - name: Full jstests (interpreter)
         if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.full_jstests && matrix.lane == 'interpreter' }}
         timeout-minutes: 120
         env:
           NIGHT_INPROCESS_OFF: '1'
-        run: scripts/run-jstests.sh firefox build -- --format=automation 2>&1 | tee "$RUNNER_TEMP/nightmonkey-logs/jstests-interpreter.log"
+        run: |
+          scripts/run-jstests.sh firefox build -- --format=automation 2>&1 | tee "$RUNNER_TEMP/nightmonkey-logs/jstests-interpreter.log"
+          grep -Eq '^TEST-PASS( \(EXPECTED RANDOM\))? \|' "$RUNNER_TEMP/nightmonkey-logs/jstests-interpreter.log" || {
+            echo "::error::jstests produced no passing test results"
+            exit 1
+          }
 
       - name: Upload execution logs
         if: always()
