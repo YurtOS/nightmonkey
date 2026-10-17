@@ -36,8 +36,10 @@ Inspected on 2026-10-17:
   stacking on this PR while it remains open; no edits to its owned branch.
 - Upstream engine PR #4: open, head
   `08702e6f7b6c6d9a2ebf9c0cfc37ccebdd395706` (`cfallin/external-slots`).
-  Upstream compiler CI switches to this branch. Audit its complete engine delta
-  before planning implementation; this design does not claim it was reviewed.
+  Upstream compiler CI switches to this branch. The 16-file engine delta was
+  read during design review: shape-for-add APIs, permuted slot span and cache
+  restrictions, object-fuse invalidation, testing helpers, and context-state
+  offsets. It is not yet independently reviewed or built for Yurt.
 - YurtOS/firefox PR #2 remains open at
   `c0fb41d8ebcd902848b343c4ef46e6fbf3513b08`; it contains build fixes, not a
   complete native Yurt mozbuild target.
@@ -55,7 +57,8 @@ upstream movement requires a delta audit and possibly renewed approval.
 Recommended: selectively import the pinned compiler/runtime changes, restore
 the guest-facing interfaces on top, and reuse the host/assembler from fork PR
 #2. Stack the adoption branch on `yurt-host` at the recorded PR #2 head. Preserve
-the fork default's policy and workflows (the parent predates their addition).
+the fork default's policy and workflows (already merged into the child branch;
+the parent predates their addition).
 Retarget the child to `yurt` when the parent merges and revalidate its resulting
 base and head. Preserve
 upstream provenance in commits. Do not replace the fork tree wholesale.
@@ -68,6 +71,15 @@ exceeds the organization size threshold and requires explicit user acceptance
 of the import's scale before implementation. Estimate fork-specific integration
 at 400–1,200 production lines, plus 300–800 test lines; revise these estimates
 after the engine audit. A greater than twofold increase returns to Gate 1.
+These are preliminary planning budgets, not measurements or approval to expand
+the contract. Engine support is a 16-file upstream delta with Yurt adaptation
+still unmeasured; Gate 2 must report its separate size and prerequisite PR.
+
+Keeping BBV does not meet the issue's explicit decision to adopt upstream's new
+compiler. The motive is that requested compiler adoption and continued alignment
+with upstream, rather than a claimed measured performance improvement. The
+large replacement is upstream logic needed for that contract; implementing a
+smaller independent compiler would increase fork maintenance.
 
 Alternatives:
 
@@ -97,12 +109,24 @@ choice: it preserves compilation semantics and avoids making this upgrade
 depend on a new Rayon guest port. Host tools may retain parallel compilation.
 Qualify that the guest dependency graph excludes Rayon and that host/guest
 results agree on representative programs. A later Rayon port is separate work.
+This is not a claim that Rayon cannot compile for WASI: successful compilation
+would not prove its pool runs correctly in the single-threaded WASI shell. The
+feature avoids pool initialization in that lane. Retain `wasm-encoder` as a
+normal compiler dependency for the assembler, adopt waffle 0.3.3, and reconcile
+Cargo.lock without unrelated dependency updates. All host gates use `--locked`.
 
 Reservation occurs before code generation; blob i installs at base+i. Re-audit
 the bound against all emitted helpers, scripts, widened adapters and regex
 variants. Upstream increases `PRE_BODIES` from 10 to 11. Keep the post-build
 bound check, checked arithmetic and reservation cleanup. A failed compilation
 or installation must not arm incomplete scripts or reuse consumed handles.
+Emitter audit: baseline emits a body and entry adapter; MIR emits those plus
+one companion baseline body (`wasm/mir/mod.rs`, `extra_bodies`). Thus the actual
+maximum is three per script. Preserve the parent's one spare per script
+separately: proposed reservation bound is 11 + 4*scripts + regex_variants.
+The old three-per-script bound would cover these bodies but consume the spare;
+it is not evidence of a confirmed overflow. Test a real MIR companion body,
+baseline-only compilation, declined scripts and both regex encodings.
 
 Keep assembler import types and function/table indices synchronized with both
 tiers. Validate the generated module, then execute it: validation alone does
@@ -159,6 +183,12 @@ Build Yurt `js-inproc` with the recorded SDK and run identical programs interpre
 and compiled. Include nonzero reservation bases, adapters, regexes, method cells,
 GC pressure and a batch above 1 MiB. Compare output and prove scripts were armed,
 not silently interpreted. Check failure cleanup paths.
+Use `NIGHT_INPROCESS_STATS=1` compiled/armed counts, `--dump-tiers` records and
+`--strict-coverage` together; strict coverage alone permits MIR declining to
+baseline. Require a known MIR fixture to report `mir` and a baseline fixture to
+report `baseline`; zero armed scripts or absent tier records fail qualification.
+Carry `--night-options` through the restored guest C API to `Options::parse_str`
+instead of retaining the parent's hard-coded `Options::default()`.
 
 Performance is measured separately: old backend vs MIR vs baseline, same engine
 revision, SDK, host/kernel, programs and options. Record compilation, assembly /
