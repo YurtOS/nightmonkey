@@ -1,4 +1,4 @@
-"""Run the workflow's jit-test commands against harness-output fixtures."""
+"""Run the workflow's upstream test commands against harness-output fixtures."""
 
 import os
 import subprocess
@@ -11,13 +11,14 @@ class JitWorkflowTests(unittest.TestCase):
     def commands(self):
         workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/engine.yml").read_text()
         # Read only literal run commands, with no YAML dependency in this gate.
-        for lane in ("AOT", "interpreter"):
-            step = workflow.split(f"      - name: jit-tests ({lane})\n", 1)[1]
+        for name in ("jit-tests (AOT)", "jit-tests (interpreter)",
+                     "Full jstests (AOT)", "Full jstests (interpreter)"):
+            step = workflow.split(f"      - name: {name}\n", 1)[1]
             step = step.split("\n      - name:", 1)[0]
             run = step.split("        run: ", 1)[1]
             if run.startswith("|\n"):
                 run = "\n".join(line[10:] for line in run.splitlines()[1:])
-            yield lane, run.strip()
+            yield name, run.strip()
 
     def run_commands(self, output, status):
         with tempfile.TemporaryDirectory() as directory:
@@ -27,6 +28,9 @@ class JitWorkflowTests(unittest.TestCase):
             harness = root / "scripts/run-jit-tests.sh"
             harness.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$HARNESS_OUTPUT"\nexit "$HARNESS_STATUS"\n')
             harness.chmod(0o755)
+            jstests = root / "scripts/run-jstests.sh"
+            jstests.write_text(harness.read_text())
+            jstests.chmod(0o755)
             results = []
             for lane, command in self.commands():
                 result = subprocess.run(
@@ -47,7 +51,7 @@ class JitWorkflowTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
 
     def test_positive_total_is_accepted(self):
-        for result in self.run_commands("PASSED ALL\nResult summary:\nPassed: 2\nFailed: 0", 0):
+        for result in self.run_commands("TEST-PASS | example.js | (args: \"\") [0.1 s]\nPASSED ALL\nResult summary:\nPassed: 2\nFailed: 0", 0):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_harness_failure_survives_tee(self):
