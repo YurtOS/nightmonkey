@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""Execute the guest compiler's options contract against a built shell."""
+
+import argparse
+import os
+from pathlib import Path
+import re
+import subprocess
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("build", type=Path)
+    args = parser.parse_args()
+    build = args.build.resolve()
+    wrapper = build / "bin/inproc-shell.sh"
+    fixture = Path(__file__).resolve().parent.parent / "tests/jit-test/night/guest-tier-options.js"
+    if not wrapper.is_file():
+        parser.error(f"missing built wrapper: {wrapper}")
+    env = os.environ.copy()
+    env.pop("NIGHT_INPROCESS_OFF", None)
+    env.pop("NIGHT_OPTIONS", None)
+    env.update(NIGHT_INPROC_STRICT="1", NIGHT_INPROCESS_STATS="1",
+               NIGHT_CACHE_DIR=str(build / "tier-options-cache"))
+    for tier in ("mir", "baseline"):
+        flags = f"--pipeline {tier} --strict-coverage --dump-tiers"
+        result = subprocess.run(
+            [str(wrapper), "--night-options", flags, str(fixture)],
+            env=env, capture_output=True, text=True, timeout=600,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert result.stdout.strip() == "42", result.stdout
+        assert re.search(rf"night: tier \d+ {tier}\b", result.stderr), result.stderr
+        assert re.search(r"\([1-9]\d* armed\)", result.stderr), result.stderr
+        print(f"PASS guest {tier}: result, tier witness and arming")
+    result = subprocess.run(
+        [str(wrapper), "--night-options", "--pipeline invalid-tier", str(fixture)],
+        env=env, capture_output=True, text=True, timeout=600,
+    )
+    assert result.returncode != 0, "invalid options silently succeeded"
+    assert "night: inprocess:" in result.stderr, result.stderr
+    assert "42" not in result.stdout.splitlines(), "invalid options ran interpreted"
+    print("PASS invalid guest options: strict failure before execution")
+
+
+if __name__ == "__main__":
+    main()
