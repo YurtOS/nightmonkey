@@ -36,11 +36,29 @@ on the digest formatting, and restoring the fixed generator makes it pass.
 Snapshot inherits the existing workspace Rust version to preserve its intended
 MSRV during Clippy checks. The Linux-only stdcxx option is conditional on host
 Linux. Claude and Codex approved the e8e3664 full diff; Codex approved the small
-17a177b metadata/configuration delta. Hosted jit-test is pending.
+17a177b metadata/configuration delta. Hosted jit-test passed at that head
+(run39047202775, job117438201455; 35m49s).
 
 Engine build: unchanged f0c060c, isolated Mozilla bootstrap/sysroot. macOS27 SDK
 TAPI arm64e.x1 is unsupported by bundled LLVM20's host linker. Explicit
 `HOST_LDFLAGS=--ld-path=/usr/bin/ld` in `mach configure` uses the system linker
 for host utilities, retaining the original Wasm target compiler/linker. This
-fixes the observed nsinstall link failure. The baseline build is still running;
-no CMake wrapper, JS execution, snapshot or Yurt qualification is claimed.
+fixes the observed nsinstall link failure. The baseline engine and CMake builds
+succeeded. A plain-engine JS assertion control passes; all five existing local
+regressions pass in both compiled and interpreter lanes. The cache is isolated
+under the build tree. Initial unwritable HOME-cache setup failures are excluded
+from behavioral results. Full AOT jit-test baseline is running with four workers.
+
+At child b19dcd0, refreshed workspace fmt/check/test/clippy pass (61 compiler
+tests, including the latest parent's assembler/lifetime regressions). A real
+snapshot fixture with main() was captured; its force-interpreted and BBV-compiled
+shipping artifacts both execute under Wasmtime and print42. These baseline
+results do not qualify the new tiers or Yurt execution.
+
+Matching engine: red slot test95b9f31de0 and red fuse test a1d957648b each exit3
+on absent expected hook support when directly run against the old engine; the
+positive control passes. The imported slot regression is from the pinned
+NightMonkey upstream head. Import a2e0c4dc9f contains exactly the pinned Firefox
+16-file hook delta (498 additions/12 deletions), preserving the Yurt base. A
+test-only fixture observes fuse callbacks without allocation in the callback.
+The matching WASI engine build is in progress. Native Yurt remains blocked.
