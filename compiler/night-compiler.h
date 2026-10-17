@@ -200,18 +200,17 @@ void night_source_script_set_body_scope(night_source_t* source,
 // The string-literal payload at [strlit_off, strlit_off+strlit_len) must be
 // copied to linear address strlit_addr before compiled code runs.
 typedef uint32_t (*night_alloc_fn)(size_t size);
+// Called once all functions exist; returns 0 on success and writes the base.
+typedef int32_t (*night_reserve_fn)(uint32_t nblobs, uint32_t* base);
 typedef void night_inproc_out_t;
 night_inproc_out_t* night_inproc_build(night_source_t* analysis_source,
                                        night_source_object_t root_id,
                                        const char* const* helper_names,
                                        const char* const* helper_sigs,
                                        const uint32_t* helper_funcptrs,
-                                       uint32_t n_helpers, uint32_t table_base,
+                                       uint32_t n_helpers, night_reserve_fn reserve,
                                        night_alloc_fn alloc);
-// Upper bound on night_inproc_build's blob count for this source, for hosts
-// that reserve table slots before compiling (table_base is baked into the
-// code). Call it after every night_source_add_regex_program.
-uint32_t night_inproc_max_blobs(night_source_t* analysis_source);
+uint32_t night_inproc_table_base(night_inproc_out_t* out);
 uint32_t night_inproc_num_blobs(night_inproc_out_t* out);
 const uint8_t* night_inproc_blob_ptr(night_inproc_out_t* out, uint32_t i);
 uint32_t night_inproc_blob_len(night_inproc_out_t* out, uint32_t i);

@@ -5,6 +5,8 @@
 #include <assert.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/wait.h>
+#include <signal.h>
 
 #ifdef NDEBUG
 #error "The host contract test requires assertions enabled"
@@ -15,6 +17,7 @@ static int fd, mounts, unmounts;
 static int32_t mountRc;
 static bool moduleAvailable = true;
 static int32_t mountedBase = 40;
+static int32_t queryRc, unmountRc;
 extern "C" int32_t yurt_jit_reserve(uint32_t, yurt_jit_info* info) {
   fd = dup(STDOUT_FILENO);
   *info = {40, reservedLen};
@@ -37,12 +40,12 @@ extern "C" int32_t yurt_jit_mount_module_reserved(const void*, uint32_t,
 }
 extern "C" int32_t yurt_jit_query_module(yurt_jit_module_t, yurt_jit_info* info) {
   *info = {mountedBase, reservedLen};
-  return 0;
+  return queryRc;
 }
 extern "C" int32_t yurt_jit_unmount_module(yurt_jit_module_t mod) {
   assert(mod == 123);
   ++unmounts;
-  return 0;
+  return unmountRc;
 }
 int main() {
   using namespace js::night;
@@ -92,4 +95,21 @@ int main() {
   InprocHostRelease();
   assert(mounts == 4);
   assert(unmounts == 2);
+  reservedLen = 4;
+  assert(InprocHostReserve(4, &base));
+  queryRc = -5;
+  assert(!InprocHostInstall(nullptr, base));
+  assert(unmounts == 3);
+  // If cleanup fails, continuing would leave callable entries live.
+  pid_t child = fork();
+  assert(child >= 0);
+  if (child == 0) {
+    assert(InprocHostReserve(4, &base));
+    unmountRc = -5;
+    InprocHostInstall(nullptr, base);
+    _exit(0);
+  }
+  int status;
+  assert(waitpid(child, &status, 0) == child);
+  assert(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT);
 }

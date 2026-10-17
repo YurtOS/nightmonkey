@@ -96,7 +96,7 @@ pub unsafe extern "C" fn night_inproc_build(
     helper_sigs: *const *const core::ffi::c_char,
     helper_funcptrs: *const u32,
     n_helpers: u32,
-    table_base: u32,
+    reserve: extern "C" fn(u32, &mut u32) -> i32,
     alloc: extern "C" fn(usize) -> u32,
 ) -> *mut wasm::inprocess::InprocOut {
     let n = usize::try_from(n_helpers).unwrap();
@@ -137,7 +137,14 @@ pub unsafe extern "C" fn night_inproc_build(
             root_id,
             &opts,
             &specs,
-            table_base,
+            &mut |count| {
+                let mut base = 0;
+                if reserve(count, &mut base) != 0 {
+                    Err("reserving table slots failed".to_string())
+                } else {
+                    Ok(base)
+                }
+            },
             &mut |size: u32| {
                 let p = alloc(usize::try_from(size).unwrap());
                 if p == 0 {
@@ -180,12 +187,10 @@ pub unsafe extern "C" fn night_inproc_build(
     }
 }
 
-/// Upper bound on the blob count `night_inproc_build` produces for
-/// `analysis_source` (see `wasm::inprocess::max_inprocess_blobs`): what a
-/// host that reserves table slots before compiling must reserve.
+/// The table base chosen by the host's exact-count reservation callback.
 #[no_mangle]
-pub extern "C" fn night_inproc_max_blobs(analysis_source: &source::Source) -> u32 {
-    wasm::inprocess::max_inprocess_blobs(analysis_source)
+pub extern "C" fn night_inproc_table_base(out: &wasm::inprocess::InprocOut) -> u32 {
+    out.table_base
 }
 
 /// The batch assembled into one module for a host that mounts it whole (the

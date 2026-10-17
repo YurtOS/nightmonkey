@@ -45,6 +45,7 @@ pub struct HelperImportSpec {
 /// (filled on demand by `night_inproc_module`; see `assemble`).
 pub struct InprocOut {
     pub blobs: Vec<Vec<u8>>,
+    pub table_base: u32,
     pub extern_table_indices: Vec<u32>,
     pub extern_sigs: Vec<SignatureData>,
     pub scripts: Vec<(u32, u32)>,
@@ -215,47 +216,12 @@ fn carve_blobs(bytes: &[u8], n_imports: usize) -> Result<Vec<Vec<u8>>, String> {
 /// `table_base + blob position`.
 const PRE_BODIES: u32 = 10;
 
-/// Today's per-script census: the body, plus a `night_abi_sig` adapter when
-/// the body has the widened ABI. Not an exact inventory of `funcs.push`
-/// sites. [`SPARE_BLOBS_PER_SCRIPT`] is the room for the next outlined helper.
-const BLOBS_PER_SCRIPT: usize = 2;
-
-/// Reservation slack above [`BLOBS_PER_SCRIPT`]. One new outlined helper per
-/// script still fits; the post-build check fails the batch when the emitter
-/// outgrows it, instead of reserving a count that is exact today and short
-/// tomorrow.
-const SPARE_BLOBS_PER_SCRIPT: usize = 1;
-
-/// An upper bound on the number of blobs `build_inprocess_batch` emits for
-/// `source`, for hosts that must reserve their table slots before compiling
-/// (the emitted code bakes `table_base + i` in). The census is the
-/// `PRE_BODIES` helpers, [`BLOBS_PER_SCRIPT`] per script, and one matcher per
-/// regex program variant (latin1, twobyte), plus [`SPARE_BLOBS_PER_SCRIPT`]
-/// per script. Skipped scripts and regex variants that fail to translate
-/// only make it looser.
-pub fn max_inprocess_blobs(source: &Source) -> u32 {
-    let scripts = source
-        .objects()
-        .filter(|(_, obj)| matches!(obj, crate::source::SourceObject::Script(_)))
-        .count();
-    let regex_variants: usize = source
-        .regex_programs
-        .iter()
-        .map(|rp| {
-            usize::from(!rp.latin1_bytecode.is_empty())
-                + usize::from(!rp.twobyte_bytecode.is_empty())
-        })
-        .sum();
-    let per_script = BLOBS_PER_SCRIPT + SPARE_BLOBS_PER_SCRIPT;
-    u32::try_from(PRE_BODIES as usize + per_script * scripts + regex_variants).unwrap_or(u32::MAX)
-}
-
 pub fn build_inprocess_batch(
     source: &Source,
     root_id: SourceObjectId,
     opts: &Options,
     helper_specs: &[HelperImportSpec],
-    table_base: u32,
+    reserve: &mut dyn FnMut(u32) -> Result<u32, String>,
     alloc: &mut dyn FnMut(u32) -> Result<u32, String>,
 ) -> Result<InprocOut, String> {
     let mut m = Module::empty();
@@ -318,9 +284,9 @@ pub fn build_inprocess_batch(
 
     let indirect_table = m.tables.push(TableData {
         ty: Type::FuncRef,
-        initial: u64::from(table_base + PRE_BODIES),
+        initial: u64::from(PRE_BODIES),
         max: None,
-        func_elements: Some(vec![Func::invalid(); (table_base + PRE_BODIES) as usize]),
+        func_elements: Some(vec![Func::invalid(); PRE_BODIES as usize]),
     });
 
     let direct_call_stub = {
@@ -464,9 +430,11 @@ pub fn build_inprocess_batch(
             }
             Ok(base)
         },
+        Some(reserve),
     )?;
     let TranslateOut {
         mut atoms,
+        table_base,
         source_id_to_func: _,
         source_id_to_table_func,
         sid_to_index,
@@ -563,14 +531,6 @@ pub fn build_inprocess_batch(
         .to_wasm_bytes()
         .map_err(|e| format!("serialize in-process batch: {e}"))?;
     let blobs = carve_blobs(&bytes, n_imports)?;
-    let bound = max_inprocess_blobs(source);
-    if blobs.len() > bound as usize {
-        return Err(format!(
-            "batch has {} blobs, above the reservation bound {bound} \
-             (the census in max_inprocess_blobs is short)",
-            blobs.len()
-        ));
-    }
 
     let mut scripts: Vec<(u32, u32)> = Vec::new();
     for (&sid, &f) in &source_id_to_table_func {
@@ -588,6 +548,7 @@ pub fn build_inprocess_batch(
 
     Ok(InprocOut {
         blobs,
+        table_base,
         extern_table_indices: helper_specs.iter().map(|s| s.table_index).collect(),
         extern_sigs: helper_specs.iter().map(|s| s.sig.clone()).collect(),
         scripts,
@@ -837,11 +798,12 @@ mod tests {
 
     #[test]
     fn reservation_matches_emitted_blob_count() {
-        let (out, _) = build_toy();
-        assert_eq!(max_inprocess_blobs(&toy_source()) as usize, out.blobs.len());
+        let (out, _, reserved) = build_toy();
+        assert_eq!(reserved as usize, out.blobs.len());
+        assert_eq!(out.table_base, 5000);
     }
 
-    fn build_toy() -> (InprocOut, usize) {
+    fn build_toy() -> (InprocOut, usize, u32) {
         let source = toy_source();
         let specs: Vec<HelperImportSpec> = HELPER_NAMES
             .iter()
@@ -853,13 +815,18 @@ mod tests {
             })
             .collect();
         let mut n_allocs = 0usize;
+        let mut reserved = 0;
         let mut bump = 0x1000_0000u32;
         let out = build_inprocess_batch(
             &source,
             SourceObjectId::new(0),
             &Options::default(),
             &specs,
-            5000,
+            &mut |count| {
+                assert_eq!(reserved, 0, "reserve called more than once");
+                reserved = count;
+                Ok(5000)
+            },
             &mut |size| {
                 n_allocs += 1;
                 let base = bump;
@@ -868,13 +835,12 @@ mod tests {
             },
         )
         .expect("build_inprocess_batch");
-        (out, n_allocs)
+        (out, n_allocs, reserved)
     }
 
     #[test]
     fn inproc_batch_builds_and_validates() {
-        let source = toy_source();
-        let (out, n_allocs) = build_toy();
+        let (out, n_allocs, _) = build_toy();
 
         assert_eq!(n_allocs, 2, "allocator called exactly twice");
         assert_eq!(out.extern_table_indices.len(), HELPER_NAMES.len());
@@ -926,12 +892,5 @@ mod tests {
 
         let reassembled = runner_wrap(&out.blobs, &out.extern_sigs);
         wasmparser::validate(&reassembled).expect("reassembled batch validates");
-
-        let bound = max_inprocess_blobs(&source);
-        assert!(
-            bound >= out.blobs.len() as u32 + SPARE_BLOBS_PER_SCRIPT as u32,
-            "reservation has no per-script spare: {} blobs, bound {bound}",
-            out.blobs.len()
-        );
     }
 }

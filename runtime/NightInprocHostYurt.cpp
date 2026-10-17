@@ -3,7 +3,7 @@
 
 // The Yurt in-process host (NightInprocHost.h), over Yurt's JIT mount ABI
 // (yurtos-kernel docs/abi/jit-mount.md): reserve a table range sized by the
-// blob bound, compile against its base, assemble the blobs into one module
+// exact translated blob count, bind its base, assemble the blobs into one module
 // (night_inproc_module) and mount it into the reservation, which publishes
 // export __jit_entry_<i> at base + i. Reservations and reserved mounts are
 // Wasmtime-only today; elsewhere yurt_jit_reserve fails (EOPNOTSUPP) and the
@@ -31,17 +31,17 @@ static void JitError(const char* what, int32_t rc) {
           msg[0] ? ": " : "", msg);
 }
 
-bool js::night::InprocHostReserve(uint32_t maxBlobs, uint32_t* tableBase) {
+bool js::night::InprocHostReserve(uint32_t nblobs, uint32_t* tableBase) {
   struct yurt_jit_info info;
-  int32_t fd = yurt_jit_reserve(maxBlobs, &info);
+  int32_t fd = yurt_jit_reserve(nblobs, &info);
   if (fd < 0) {
     JitError("yurt_jit_reserve", fd);
     return false;
   }
-  if (info.len < maxBlobs || info.base < 0) {
+  if (info.len < nblobs || info.base < 0) {
     fprintf(stderr,
             "night: inprocess: invalid reservation: base %d, %u slots "
-            "for %u requested\n", info.base, info.len, maxBlobs);
+            "for %u requested\n", info.base, info.len, nblobs);
     close(fd);
     return false;
   }
@@ -62,11 +62,10 @@ bool js::night::InprocHostInstall(night_inproc_out_t* out,
                                   uint32_t tableBase) {
   uint32_t nblobs = night_inproc_num_blobs(out);
   if (nblobs > gReservedLen) {
-    // The bound undercounted. Retrying would recompile against a new base;
-    // fail loudly instead and let the bound be fixed.
+    // Refuse an inconsistent host session before publishing anything.
     fprintf(stderr,
             "night: inprocess: batch has %u blobs but only %u table slots were "
-            "reserved (night_inproc_max_blobs undercounts)\n",
+            "reserved\n",
             nblobs, gReservedLen);
     InprocHostRelease();
     return false;

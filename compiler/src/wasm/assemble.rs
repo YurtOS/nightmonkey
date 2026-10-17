@@ -233,6 +233,7 @@ mod tests {
         // Blob 0 calls yurt.table[42]; blob 1 calls blob 0 indirectly using
         // its baked type index 1 and reserved absolute table slot 50.
         let out = InprocOut {
+            table_base: 50,
             blobs: vec![
                 vec![0x60, 1, 0x7f, 1, 0x7f, 0, 0x20, 0, 0x10, 0, 0x0b],
                 vec![

@@ -3,8 +3,8 @@
 
 // In-process AOT compilation (the --night-inprocess shell flag): register the
 // script as an AOT root, walk the live heap with the night-snapshot reader,
-// fix the table base with the in-process host (NightInprocHost.h), compile
-// the tree into function blobs with night_inproc_build, hand them to the
+// compile the tree into function blobs with night_inproc_build, bind the
+// table base through its exact-count host callback, and hand the blobs to the
 // host to install at that base, install the runtime environment, and arm
 // each compiled script's nightFuncIndex. Any failure past registration
 // degrades to the interpreter (fatal under NIGHTMONKEY_DEBUG).
@@ -148,19 +148,13 @@ bool js::CompileInProcess(JSContext* cx, JS::Handle<JSScript*> script) {
     funcptrs[i] = night::kNightHelpers[i].funcptr;
   }
 
-  // The emitted code bakes table indices in, so the host fixes the base
-  // before compiling, for at most maxBlobs blobs.
-  uint32_t maxBlobs = night_inproc_max_blobs(walkSource);
-  uint32_t tableBase;
-  if (!night::InprocHostReserve(maxBlobs, &tableBase)) {
-    night_snapshot_walk_delete(walk);
-    return InprocFail("reserving table slots failed");
-  }
-
   double t0 = NowMs();
   night_inproc_out_t* out = night_inproc_build(
       walkSource, night_snapshot_walk_root(walk), names, sigs, funcptrs,
-      static_cast<uint32_t>(night::kNightHelperCount), tableBase, InprocAlloc);
+      static_cast<uint32_t>(night::kNightHelperCount),
+      [](uint32_t count, uint32_t* base) -> int32_t {
+        return night::InprocHostReserve(count, base) ? 0 : -1;
+      }, InprocAlloc);
   if (!out) {
     night::InprocHostRelease();
     night_snapshot_walk_delete(walk);
@@ -168,6 +162,7 @@ bool js::CompileInProcess(JSContext* cx, JS::Handle<JSScript*> script) {
   }
   double t1 = NowMs();
   uint32_t nblobs = night_inproc_num_blobs(out);
+  uint32_t tableBase = night_inproc_table_base(out);
   if (!night::InprocHostInstall(out, tableBase)) {
     night_snapshot_walk_delete(walk);
     night_inproc_delete(out);
@@ -264,9 +259,9 @@ bool js::CompileInProcess(JSContext* cx, JS::Handle<JSScript*> script) {
   if (stats) {
     fprintf(stderr,
             "night: inprocess batch: %u scripts compiled (%u armed), %u "
-            "blobs (bound %u), table base %u, build %.0f ms, install %.0f "
+            "blobs, table base %u, build %.0f ms, install %.0f "
             "ms\n",
-            nscripts, armed, nblobs, maxBlobs, tableBase, t1 - t0, t2 - t1);
+            nscripts, armed, nblobs, tableBase, t1 - t0, t2 - t1);
   }
   night::gNightActivated = true;
   return true;

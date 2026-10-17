@@ -18,16 +18,17 @@ namespace night {
 //   yurt    NightInprocHostYurt.cpp  Yurt's JIT mount ABI: a reserved table
 //                                    range and a self-assembled module
 //
-// The compiled code bakes absolute table indices in, so the base is fixed
-// before compiling and blob i must land at base + i:
-//   InprocHostReserve(maxBlobs, &base)  before night_inproc_build; maxBlobs
-//                                       is night_inproc_max_blobs
+// Translation uses logical indices until all functions exist. The compiler
+// then calls Reserve with the exact blob count, binds absolute indices, and
+// serializes. Blob i must land at base + i:
+//   InprocHostReserve(nblobs, &base)    callback from night_inproc_build
 //   InprocHostInstall(out, base)        after it
 //   InprocHostRelease()                 when the build fails in between
 // Reserve and Install return false, with a message on stderr, on failure;
 // the caller then stays interpreted. Install releases the reservation on its
-// own failures.
-bool InprocHostReserve(uint32_t maxBlobs, uint32_t* tableBase);
+// own failures. A published module that fails validation is unmounted;
+// failure to unmount is fatal because its entries remain callable.
+bool InprocHostReserve(uint32_t nblobs, uint32_t* tableBase);
 bool InprocHostInstall(night_inproc_out_t* out, uint32_t tableBase);
 void InprocHostRelease();
 
