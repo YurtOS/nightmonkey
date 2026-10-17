@@ -1505,23 +1505,19 @@ fn emit_backref(cx: &mut Ctx, op: u8, w0: u32, target_off: u32) -> Result<(), St
     cx.cur = chk;
 
     // Bounds check + comparison base.
-    let cmp_base;
-    let new_pos;
-    if backward {
+    let (cmp_base, new_pos) = if backward {
         // current - len < 0 -> mismatch target.
         let base = cx.binop(Operator::I32Sub, cx.cur_pos(), len_, Type::I32);
         let oob = cx.binop(Operator::I32LtS, base, z, Type::I32);
         cx.cond_jump(oob, target_off)?;
-        cmp_base = base;
-        new_pos = base;
+        (base, base)
     } else {
         // current + len > subject.length -> mismatch target.
         let end = cx.add(cx.cur_pos(), len_);
         let oob = cx.binop(Operator::I32GtS, end, cx.len, Type::I32);
         cx.cond_jump(oob, target_off)?;
-        cmp_base = cx.cur_pos();
-        new_pos = end;
-    }
+        (cx.cur_pos(), end)
+    };
 
     if no_case && cx.wide {
         // Two-byte case-insensitive compare: engine helper (icu tables).
