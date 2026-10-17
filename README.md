@@ -158,16 +158,22 @@ that forward it (`snapshot`, `nightmonkey`, `guest`), add its arm to
 `compiler/src/opcodes/mod.rs`, and condition the lowering changes on
 `feature = "ff153"`.
 
-CI (`.github/workflows/ci.yml`) builds both trees and runs the jit-test
-suite in the AOT lane.
+CI (`.github/workflows/ci.yml`) runs Rust formatting, check, tests and Clippy,
+workflow lint and script regressions on pull requests and pushes to `yurt`.
+Its reusable engine workflow (`.github/workflows/engine.yml`) builds both
+trees and runs local regressions and jit-tests in both AOT and interpreter
+lanes. Full jstests run nightly at 02:23 UTC and through manual dispatch of
+`Full jstests`, with separate jobs for the two lanes. Existing exclusion
+lists apply; the shipping snapshot flow is still a manual check. Execution
+logs and the exact resolved SpiderMonkey revision are retained for seven days.
 
 ## Prerequisites
 
 - A SpiderMonkey checkout on the tracked branch, bootstrapped for the JS
   shell (`./mach --no-interactive bootstrap --application-choice=js`) plus
-  the wasm32-wasi sysroot in `~/.mozbuild` (see `.github/workflows/ci.yml`
+  the wasm32-wasi sysroot in `~/.mozbuild` (see `.github/workflows/engine.yml`
   for the exact steps).
-- A Rust toolchain with the `wasm32-wasip1` target
+- Rust 1.98.1 (pinned in `rust-toolchain.toml`) with the `wasm32-wasip1` target
   (`rustup target add wasm32-wasip1`), CMake 3.20+.
 - `wasmtime` on `$PATH` or at `$HOME/bin/wasmtime`, to run compiled modules.
 
