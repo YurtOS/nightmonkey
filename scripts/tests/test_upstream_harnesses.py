@@ -62,6 +62,14 @@ class UpstreamHarnessTests(unittest.TestCase):
             with self.subTest(output=output):
                 self.assertEqual(self.run_wrapper("jit", output).returncode, 2)
 
+    def test_skip_only_jit_run_is_rejected(self):
+        result = self.run_wrapper("jit", "TEST-PASS | skipped.js | Success (code 59, args \"\")\nPASSED ALL\nPassed: 1\nFailed: 0")
+        self.assertEqual(result.returncode, 2)
+
+    def test_interrupted_jstests_is_rejected(self):
+        result = self.run_wrapper("js", "TEST-PASS | example.js\nNIGHT-JSTESTS completed=0 passed=1 failed=0 timeout=0 skipped=0")
+        self.assertEqual(result.returncode, 2)
+
     def test_jstests_accepts_its_own_passing_result(self):
         result = self.run_wrapper("js", "TEST-PASS | example.js | (args: '') [0.1 s]")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
