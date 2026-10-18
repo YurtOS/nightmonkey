@@ -190,3 +190,11 @@ structured-clone/saved-stack.js
 # AOT literal evaluation allocates nursery strings; the minor-GC count differs.
 structured-clone/tenuring.js
 warp/throw-exception-stack-location.js
+
+# External AOT frames are invisible to Debugger/evalInFrame (base-reproduced).
+# Keep these covered by the interpreter lane.
+auto-regress/bug765483.js
+basic/bug1100623.js
+debug/Frame-eval-32.js
+debug/uncaughtExceptionHook-03.js
+parser/bug-1263355-27.js

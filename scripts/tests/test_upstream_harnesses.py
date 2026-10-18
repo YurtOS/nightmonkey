@@ -22,6 +22,7 @@ class UpstreamHarnessTests(unittest.TestCase):
                 (tests / f"{prefix}{suite}-excludes.txt").write_text("")
         shutil.copyfile(Path(__file__).resolve().parents[1] / "check-test-log.py",
                         self.scripts / "check-test-log.py")
+        shutil.copyfile(Path(__file__).resolve().parents[1] / "run-jstests-checked.py", self.scripts / "run-jstests-checked.py")
         self.build = self.root / "build"
         (self.build / "bin").mkdir(parents=True)
         wrapper = self.build / "bin/inproc-shell.sh"
@@ -37,6 +38,11 @@ class UpstreamHarnessTests(unittest.TestCase):
                 'import os, sys\nprint(os.environ["HARNESS_OUTPUT"])\n'
                 'sys.exit(int(os.environ.get("HARNESS_STATUS", "0")))\n'
             )
+
+        lib = self.firefox / "js/src/tests/lib"
+        lib.mkdir()
+        (lib / "__init__.py").write_text("")
+        (lib / "results.py").write_text("class ResultsSink:\n    def finish(self, completed): pass\n")
 
     def run_wrapper(self, suite, output, status=0):
         return subprocess.run(
@@ -71,7 +77,7 @@ class UpstreamHarnessTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
 
     def test_jstests_accepts_its_own_passing_result(self):
-        result = self.run_wrapper("js", "TEST-PASS | example.js | (args: '') [0.1 s]")
+        result = self.run_wrapper("js", "TEST-PASS | example.js | (args: '') [0.1 s]\nNIGHT-JSTESTS completed=1 passed=1 failed=0 timeout=0 skipped=0")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_jit_rejects_jstests_output(self):

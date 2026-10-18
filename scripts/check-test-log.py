@@ -14,8 +14,10 @@ def main():
     if re.search(r"^TEST-UNEXPECTED-", text, re.MULTILINE):
         print("unexpected upstream test results", file=sys.stderr)
         return 2
+    records = re.findall(r"^TEST-PASS(?: \(EXPECTED RANDOM\))? \|.*$", text, re.MULTILINE)
+    skipped = sum("(code 59," in record for record in records) if suite == "jit" else 0
     passed = len(re.findall(r"^TEST-PASS(?: \(EXPECTED RANDOM\))? \|", text, re.MULTILINE))
-    if not passed:
+    if passed <= skipped:
         print("no passing execution results", file=sys.stderr)
         return 2
     if suite == "jit":
@@ -25,7 +27,12 @@ def main():
                 or totals != [str(passed)] or failed != ["0"]):
             print("jit-test summary is missing, incomplete, or disagrees with results", file=sys.stderr)
             return 2
-    print(f"night: {suite}: {passed} passing execution results verified")
+    else:
+        summary = re.findall(r"^NIGHT-JSTESTS completed=1 passed=([0-9]+) failed=0 timeout=0 skipped=[0-9]+$", text, re.MULTILINE)
+        if summary != [str(passed)]:
+            print("jstests completion is missing or disagrees with results", file=sys.stderr)
+            return 2
+    print(f"night: {suite}: {passed - skipped} passing execution results verified")
     return 0
 
 

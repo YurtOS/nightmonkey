@@ -35,7 +35,7 @@ fi
 
 log=$(mktemp)
 trap 'rm -f "$log"' EXIT
-python3 -u "$firefox/js/src/tests/jstests.py" \
+python3 -u "$here/scripts/run-jstests-checked.py" "$firefox/js/src/tests/jstests.py" \
   --format=automation \
   "${excludes[@]}" \
   --wpt=disabled \
