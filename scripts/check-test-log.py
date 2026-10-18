@@ -16,7 +16,7 @@ def main():
         return 2
     records = re.findall(r"^TEST-PASS(?: \(EXPECTED RANDOM\))? \|.*$", text, re.MULTILINE)
     skipped = sum("(code 59," in record for record in records) if suite == "jit" else 0
-    passed = len(re.findall(r"^TEST-PASS(?: \(EXPECTED RANDOM\))? \|", text, re.MULTILINE))
+    passed = len(records) if suite == "jit" else sum(record.startswith("TEST-PASS |") for record in records)
     if passed <= skipped:
         print("no passing execution results", file=sys.stderr)
         return 2
