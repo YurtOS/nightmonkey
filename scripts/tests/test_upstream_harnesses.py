@@ -80,6 +80,20 @@ class UpstreamHarnessTests(unittest.TestCase):
         result = self.run_wrapper("js", "TEST-PASS | example.js | (args: '') [0.1 s]\nNIGHT-JSTESTS completed=1 passed=1 failed=0 timeout=0 skipped=0")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_jstests_random_results_do_not_distort_execution_count(self):
+        result = self.run_wrapper("js", "TEST-PASS | normal.js\nTEST-PASS (EXPECTED RANDOM) | random.js\nNIGHT-JSTESTS completed=1 passed=1 failed=0 timeout=0 skipped=1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_jstests_random_only_run_is_rejected(self):
+        result = self.run_wrapper("js", "TEST-PASS (EXPECTED RANDOM) | random.js\nNIGHT-JSTESTS completed=1 passed=0 failed=0 timeout=0 skipped=1")
+        self.assertEqual(result.returncode, 2)
+
+    def test_completion_adapter_reports_real_callback(self):
+        harness = self.firefox / "js/src/tests/jstests.py"
+        harness.write_text("from lib.results import ResultsSink\nimport os\ns = ResultsSink()\ns.counts = {'PASS': 1, 'FAIL': 0, 'TIMEOUT': 0, 'SKIP': 0}\nprint('TEST-PASS | normal.js')\ns.finish(os.environ['HARNESS_OUTPUT'] == 'complete')\n")
+        self.assertEqual(self.run_wrapper("js", "complete").returncode, 0)
+        self.assertEqual(self.run_wrapper("js", "interrupted").returncode, 2)
+
     def test_jit_rejects_jstests_output(self):
         self.assertEqual(self.run_wrapper("jit", "TEST-PASS | example.js").returncode, 2)
 
