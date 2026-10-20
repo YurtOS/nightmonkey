@@ -1818,7 +1818,7 @@ pub(crate) fn compute_args_reads(
                 // A `GetLocal`'s value is pushed by its hook.
                 GetLocal => {}
                 _ if args_in => self.ok = false,
-                _ => self.stack.extend(std::iter::repeat(false).take(ndefs)),
+                _ => self.stack.extend(std::iter::repeat_n(false, ndefs)),
             }
         }
         fn get_prop(&mut self, n: u32) {

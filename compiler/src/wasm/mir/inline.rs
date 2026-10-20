@@ -414,7 +414,7 @@ pub(crate) fn splice(
                 Opcode::ExitInline { .. } => Some(mir::func::Witness {
                     may_kill: mir::types::KillPattern::ALL,
                 }),
-                _ => kf.witnesses[i].clone(),
+                _ => kf.witnesses[i],
             };
             imap.push((i, ni));
         }

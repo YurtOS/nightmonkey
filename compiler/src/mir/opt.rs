@@ -357,7 +357,7 @@ fn trunc_demand_once(m: &Module, f: &mut Func) -> usize {
             let d = &f.insts[i];
             match d.op {
                 Opcode::I32Bit(_) | Opcode::I32Ushr => true,
-                ref op if add_sub(op) => produced(f, d).map_or(true, |r| trunc.contains(&r)),
+                ref op if add_sub(op) => produced(f, d).is_none_or(|r| trunc.contains(&r)),
                 _ => false,
             }
         }
@@ -392,7 +392,7 @@ fn trunc_demand_once(m: &Module, f: &mut Func) -> usize {
         }
         let ok = uses
             .get(&v)
-            .map_or(true, |us| us.iter().all(|u| use_ok(&trunc, v, u)));
+            .is_none_or(|us| us.iter().all(|u| use_ok(&trunc, v, u)));
         if !ok {
             trunc.remove(&v);
             if let Some(fs) = feeds.get(&v) {
@@ -1222,7 +1222,7 @@ pub fn thread_jumps(f: &mut Func) -> usize {
                         .collect();
                     let ty = f.values[r].ty;
                     let n = f.insts.push(crate::mir::func::InstData {
-                        op: d.op.clone(),
+                        op: d.op,
                         args,
                         results: vec![],
                         succs: vec![],
@@ -1898,7 +1898,7 @@ pub fn gvn(m: &Module, f: &mut Func) -> usize {
         } else {
             0
         };
-        Some((d.op.clone(), d.args.clone(), frame))
+        Some((d.op, d.args.clone(), frame))
     };
     // What a block leaves available, and the repeats in it given `avail`.
     let transfer = |f: &Func, b: Block, avail: &HashMap<Key, Value>| {
@@ -2452,7 +2452,7 @@ pub fn hoist_guards(m: &Module, f: &mut Func) -> usize {
                 .iter()
                 .map(|a| match *a {
                     EdgeArg::Out(k) => EdgeArg::Value(hoisted[k as usize]),
-                    ref a => a.clone(),
+                    ref a => *a,
                 })
                 .collect();
             let frame = f.inst_frame[t];

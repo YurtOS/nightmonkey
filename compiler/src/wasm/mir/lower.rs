@@ -7411,8 +7411,7 @@ impl<'a> Lower<'a> {
             let wb = if w == 0 {
                 way0
             } else {
-                let v = self.ic_addr(way_off + w * INLINE_IC_WAY_BYTES);
-                v
+                self.ic_addr(way_off + w * INLINE_IC_WAY_BYTES)
             };
             let wshape = self.load_i32(wb, IC_WAY_RECVSHAPE);
             let m = self.bin(Operator::I32Eq, shape, wshape, Type::I32);
@@ -10139,7 +10138,7 @@ impl<'a> Lower<'a> {
         let done = self.body.add_block();
         self.cond_br(none, Self::to(done), Self::to(leaf));
         self.cur = done;
-        let f = self.i64c((TAG_BOOLEAN << 32) | 0);
+        let f = self.i64c(TAG_BOOLEAN << 32);
         let n = self.i64c(TAG_NULL << 32);
         let r = self.select(Type::I64, f, n, is_test);
         let t = self.edge(inst, 0, &[r])?;

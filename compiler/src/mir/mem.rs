@@ -361,7 +361,7 @@ pub fn mem_vn(m: &Module, f: &mut Func) -> usize {
                 }
                 if let Some(out) = out {
                     let roots = d.args.iter().map(|&a| root(f, a, &preds)).collect();
-                    let key = (d.op.clone(), roots, vs);
+                    let key = (d.op, roots, vs);
                     match first.get(&key) {
                         Some(&(v, vb))
                             if v != out
@@ -613,9 +613,7 @@ fn plan_one(m: &Module, f: &Func, snap: &Snapshot, t: Inst) -> Option<Plan> {
         return None;
     };
     let ok = d.succs[0].clone();
-    let Some(k0) = ok.args.iter().position(|a| *a == EdgeArg::Out(0)) else {
-        return None;
-    };
+    let k0 = ok.args.iter().position(|a| *a == EdgeArg::Out(0))?;
     let obj = f.blocks[ok.block].params[k0];
     if preds.get(&ok.block).map(Vec::as_slice) != Some(&[t]) {
         return None;

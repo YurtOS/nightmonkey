@@ -523,7 +523,7 @@ impl<'a> Gen<'a> {
             }
         }
         if p.intersects(PRIM_DOUBLE) {
-            let k = self.i32c(TAG_CLEAR as u32);
+            let k = self.i32c(TAG_CLEAR);
             let e = self.binop(Operator::I32LtU, tag, k, Type::I32);
             acc = self.binop(Operator::I32Or, acc, e, Type::I32);
         }

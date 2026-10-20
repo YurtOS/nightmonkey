@@ -528,8 +528,9 @@ pub const STR_CONSTS_CAP: usize = 8;
 /// which string it holds claims nothing about it. Keyed reads and writes
 /// with a key of known atoms are the named reads and writes of those
 /// names.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum StrConsts {
+    #[default]
     Any,
     /// Sorted and distinct; at most [`STR_CONSTS_CAP`].
     Atoms {
@@ -569,12 +570,6 @@ impl StrConsts {
             n: v.len() as u8,
             atoms,
         }
-    }
-}
-
-impl Default for StrConsts {
-    fn default() -> StrConsts {
-        StrConsts::Any
     }
 }
 
@@ -1166,6 +1161,22 @@ pub fn join_obj(a: ObjType, b: ObjType, meta: &[AbsLabels]) -> ObjType {
     }
 }
 
+/// Whether `chars` is a canonical array index (`0`, or digits with no
+/// leading zero, below 2^32 - 1): a key that names an element.
+pub fn is_index_name(chars: &[u16]) -> bool {
+    if chars.is_empty() || chars.len() > 10 || (chars.len() > 1 && chars[0] == u16::from(b'0')) {
+        return false;
+    }
+    let mut v: u64 = 0;
+    for &c in chars {
+        if !(u16::from(b'0')..=u16::from(b'9')).contains(&c) {
+            return false;
+        }
+        v = v * 10 + u64::from(c - u16::from(b'0'));
+    }
+    v < u64::from(u32::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1464,20 +1475,4 @@ mod tests {
             In(iv(-7, 0))
         );
     }
-}
-
-/// Whether `chars` is a canonical array index (`0`, or digits with no
-/// leading zero, below 2^32 - 1): a key that names an element.
-pub fn is_index_name(chars: &[u16]) -> bool {
-    if chars.is_empty() || chars.len() > 10 || (chars.len() > 1 && chars[0] == u16::from(b'0')) {
-        return false;
-    }
-    let mut v: u64 = 0;
-    for &c in chars {
-        if !(u16::from(b'0')..=u16::from(b'9')).contains(&c) {
-            return false;
-        }
-        v = v * 10 + u64::from(c - u16::from(b'0'));
-    }
-    v < u64::from(u32::MAX)
 }

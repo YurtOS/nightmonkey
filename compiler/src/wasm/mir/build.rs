@@ -3143,9 +3143,9 @@ impl<'s, 'a> Run<'s, 'a> {
     /// (which is fixed: see `build`).
     fn env_at(&mut self, hops: u16) -> mir::Value {
         let env = MType::Obj(ObjInfo::kind(ObjKind::Env));
-        let mut e = self.inst(Opcode::EnvCurrent, vec![], Some(env.clone()));
+        let mut e = self.inst(Opcode::EnvCurrent, vec![], Some(env));
         for _ in 0..hops {
-            e = self.inst(Opcode::EnvParent, vec![e], Some(env.clone()));
+            e = self.inst(Opcode::EnvParent, vec![e], Some(env));
         }
         e
     }
@@ -3227,7 +3227,8 @@ impl<'s, 'a> Run<'s, 'a> {
                 .or_else(|| ctx.deleg_restamps_in.get(&sid))
             {
                 (si.layout_id, si.layout_id)
-            } else if let Some(ctors) = ctx.facts.ctor_publish.get(&sid) {
+            } else {
+                let ctors = ctx.facts.ctor_publish.get(&sid)?;
                 // A construction delegate (`ctor_publish`): the layouts
                 // of the constructors whose objects it may be building.
                 let keys: Vec<u32> = ctors
@@ -3240,8 +3241,6 @@ impl<'s, 'a> Run<'s, 'a> {
                     .filter(|(k, _)| keys.contains(k))
                     .collect();
                 return Some((some, false));
-            } else {
-                return None;
             }
         } else {
             return None;
@@ -6099,7 +6098,7 @@ impl<'s, 'a> Run<'s, 'a> {
         loop {
             let mut d = at;
             while !cases.is_empty() && self.s.op_at(d) == Some(JSOp::JumpTarget) {
-                d = d + JSOp::JumpTarget.len();
+                d += JSOp::JumpTarget.len();
             }
             let s_pc = d + JSOp::Dup.len();
             let e_pc = s_pc + JSOp::String.len();

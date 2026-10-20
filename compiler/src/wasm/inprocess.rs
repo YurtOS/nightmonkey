@@ -713,8 +713,7 @@ mod tests {
     /// baseline companion, adapter); the exact reservation must still match.
     #[test]
     fn reservation_matches_mir_blob_count() {
-        let (out, _, reserved) =
-            build_toy_source(&toy_source(), crate::options::Pipeline::Mir);
+        let (out, _, reserved) = build_toy_source(&toy_source(), crate::options::Pipeline::Mir);
         assert_eq!(reserved as usize, out.blobs.len());
     }
 
@@ -861,7 +860,10 @@ mod tests {
             include_str!("../../../runtime/NightHelperList.h"),
             "NIGHT_RUNTIME_HELPER(",
         );
-        let header: Vec<String> = header.into_iter().filter(|n| n.starts_with("night_")).collect();
+        let header: Vec<String> = header
+            .into_iter()
+            .filter(|n| n.starts_with("night_"))
+            .collect();
         let src = include_str!("mod.rs");
         let start = src.find("pub fn resolve_helpers(").unwrap();
         let body = &src[start..start + src[start..].find("\n}\n").unwrap()];

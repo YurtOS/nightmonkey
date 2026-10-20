@@ -81,12 +81,11 @@ pub(crate) const IOF_WALK_DEPTH: u32 = 8;
 
 // --- translation: what the compiler will take on -------------------------
 
-/// Hard cap on emitted SSA values: a refined pass that overruns this
-/// descends the overflow ladder (fanout-off, then GEN-only); the workqueue
-/// drain aborts early once past it. Structural version identity bounds the
-/// version count but not the emitted size, and the wasm function-size limit
-/// and relooper tail duplication are real and independent of it.
-//
+// Hard cap on emitted SSA values: a refined pass that overruns this
+// descends the overflow ladder (fanout-off, then GEN-only); the workqueue
+// drain aborts early once past it. Structural version identity bounds the
+// version count but not the emitted size, and the wasm function-size limit
+// and relooper tail duplication are real and independent of it.
 
 // --- translation: the versioning fixpoint --------------------------------
 
