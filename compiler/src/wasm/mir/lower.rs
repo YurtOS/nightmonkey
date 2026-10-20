@@ -73,10 +73,10 @@ use crate::wasm::mir::abi::{
     ELEMENTS_INITLEN_BACK, ELEMENTS_LENGTH_BACK, ELEMENTS_PUSH_BAIL_MASK, ENV_CELL_ARMED,
     ENV_CELL_CLASS_WORD, ENV_CELL_GEN, FAT_INLINE_MAX_LATIN1, FAT_INLINE_MAX_TWO_BYTE,
     FIXED_SLOTS_BASE, FLAGS_ALL, FUNCTION_FLAGS_CONSTRUCTOR, FUNC_ENV_SLOT_OFFSET,
-    FUNC_FLAGS_SLOT_OFFSET, FUNC_SCRIPT_SLOT_OFFSET, IC_PATCH_RELATIVE, IC_SET_ABSSLOT,
-    IC_SET_RECVSHAPE, IC_SET_SLOTENC, IC_TRANS_ABSSLOT, IC_TRANS_NEWSHAPE, IC_TRANS_OLDSHAPE,
-    IC_TRANS_PROTO0, IC_TRANS_PROTO_HOPS, IC_TRANS_PROTO_ROW_BYTES, IC_TRANS_ROW_OFF,
-    IC_TRANS_SLOTOFF, IC_WAY_ADDR_PLACEHOLDER, IC_WAY_HOLDERPTR, IC_WAY_MONO_OFF, IC_WAY_RECVSHAPE,
+    FUNC_FLAGS_SLOT_OFFSET, FUNC_SCRIPT_SLOT_OFFSET, IC_SET_ABSSLOT, IC_SET_RECVSHAPE,
+    IC_SET_SLOTENC, IC_TRANS_ABSSLOT, IC_TRANS_NEWSHAPE, IC_TRANS_OLDSHAPE, IC_TRANS_PROTO0,
+    IC_TRANS_PROTO_HOPS, IC_TRANS_PROTO_ROW_BYTES, IC_TRANS_ROW_OFF, IC_TRANS_SLOTOFF,
+    IC_WAY_ADDR_PLACEHOLDER, IC_WAY_HOLDERPTR, IC_WAY_MONO_OFF, IC_WAY_RECVSHAPE,
     IOF_CELL_ADDR_PLACEHOLDER, IOF_CELL_GEN, IOF_CELL_SLOTENC, JSCLASSOPS_CALL_OFFSET,
     JSCLASS_COPS_OFFSET, JSCLASS_EMULATES_UNDEFINED, JSCLASS_FLAGS_OFFSET, JSCLASS_IS_PROXY,
     JSCONTEXT_REALM_OFFSET, JSCONTEXT_ZONE_OFFSET, LAMBDA_CELL_GEN, LAMBDA_CELL_TEMPLATE,
@@ -99,15 +99,6 @@ use crate::wasm::translate::{
 
 type R<T> = Result<T, String>;
 
-/// Whether `new` of a compiled constructor calls it directly.
-const DIRECT_CONSTRUCT: bool = true;
-
-/// Whether global binding writes get their inline arm.
-const INLINE_GNAME_SETS: bool = true;
-
-/// A call whose callee's type proves its script calls that script's body
-/// with no native arms and no classify (`js_call_proven`).
-const PROVEN_CALLS: bool = true;
 /// The most arguments past the first an inline `push` stores (each costs a
 /// store and a post-barrier test).
 const PUSH_ARM_MAX_EXTRA: usize = 7;
@@ -184,28 +175,6 @@ impl waffle::PrintDecorator for VizMarks {
     }
 }
 
-/// A generic call of a native goes straight to it (`native_dispatch`).
-const NATIVE_ROUTE: bool = true;
-
-/// A for-in's start from its object's shape's cached iterator, inline
-/// (`iter_from_shape`).
-const ITER_FROM_SHAPE: bool = true;
-
-/// An exec/test that does not match runs its AOT matcher in compiled code
-/// (`regexp_no_match`).
-const REGEXP_NO_MATCH_ARM: bool = true;
-
-/// `obj[atom] = v` adding the property replays the element-add table's
-/// transition (`elem_add_arm`).
-const ELEM_ADD_ARM: bool = true;
-
-/// A generic equality of two strings decides by pointer, length and
-/// atomness before the helper.
-const STRING_EQ_ARM: bool = true;
-
-/// A generic element store tries the call-free append/hole arm first.
-const APPEND_ARM: bool = true;
-
 /// The `math_natives_base` slot of a Math native the builder names
 /// (`Math.<fn>`).
 pub(crate) fn native_math_index(name: &str) -> Option<u32> {
@@ -228,29 +197,6 @@ pub(crate) fn native_math_index(name: &str) -> Option<u32> {
         _ => return None,
     })
 }
-
-/// Property-IC sites address their ways from a base the function loads
-/// from its context, not as patched absolute addresses (the per-context
-/// regions prototype, KICKOFF-10 workstream 2 step 3). Off: against the
-/// absolute form it cost react 5%, box2d 3.9%, deltablue 3.3%,
-/// earley-boyer 3.1%, raytrace 2.2% (2026-10-04), so the owner decides.
-const IC_BASE_FROM_CX: bool = false;
-
-/// `guard.unbox.f64num` branches on the tag, the double first, rather
-/// than converting both ways and selecting (`unbox_num_edges`).
-const NUM_UNBOX_BRANCHY: bool = true;
-
-/// An int32 add or sub of a constant checks overflow with one compare of
-/// the other operand against a bound.
-const CONST_OVF_COMPARE: bool = true;
-
-/// `load_elem` tests the tag its `ok` block's unbox guard wants first
-/// (`load_elem_unboxed`).
-const FUSED_ELEM_UNBOX: bool = true;
-
-/// A loop's managed values enter its header in registers unless one may
-/// cross a GC on the loop's expected path (`gc_only_off_path`).
-const HOT_CROSSINGS_ONLY: bool = true;
 
 /// Whether `op`'s lowering reaches a may-GC call only off its expected
 /// path: an inline arm handles the common case, and the helper behind it
@@ -513,8 +459,6 @@ struct Lower<'a> {
     body_off_patches: Vec<Value>,
     /// Property-IC way-address placeholders (`Outcome::Compiled::prop_ic_patches`).
     prop_ic_patches: Vec<(Value, u32)>,
-    /// The property-IC region base, once a site needs it (`ic_base`).
-    ic_base: Option<Value>,
     /// `instanceof` cell placeholders (`Outcome::Compiled::iof_cell_patches`).
     iof_cell_patches: Vec<(Value, u32)>,
     /// Construct cell placeholders (one cell per site).
@@ -759,7 +703,6 @@ pub fn lower<'a>(
         atoms,
         body_off_patches: vec![],
         prop_ic_patches: vec![],
-        ic_base: None,
         iof_cell_patches: vec![],
         construct_cell_patches: vec![],
         call_cell_patches: vec![],
@@ -991,48 +934,15 @@ impl<'a> Lower<'a> {
     }
 
     /// The address `off` bytes into the property-IC region (a site's ways
-    /// or add row). With `IC_BASE_FROM_CX`, the region base the function
-    /// loads once from its context's tier state (`ic_base`) plus `off`;
-    /// else the absolute address, patched in.
+    /// or add row): the absolute address, patched in. Addressing the ways
+    /// from a base the function loads from its context instead (the
+    /// per-context regions prototype) cost, against the absolute form,
+    /// react 5%, box2d 3.9%, deltablue 3.3%, earley-boyer 3.1% and
+    /// raytrace 2.2% (2026-10-04).
     fn ic_addr(&mut self, off: u32) -> Value {
         let c = self.i32c(IC_WAY_ADDR_PLACEHOLDER);
-        if !IC_BASE_FROM_CX {
-            self.prop_ic_patches.push((c, off));
-            return c;
-        }
-        self.prop_ic_patches.push((c, off | IC_PATCH_RELATIVE));
-        let base = self.ic_base();
-        self.bin(Operator::I32Add, base, c, Type::I32)
-    }
-
-    /// The property-IC region's base: two loads (the context's tier state,
-    /// then its `propIcBase`) at the head of the function's entry block,
-    /// made at the first site that needs it.
-    fn ic_base(&mut self) -> Value {
-        if let Some(b) = self.ic_base {
-            return b;
-        }
-        let m1 = self.mem(2, crate::wasm::mir::abi::CX_EXT_STATE_OFFSET);
-        let args = self.body.arg_pool.from_iter([self.cx].into_iter());
-        let ty = self.body.single_type_list(Type::I32);
-        let st = self.body.add_value(ValueDef::Operator(
-            Operator::I32Load { memory: m1 },
-            args,
-            ty,
-        ));
-        let m2 = self.mem(2, crate::wasm::mir::abi::CTX_PROPIC_BASE_OFFSET);
-        let args = self.body.arg_pool.from_iter([st].into_iter());
-        let ty = self.body.single_type_list(Type::I32);
-        let b = self.body.add_value(ValueDef::Operator(
-            Operator::I32Load { memory: m2 },
-            args,
-            ty,
-        ));
-        let entry = self.body.entry;
-        self.body.blocks[entry].insts.insert(0, b);
-        self.body.blocks[entry].insts.insert(0, st);
-        self.ic_base = Some(b);
-        b
+        self.prop_ic_patches.push((c, off));
+        c
     }
 
     /// `v`'s value where its type pins one int32 (as an i64: `-c` cannot
@@ -1843,11 +1753,11 @@ impl<'a> Lower<'a> {
                     live.remove(&r);
                 }
                 if self.may_gc(i) {
-                    let hot = HOT_CROSSINGS_ONLY && !gc_only_off_path(&d.op);
+                    let hot = !gc_only_off_path(&d.op);
                     let g = crossed_gen.entry(b).or_default();
                     for &v in live.iter().filter(|&&v| managed(v)) {
                         cand.insert(v);
-                        if hot || !HOT_CROSSINGS_ONLY {
+                        if hot {
                             g.insert(v);
                         }
                     }
@@ -3306,9 +3216,7 @@ impl<'a> Lower<'a> {
                 let tys: Vec<MType> = d.args.iter().map(|&v| self.ty(v)).collect();
                 self.exit(ResumeWord { pc, mode }, &a, &tys, &dead, nargs, nlocals)?;
             }
-            Opcode::GuardUnbox(UnboxKind::F64Num)
-                if NUM_UNBOX_BRANCHY && self.plain_guard(inst) =>
-            {
+            Opcode::GuardUnbox(UnboxKind::F64Num) if self.plain_guard(inst) => {
                 let tag = self.tag_of(a[0]);
                 let have = value_tags(&self.ty(d.args[0]));
                 self.unbox_num_edges(inst, a[0], tag, have)?;
@@ -3369,15 +3277,14 @@ impl<'a> Lower<'a> {
                 self.guard(inst, ok, &[i])?;
             }
             Opcode::I32Ovf(op @ (ArithOp::Add | ArithOp::Sub))
-                if CONST_OVF_COMPARE
-                    && self
-                        .const_i32(d.args[1])
-                        .or(if op == ArithOp::Add {
-                            self.const_i32(d.args[0])
-                        } else {
-                            None
-                        })
-                        .is_some() =>
+                if self
+                    .const_i32(d.args[1])
+                    .or(if op == ArithOp::Add {
+                        self.const_i32(d.args[0])
+                    } else {
+                        None
+                    })
+                    .is_some() =>
             {
                 // `x + c` (either side) or `x - c`: overflow is `x` past
                 // one bound, one compare rather than a widened sum.
@@ -3823,7 +3730,7 @@ impl<'a> Lower<'a> {
                 let t = self.edge(inst, 0, &[])?;
                 self.terminate(Terminator::Br { target: t });
                 self.cur = slow;
-                if APPEND_ARM {
+                {
                     let generic = self.body.add_block();
                     self.elem_append_arm(inst, a[0], a[1], a[2], duty, num, generic)?;
                     self.cur = generic;
@@ -3845,7 +3752,7 @@ impl<'a> Lower<'a> {
                 let key_str = !value_tags(&self.ty(d.args[1]))
                     .intersect(TagSet::STRING)
                     .is_empty();
-                if ELEM_ADD_ARM && key_str {
+                if key_str {
                     let generic = self.body.add_block();
                     self.elem_add_arm(inst, a[0], a[1], a[2], generic)?;
                     self.cur = generic;
@@ -4024,7 +3931,7 @@ impl<'a> Lower<'a> {
                 let f = self.edge(inst, 1, &[])?;
                 self.terminate(Terminator::Br { target: f });
             }
-            Opcode::LoadElem if FUSED_ELEM_UNBOX && self.fusable_unbox(inst).is_some() => {
+            Opcode::LoadElem if self.fusable_unbox(inst).is_some() => {
                 let (g, k, p) = self.fusable_unbox(inst).unwrap();
                 self.load_elem_unboxed(inst, g, k, p, a[0], a[1])?;
             }
@@ -4071,7 +3978,7 @@ impl<'a> Lower<'a> {
                 // Past the initialized length or into a hole: the append
                 // arm, where the prototypes' proof allows (it writes the
                 // lengths, and runs no JS); else `fail`.
-                if APPEND_ARM && append {
+                if append {
                     let miss = self.body.add_block();
                     let recv = self.box_tagged(TAG_OBJECT, a[0]);
                     let key = self.box_tagged(TAG_INT32, a[1]);
@@ -4417,9 +4324,7 @@ impl<'a> Lower<'a> {
                         (h.init_prop_getset, vec![a[0], at, a[1], kv])
                     }
                     RtOp::Iter => {
-                        if ITER_FROM_SHAPE {
-                            self.iter_from_shape(inst, a[0])?;
-                        }
+                        self.iter_from_shape(inst, a[0])?;
                         (h.iter_, vec![a[0]])
                     }
                     RtOp::Check(k) => {
@@ -4785,7 +4690,7 @@ impl<'a> Lower<'a> {
                 let compiled = self.bin(Operator::I32Ne, funcidx, z, Type::I32);
                 let fits = self.stack_fits(top, HEADROOM);
                 let maybe = self.bin(Operator::I32And, compiled, fits, Type::I32);
-                let enabled = self.i32c(u32::from(DIRECT_CONSTRUCT));
+                let enabled = self.i32c(1);
                 let maybe = self.bin(Operator::I32And, maybe, enabled, Type::I32);
                 let (chk, generic) = (self.body.add_block(), self.body.add_block());
                 self.cond_br(maybe, Self::to(chk), Self::to(generic));
@@ -5211,7 +5116,7 @@ impl<'a> Lower<'a> {
                 self.js_call(inst, self.h.bind_unqualified_gname, &[at], false)?;
             }
             Opcode::JsSetName(name, strict) => {
-                if let Some(&bid) = self.gname_bids.get(&name).filter(|_| INLINE_GNAME_SETS) {
+                if let Some(&bid) = self.gname_bids.get(&name) {
                     let fused = self.gname_fused.get(&name).copied();
                     self.gname_set_arms(inst, bid, a[1], fused)?;
                 }
@@ -6967,7 +6872,7 @@ impl<'a> Lower<'a> {
         let t = self.edge(inst, 0, &[r])?;
         self.terminate(Terminator::Br { target: t });
         self.cur = slow;
-        if STRING_EQ_ARM {
+        {
             // Two strings: one pointer is
             // equal; different lengths (a rope carries its length, so no
             // flatten) or two atoms (deduplicated) are unequal. Else the
@@ -9309,7 +9214,7 @@ impl<'a> Lower<'a> {
             },
             _ => None,
         };
-        if let Some(addr) = proven.filter(|_| PROVEN_CALLS) {
+        if let Some(addr) = proven {
             return self.js_call_proven(inst, ops, iter, addr, HEADROOM);
         }
         if ops.len() == 3 && !iter {
@@ -9448,7 +9353,7 @@ impl<'a> Lower<'a> {
 
         self.cur = generic_b;
         let argc_v = self.i32c(argc);
-        if NATIVE_ROUTE {
+        {
             // A native callee (the classify proved a function with no
             // script) goes straight to its JSNative;
             // `native_dispatch` punts the natives that need the generic
@@ -10018,13 +9923,7 @@ impl<'a> Lower<'a> {
         let either = self.bin(Operator::I32Or, is_exec, is_test, Type::I32);
         self.check(either, other);
         let leaf = self.body.add_block();
-        if REGEXP_NO_MATCH_ARM {
-            self.regexp_no_match(inst, this, s, is_test, leaf)?;
-        } else {
-            self.terminate(Terminator::Br {
-                target: Self::to(leaf),
-            });
-        }
+        self.regexp_no_match(inst, this, s, is_test, leaf)?;
         self.cur = leaf;
         let r = self.call1(self.h.regexp_leaf, &[self.cx, this, s, is_test], Type::I64);
         let tag = self.tag_of(r);

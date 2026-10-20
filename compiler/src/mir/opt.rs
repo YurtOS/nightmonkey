@@ -229,12 +229,6 @@ pub(crate) fn ok_output(f: &Func, ok: &Edge) -> Option<Value> {
     Some(f.blocks[ok.block].params[k])
 }
 
-/// Whether `trunc_demand` also unchecks int32 products in range.
-const TRUNC_MUL: bool = true;
-
-/// Whether `trunc_demand` runs.
-const TRUNC_DEMAND: bool = true;
-
 /// The most a truncation-demanded chain may add up, in units of 2^31:
 /// past 2^53 a double sum rounds before ToInt32 sees it, and the wrapped
 /// int32 sum would no longer be its ToInt32.
@@ -311,7 +305,7 @@ fn trunc_demand_once(m: &Module, f: &mut Func) -> usize {
     for &b in &live {
         for &i in &f.blocks[b].insts {
             let d = &f.insts[i];
-            let is_exit = RECOVER_AT_EXITS && matches!(d.op, Opcode::Exit { .. });
+            let is_exit = matches!(d.op, Opcode::Exit { .. });
             for &a in &d.args {
                 uses.entry(a)
                     .or_default()
@@ -504,7 +498,7 @@ fn trunc_demand_once(m: &Module, f: &mut Func) -> usize {
             let fits = ps
                 .iter()
                 .all(|&p| (i64::from(i32::MIN)..=i64::from(i32::MAX)).contains(&p));
-            if !TRUNC_MUL || !fits || out.is_some_and(|r| !trunc.contains(&r)) {
+            if !fits || out.is_some_and(|r| !trunc.contains(&r)) {
                 continue;
             }
         } else if let Some(r) = out {
@@ -540,15 +534,11 @@ fn trunc_demand_once(m: &Module, f: &mut Func) -> usize {
         );
         n += 1;
     }
-    if n > 0 && RECOVER_AT_EXITS {
+    if n > 0 {
         recover_at_exits(m, f);
     }
     n
 }
-
-/// Whether an exit recomputes the exact value of a wrapped sum or product
-/// it holds (so `trunc_demand` may wrap one an exit needs).
-const RECOVER_AT_EXITS: bool = true;
 
 /// How deep `recover_at_exits` follows wrapped operands (a deeper chain's
 /// exact value could leave a double's exact range; `trunc_demand`'s unit
@@ -725,11 +715,9 @@ fn retype_ints(m: &Module, f: &mut Func) {
 pub fn optimize(m: &Module, f: &mut Func) -> usize {
     // Once, first: an overflow check it removes is a guard the rest
     // then need not keep in their dataflow.
-    if INT_RANGES {
-        onramp_ranges(m, f);
-        narrow_ints(m, f);
-    }
-    let mut total = if TRUNC_DEMAND { trunc_demand(m, f) } else { 0 };
+    onramp_ranges(m, f);
+    narrow_ints(m, f);
+    let mut total = trunc_demand(m, f);
     // A loop's entry state, as values: its preheader's params now, which
     // `forward_params` may replace by the values every edge passes (a
     // preheader with one way in), and value numbering by earlier equals.
@@ -746,43 +734,35 @@ pub fn optimize(m: &Module, f: &mut Func) -> usize {
         // Before the passes that value-number and hoist reads: a receiver
         // proven by an earlier round's folding makes more loads slot
         // reads.
-        total += canon_loads(m, f) + if CANON_STORES { canon_stores(m, f) } else { 0 };
+        total += canon_loads(m, f) + canon_stores(m, f);
         // First: a loop's invariant values reach its body through params
         // until forwarded, and `hoist_guards` needs them as they are.
         forward_params(m, f);
         // Again each round: a check `fold_ints` removed was an exit
         // holding values, which may now only reach ToInt32.
-        if TRUNC_DEMAND && INT_RANGES {
-            total += trunc_demand(m, f);
-        }
+        total += trunc_demand(m, f);
         let n = fold_guards(m, f)
-            + if MEM_VN {
-                crate::mir::mem::mem_vn(m, f)
-            } else {
-                0
-            }
-            + if SROA { crate::mir::mem::sroa(m, f) } else { 0 }
+            + crate::mir::mem::mem_vn(m, f)
+            + crate::mir::mem::sroa(m, f)
             + fold_unbox(f)
             + {
                 // Types only (it changes no instruction): what forwarding
                 // sharpened reaches the params, for `fold_ints`.
-                if INT_RANGES {
-                    narrow_ints(m, f);
-                }
+                narrow_ints(m, f);
                 fold_ints(m, f)
             }
-            + if GVN { gvn(m, f) } else { 0 }
-            + if LICM { licm(m, f) } else { 0 }
-            + if HOIST_GUARDS { hoist_guards(m, f) } else { 0 }
-            + if HOIST_READS { hoist_reads(m, f) } else { 0 };
+            + gvn(m, f)
+            + licm(m, f)
+            + hoist_guards(m, f)
+            + hoist_reads(m, f);
         forward_params(m, f);
-        let threaded = if THREAD_JUMPS { thread_jumps(f) } else { 0 };
+        let threaded = thread_jumps(f);
         total += n;
         if n == 0 && threaded == 0 {
             // Then, once each, partial escape analysis and loop-carried
             // caching (neither must see its own materializations,
             // write-backs and reloads as accesses), and the passes again.
-            if PEA && !pea_done {
+            if !pea_done {
                 pea_done = true;
                 let p = crate::mir::pea::pea(m, f);
                 if p > 0 {
@@ -790,7 +770,7 @@ pub fn optimize(m: &Module, f: &mut Func) -> usize {
                     continue;
                 }
             }
-            if PROMOTE && !promoted {
+            if !promoted {
                 promoted = true;
                 let p = crate::mir::promote::promote_all(m, f);
                 if p > 0 {
@@ -798,19 +778,11 @@ pub fn optimize(m: &Module, f: &mut Func) -> usize {
                     continue;
                 }
             }
-            if SINK_TO_EXITS {
-                total += sink_to_exits(f);
-            }
+            total += sink_to_exits(f);
             return total;
         }
     }
 }
-
-/// `store_field`s that cannot demote become `store_slot`s.
-const CANON_STORES: bool = true;
-
-/// Loop-carried caching of closure variables (`promote`).
-const PROMOTE: bool = true;
 
 /// `load_field` through a receiver whose type proves the field's slot
 /// (`ops::slot_of`) lowers to one load and a branch to `ok_clean`; its
@@ -916,15 +888,6 @@ pub fn canon_stores(m: &Module, f: &mut Func) -> usize {
     }
     n
 }
-
-/// Whether `mem::mem_vn` runs.
-const MEM_VN: bool = true;
-
-/// Whether `mem::sroa` runs.
-const SROA: bool = true;
-
-/// Whether `pea::pea` runs (literal objects virtual until they escape).
-const PEA: bool = true;
 
 /// `unbox` of a `box` (through `weaken`s) is the boxed value itself,
 /// where its type is the unbox's result or stronger and has no killable
@@ -1049,9 +1012,6 @@ pub fn fold_ints(m: &Module, f: &mut Func) -> usize {
     }
     n
 }
-
-/// Whether `thread_jumps` runs.
-const THREAD_JUMPS: bool = true;
 
 /// Jump threading: an edge into a block that computes nothing but
 /// constants and weakenings and ends in a `jump`, or in a `br` whose
@@ -1265,13 +1225,8 @@ pub fn thread_jumps(f: &mut Func) -> usize {
 /// can make another redundant.
 pub fn forward_params(m: &Module, f: &mut Func) {
     forward_params_only(m, f);
-    if PRUNE_DEAD_PARAMS {
-        prune_dead_params(f);
-    }
+    prune_dead_params(f);
 }
-
-/// Drop block params nothing reads (`prune_dead_params`).
-const PRUNE_DEAD_PARAMS: bool = true;
 
 /// Remove the params of (non-root) blocks that no instruction, edge or loop
 /// entry state uses and every incoming edge passes a value (not a
@@ -1753,9 +1708,6 @@ pub(crate) fn replace_values(f: &mut Func, subst: &BTreeMap<Value, Value>) -> us
     dropped
 }
 
-/// Whether `sink_to_exits` runs.
-const SINK_TO_EXITS: bool = true;
-
 /// §10.4: a value only exits use (a `box` of a value no fence can weaken,
 /// the global object) is made on their paths, not on the hot one: a copy
 /// at the head of each exit block that uses it, and none where it was.
@@ -1837,9 +1789,6 @@ pub fn sink_to_exits(f: &mut Func) -> usize {
     }
     sunk
 }
-
-/// Whether `gvn` runs.
-const GVN: bool = true;
 
 /// An op `gvn` may merge with an earlier one: pure, or reading only the
 /// regions its effects name, with a result that is a function of its
@@ -2034,9 +1983,6 @@ pub fn gvn(m: &Module, f: &mut Func) -> usize {
     dead.len()
 }
 
-/// Whether loop-invariant ops are hoisted.
-const LICM: bool = true;
-
 /// Loop-invariant code motion (MIR.md §10.2, MIR-MEMORY.md §2, over
 /// effects): a non-terminator in a loop that writes nothing, cannot GC,
 /// throw or kill facts, reads only regions no instruction in the loop may
@@ -2193,9 +2139,6 @@ pub fn licm(m: &Module, f: &mut Func) -> usize {
     }
     moved
 }
-
-/// Hoist guards out of loops (§10.2).
-const HOIST_GUARDS: bool = true;
 
 /// The guards `hoist_guards` moves: a check of an operand (or of global
 /// state, for `check.fuse` and `check.binding`) whose fact only a kill
@@ -2479,9 +2422,6 @@ pub fn hoist_guards(m: &Module, f: &mut Func) -> usize {
     }
     moved
 }
-
-/// Hoist read diamonds out of loops (MIR-MEMORY.md §2, KICKOFF-8 item 1).
-const HOIST_READS: bool = true;
 
 /// Hoist a loop's invariant read *diamonds*: a single-entry region whose
 /// entry is a guard (or `getprop.data`) on values from before the loop,
@@ -2869,9 +2809,6 @@ pub fn hoist_reads(m: &Module, f: &mut Func) -> usize {
     }
     0
 }
-
-/// Whether `narrow_ints` and `onramp_ranges` run.
-const INT_RANGES: bool = true;
 
 /// How many times a value's range may grow before it widens to its
 /// declared type (a loop-carried count, `i + 1`, grows every round).

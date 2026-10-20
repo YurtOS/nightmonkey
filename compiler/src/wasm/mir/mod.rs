@@ -17,9 +17,6 @@ use crate::wasm::baseline::layout;
 use crate::wasm::translate::{AtomTable, ExtraBody, Outcome, TranslateCtx};
 use waffle::Module;
 
-/// Whether MIR inlines calls (§5.5; in progress).
-const INLINING: bool = true;
-
 /// The most bytecode a script may have to be inlined (§5.5).
 pub(crate) const INLINE_MAX_BYTECODE: usize = 500;
 
@@ -33,8 +30,7 @@ const MAX_MIR_INSTS: usize = 60_000;
 /// callers, that its baseline body must resume at any op.
 pub(crate) fn inline_eligible(ctx: &TranslateCtx, script: &Script) -> bool {
     use crate::bytecode::TryNoteKind;
-    INLINING
-        && ctx.opts.pipeline == crate::options::Pipeline::Mir
+    ctx.opts.pipeline == crate::options::Pipeline::Mir
         && script.addr != 0
         && script.bytecode.len() <= INLINE_MAX_BYTECODE
         && !script.is_generator_or_async

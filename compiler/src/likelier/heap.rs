@@ -181,10 +181,6 @@ pub struct Heap {
     pub dyn_named_writes: HashSet<Site>,
 }
 
-/// Whether an element access whose key is only string constants (none an
-/// index) is the named access of each (`Solver::const_key_names`).
-pub(super) const CONST_KEYS: bool = true;
-
 impl Heap {
     pub fn class_id(&self, key: ClassKey) -> Option<ClassId> {
         self.class_ids.get(&key).copied()
@@ -1585,11 +1581,7 @@ impl Solver<'_> {
         let k = self.engine.resolve(sid, ctx, key);
         let kts = self.engine.read(k, user);
         let site = Site::new(sid, pc);
-        let names = if CONST_KEYS {
-            kts.const_names(&self.names)
-        } else {
-            None
-        };
+        let names = kts.const_names(&self.names);
         match &names {
             Some(ns) => {
                 for &n in ns {
@@ -1678,7 +1670,7 @@ impl Solver<'_> {
                 // functions: the pair's scope.
                 let mut scope = v.clone();
                 scope.fns = Default::default();
-                if super::TABLE_SCOPES && !scope.is_empty() {
+                if !scope.is_empty() {
                     let c = self.engine.cell(CellKey::TableScope { abs: a });
                     self.engine.raise(c, &scope, user);
                 }
@@ -1744,7 +1736,7 @@ impl Solver<'_> {
                 let kts = self.engine.read(k, user);
                 // A string constant key: the element read beside this one
                 // reads those names (`const_key_names`), not every field.
-                if CONST_KEYS && kts.const_names(&self.names).is_some() {
+                if kts.const_names(&self.names).is_some() {
                     return true;
                 }
                 let named = kts.unknown

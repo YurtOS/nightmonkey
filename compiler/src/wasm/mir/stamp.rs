@@ -163,15 +163,12 @@ pub(crate) fn ctor_stamp_keep_bits(si: &StampCtorIn) -> u32 {
         }
 }
 
-/// Whether the baseline and MIR tiers restamp at init delegates' returns.
-const RESTAMPS: bool = true;
-
 /// The arguments after `this` of `night_runtime_ctor_restamp` for init
 /// delegate `si`: layout, field count, kept bits, then up to four prefix
 /// layout ids + 1 (0: none). `None` for a delegate with more prefixes
 /// (it is then not restamped, which costs typed accesses only).
 pub(crate) fn restamp_args(si: &StampCtorIn) -> Option<[u32; 7]> {
-    if !RESTAMPS || si.prefix_keys.len() > 4 {
+    if si.prefix_keys.len() > 4 {
         return None;
     }
     let mut a = [

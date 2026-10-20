@@ -114,7 +114,7 @@ pub enum CellKey {
     /// What a fn table's elements hold besides its functions: the scope a
     /// `[handler, scope]` pair registers beside its handler. A dispatch
     /// `t[0].call(t[1], ...)` binds each table's members' `this` to their
-    /// own table's scope (`TABLE_SCOPES`).
+    /// own table's scope.
     TableScope {
         abs: AbsId,
     },

@@ -6,11 +6,6 @@
 use crate::facts::CallForm;
 use crate::ids::{FormalIndex, ScriptId, Site, VarId};
 
-/// Whether a `t[0].call(t[1], ...)` dispatch binds each fn table's members'
-/// `this` to that table's own scope (`engine::CellKey::TableScope`) rather
-/// than to the join of every table's scope.
-pub(crate) const TABLE_SCOPES: bool = true;
-
 pub mod builtins;
 pub mod calls;
 pub mod dump;

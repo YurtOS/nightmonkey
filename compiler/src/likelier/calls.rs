@@ -645,8 +645,7 @@ impl Solver<'_> {
                                 // `t[0].call(t[1], ...)`: the receiver is
                                 // the same table's element, so each
                                 // table's members take that table's scope.
-                                let paired = super::TABLE_SCOPES
-                                    && matches!(args.first(), Some(&super::engine::CKey::Var(tv))
+                                let paired = matches!(args.first(), Some(&super::engine::CKey::Var(tv))
                                         if self.elems_callee_vars.get(&(script, tv)) == Some(&rk));
                                 let tables: Vec<super::types::AbsId> = match rts.obj {
                                     ObjType::One(a) => vec![a],
