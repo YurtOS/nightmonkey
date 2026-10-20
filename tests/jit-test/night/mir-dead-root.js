@@ -95,6 +95,60 @@ function overwriteInLoop(n) {
   collect();
   return finalizeCount() - c0;
 }
+// An op with a non-GC fast path (a compare, a generic add) between the
+// overwrite and the collection: its GC happens only on its slow path, so the
+// release must not be spent on it.
+function overwriteThenCompare() {
+  gc();
+  var o = makeFinalizeObserver();
+  var c0 = finalizeCount();
+  o = 5;
+  if (c0 > 1e9) c0 = 1;
+  collect();
+  return finalizeCount() - c0;
+}
+function overwriteThenAdd() {
+  gc();
+  var o = makeFinalizeObserver();
+  var c0 = finalizeCount();
+  o = undefined;
+  var z = c0 + 1;
+  collect();
+  return finalizeCount() - c0 + (z - c0 - 1);
+}
+function overwriteFormal(a) {
+  gc();
+  var c0 = finalizeCount();
+  a = 1;
+  if (c0 > 1e9) c0 = 1;
+  collect();
+  return finalizeCount() - c0;
+}
+function overwriteLoopThenCompare(n) {
+  gc();
+  var o = makeFinalizeObserver();
+  var c0 = finalizeCount();
+  for (var i = 0; i < n; i++) o = i;
+  if (c0 > 1e9) c0 = 1;
+  collect();
+  return finalizeCount() - c0;
+}
+function overwriteInFinally() {
+  gc();
+  var o = makeFinalizeObserver();
+  var c0 = finalizeCount();
+  try { o = 1; if (c0 > 1e9) c0 = 1; } finally { collect(); }
+  return finalizeCount() - c0;
+}
+function overwritePolymorphic(x) {
+  gc();
+  var o = makeFinalizeObserver();
+  var c0 = finalizeCount();
+  o = x;
+  if (c0 > 1e9) x = 1;
+  collect();
+  return finalizeCount() - c0;
+}
 // Dead through a branch rather than an overwrite: the last use is before the
 // second call.
 function lastUseThenCall(flag) {
@@ -128,6 +182,12 @@ for (var n = 0; n < 40; n++) {
   assertEq(overwriteLiveScalar(), 1);
   assertEq(overwriteInBranch(n & 1), 1);
   assertEq(overwriteInLoop(3), 1);
+  assertEq(overwriteThenCompare(), 1);
+  assertEq(overwriteThenAdd(), 1);
+  assertEq(overwriteLoopThenCompare(3), 1);
+  assertEq(overwriteInFinally(), 1);
+  assertEq(overwriteFormal(makeFinalizeObserver()), 1);
+  assertEq(overwritePolymorphic(n & 1 ? 5 : 'str'), 1);
   assertEq(lastUseThenCall(n & 1), 1);
   assertEq(stillHeld(), 0);
 }
