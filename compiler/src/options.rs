@@ -171,22 +171,23 @@ pub const MIR_STAMP_NO_TYPES_CENSUS_KIND: u32 = 101;
 /// bit (with `--mir-exit-census`).
 pub const MIR_MEGA_SET_CENSUS_KIND: u32 = 102;
 
-/// Every MIR census kind, for the uniqueness test.
+/// Every MIR census kind with how the runtime treats it, for the tests that
+/// check it against `runtime/NightCensusKinds.h`.
 #[cfg(test)]
-const MIR_CENSUS_KINDS: [(&str, u32); 13] = [
-    ("EXIT", MIR_EXIT_CENSUS_KIND),
-    ("GET_MISS", MIR_GET_MISS_CENSUS_KIND),
-    ("GUARD", MIR_GUARD_CENSUS_KIND),
-    ("GUARD_CLASS", MIR_GUARD_CLASS_CENSUS_KIND),
-    ("TYPES_DROP", MIR_TYPES_DROP_CENSUS_KIND),
-    ("SET_MISS", MIR_SET_MISS_CENSUS_KIND),
-    ("GUARD_OBJECT", MIR_GUARD_OBJECT_CENSUS_KIND),
-    ("SLOW", MIR_SLOW_CENSUS_KIND),
-    ("BLOCK", MIR_BLOCK_CENSUS_KIND),
-    ("ROOT", MIR_ROOT_CENSUS_KIND),
-    ("VALUE", MIR_VALUE_CENSUS_KIND),
-    ("STAMP_NO_TYPES", MIR_STAMP_NO_TYPES_CENSUS_KIND),
-    ("MEGA_SET", MIR_MEGA_SET_CENSUS_KIND),
+const MIR_CENSUS_KINDS: [(&str, u32, &str); 13] = [
+    ("EXIT", MIR_EXIT_CENSUS_KIND, "Trace"),
+    ("GET_MISS", MIR_GET_MISS_CENSUS_KIND, "Count"),
+    ("GUARD", MIR_GUARD_CENSUS_KIND, "Trace"),
+    ("GUARD_CLASS", MIR_GUARD_CLASS_CENSUS_KIND, "Count"),
+    ("TYPES_DROP", MIR_TYPES_DROP_CENSUS_KIND, "Count"),
+    ("SET_MISS", MIR_SET_MISS_CENSUS_KIND, "Count"),
+    ("GUARD_OBJECT", MIR_GUARD_OBJECT_CENSUS_KIND, "TraceOnly"),
+    ("SLOW", MIR_SLOW_CENSUS_KIND, "Count"),
+    ("BLOCK", MIR_BLOCK_CENSUS_KIND, "FlatBlock"),
+    ("ROOT", MIR_ROOT_CENSUS_KIND, "Count"),
+    ("VALUE", MIR_VALUE_CENSUS_KIND, "Count"),
+    ("STAMP_NO_TYPES", MIR_STAMP_NO_TYPES_CENSUS_KIND, "Count"),
+    ("MEGA_SET", MIR_MEGA_SET_CENSUS_KIND, "Count"),
 ];
 
 /// Which compiled tiers a script may use (`docs/BASELINE.md` §5).
@@ -310,14 +311,54 @@ mod tests {
 
     #[test]
     fn mir_census_kinds_are_unique() {
-        for (i, (a, ka)) in MIR_CENSUS_KINDS.iter().enumerate() {
+        for (i, (a, ka, _)) in MIR_CENSUS_KINDS.iter().enumerate() {
             // Below 90 and from 150 the runtime's legacy kinds live
             // (depart/block census at 60-70, the 150-158 depart family and
             // their +200/+400 variants).
             assert!((90..150).contains(ka), "{a} = {ka} is outside 90..150");
-            for (b, kb) in &MIR_CENSUS_KINDS[i + 1..] {
+            for (b, kb, _) in &MIR_CENSUS_KINDS[i + 1..] {
                 assert_ne!(ka, kb, "census kinds {a} and {b} are both {ka}");
             }
+        }
+    }
+
+    /// `runtime/NightCensusKinds.h` is the runtime's list of census kinds
+    /// with their modes; the compiler's kinds must match it entry for entry,
+    /// and `night_runtime_census` must dispatch on the list, not on bare
+    /// numbers (kind 98 once fell into the map because the flat block counter
+    /// still keyed on a kind the compiler no longer emits).
+    #[test]
+    fn census_kinds_match_runtime_list() {
+        let header = include_str!("../../runtime/NightCensusKinds.h");
+        let listed: Vec<(String, u32, String)> = header
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("X("))
+            .map(|rest| {
+                let f: Vec<&str> = rest[..rest.find(')').unwrap()]
+                    .split(',')
+                    .map(str::trim)
+                    .collect();
+                (f[0].to_string(), f[1].parse().unwrap(), f[2].to_string())
+            })
+            .collect();
+        let rust: Vec<(String, u32, String)> = MIR_CENSUS_KINDS
+            .iter()
+            .map(|(n, k, m)| (n.to_string(), *k, m.to_string()))
+            .collect();
+        assert_eq!(listed, rust, "NightCensusKinds.h vs MIR_CENSUS_KINDS");
+
+        let rt = include_str!("../../runtime/NightRuntime.cpp");
+        assert!(
+            rt.contains("#include \"runtime/NightCensusKinds.h\""),
+            "NightRuntime.cpp must include the census list"
+        );
+        let start = rt.find("int32_t night_runtime_census(").unwrap();
+        let body = &rt[start..start + rt[start..].find("\n}\n").unwrap()];
+        for (name, kind, _) in &rust {
+            assert!(
+                !body.contains(&format!("kind == {kind}")),
+                "night_runtime_census tests kind {name} = {kind} by number"
+            );
         }
     }
 
