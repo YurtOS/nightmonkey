@@ -41,6 +41,8 @@
 #include "js/GCVector.h"            // JS::RootedValueVector
 #include "js/Id.h"                  // JS_ValueToId
 #include "js/PropertyAndElement.h"  // JS_GetUCProperty, JS_GetPropertyById, ...
+#include "js/PropertyDescriptor.h"    // JS_GetOwnPropertyDescriptorById
+#include "js/Proxy.h"                 // js::IsProxy
 #include "js/Realm.h"               // JS::CurrentGlobalOrNull
 #include "js/RootingAPI.h"          // JS::Rooted
 #include "js/String.h"              // JS_NewUCStringCopyN
@@ -1110,6 +1112,29 @@ static bool ResolveWellKnownSymbolId(JSContext* cx, const std::string& name,
   return false;
 }
 
+// The value of own data property `id` of `obj`, read without running user
+// code: an accessor, or a Proxy (whose traps are user code), is not read. The
+// compile resolves builtins by path, and a script may have put anything on
+// those paths. A lazily resolved standard class (`Array` on the global) is
+// resolved by the engine, which is not user code.
+static bool GetOwnDataPropertyValue(JSContext* cx, JS::HandleObject obj,
+                                    JS::HandleId id,
+                                    JS::MutableHandleValue v) {
+  if (js::IsProxy(obj)) {
+    return false;
+  }
+  JS::Rooted<mozilla::Maybe<JS::PropertyDescriptor>> desc(cx);
+  if (!JS_GetOwnPropertyDescriptorById(cx, obj, id, &desc)) {
+    JS_ClearPendingException(cx);
+    return false;
+  }
+  if (desc.isNothing() || !desc->isDataDescriptor() || !desc->hasValue()) {
+    return false;
+  }
+  v.set(desc->value());
+  return true;
+}
+
 // Resolve a dotted global path ("Array.prototype.forEach") to a JSFunction.
 // A final "@@name" component is a well-known-symbol key (e.g.
 // "RegExp.prototype.@@replace"); a "%Name%" path is a self-hosting intrinsic.
@@ -1142,18 +1167,19 @@ extern "C++" JSFunction* js::night::ResolveGlobalPath(JSContext* cx,
         return nullptr;
       }
       JS::RootedObject obj(cx, &v.toObject());
-      bool ok;
+      JS::RootedId id(cx);
       if (part.rfind("@@", 0) == 0) {
-        JS::RootedId id(cx);
         if (!ResolveWellKnownSymbolId(cx, part.substr(2), &id)) {
           return nullptr;
         }
-        ok = JS_GetPropertyById(cx, obj, id, &v);
       } else {
-        ok = JS_GetProperty(cx, obj, part.c_str(), &v);
+        JS::RootedString str(cx, JS_AtomizeAndPinString(cx, part.c_str()));
+        if (!str || !JS_StringToId(cx, str, &id)) {
+          JS_ClearPendingException(cx);
+          return nullptr;
+        }
       }
-      if (!ok) {
-        JS_ClearPendingException(cx);
+      if (!GetOwnDataPropertyValue(cx, obj, id, &v)) {
         return nullptr;
       }
       if (dot == std::string::npos) {

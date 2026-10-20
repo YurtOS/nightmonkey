@@ -351,11 +351,16 @@ impl<'a, 'b> Scan<'a, 'b> {
             join_locals: HashMap::default(),
             ft_dead: false,
             cur_pc: Pc::new(0),
-            live: crate::wasm::baseline::layout::frame_liveness(
-                script,
-                u32::from(script.nargs),
-                crate::wasm::baseline::layout::local_count(script),
-            ),
+            live: {
+                use crate::wasm::baseline::layout::{frame_liveness, liveness_fits, local_count};
+                let (nargs, nlocals) = (u32::from(script.nargs), local_count(script));
+                if liveness_fits(script, nargs, nlocals) {
+                    frame_liveness(script, nargs, nlocals)
+                } else {
+                    // No answer: `slot_live` takes every slot as live.
+                    std::collections::BTreeMap::new()
+                }
+            },
             uses_arguments: crate::wasm::translate::uses_arguments(script),
             viz_pending: None,
         }

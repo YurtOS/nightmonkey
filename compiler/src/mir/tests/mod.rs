@@ -602,14 +602,6 @@ fn boundary_preheaders() {
     ));
 }
 
-#[test]
-#[ignore]
-fn dump_fixtures() {
-    for (name, src) in FIXTURES {
-        println!("==== {name}\n{}", print_module(&parse(src).unwrap()));
-    }
-}
-
 // --- passes -------------------------------------------------------------
 
 /// Guard folding (§10.1): the second receiver guard pair folds against the

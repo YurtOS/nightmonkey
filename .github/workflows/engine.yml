@@ -121,6 +121,21 @@ jobs:
         timeout-minutes: 65
         run: scripts/ci-suite.sh local "$CI_LANE"
 
+      # The default pipeline is MIR; the baseline tier and MIR under its
+      # stress option get the regression tests as tiers of their own, with a
+      # decline for any reason but a designed-out op failing the run.
+      - name: Tier regressions (baseline, MIR stress)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 65
+        run: |
+          set -euo pipefail
+          for opts in "--pipeline baseline --strict-coverage" \
+                      "--pipeline mir --mir-stress 3 --strict-coverage"; do
+            echo "::group::night tests: $opts"
+            NIGHT_INPROC_STRICT=1 NIGHT_OPTIONS="$opts" scripts/run-night-tests.sh build
+            echo "::endgroup::"
+          done
+
       - name: jit-tests
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         timeout-minutes: 125

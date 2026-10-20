@@ -82,7 +82,7 @@ interpreted.
 | `guest/` | `night-guest`: the compiler and snapshot reader as one wasm staticlib for the in-process lane. |
 | `spidermonkey/` | The mozconfig that builds SpiderMonkey the way NightMonkey needs it. |
 | `scripts/` | `build-spidermonkey.sh`, `run-jit-tests.sh`, `run-jstests.sh`, and the harness shell wrapper template. |
-| `tests/` | The jit-test and jstests exclusion lists for the AOT lane. |
+| `tests/` | The jit-test and jstests exclusion lists for the AOT lane, and `tests/jit-test/night/`, NightMonkey's own regression tests (run by `scripts/run-night-tests.sh`, also under the baseline and MIR-stress tiers in CI). |
 | `snapshot/` | Snapshot/live-heap reader crate (`night-snapshot`): parses the registration block and walks the script graph into a `Source`. |
 | `nightmonkey/` | The `nightmonkey` binary: snapshot in, AOT-compiled module out. The optional `wizen` Cargo feature also accepts programs and drives wizer as a library. |
 | `wasm-jit-runner/` | Wasmtime-based host for the in-process flow: reserves table slots and installs the guest-assembled module (the testing counterpart of Yurt's JIT mount ABI). |
@@ -224,7 +224,7 @@ build/bin/wasm-jit-runner --dir / --cache-dir ~/.cache/wjr \
 The script path must be **absolute**: the guest resolves paths against the
 runner's preopen root (`--dir /`). `--cache-dir` caches the compiled shell.
 Everything after `--` goes to the JS shell. Omitting `--night-inprocess` runs
-the same binary as a plain interpreter -- the differential baseline.
+the same binary as a plain interpreter -- the interpreter lane, the differential reference.
 
 The jit-test suite in both lanes, from the SpiderMonkey checkout's harness:
 
@@ -241,7 +241,7 @@ all (no Intl, no shared memory or Atomics, no threads, no time zone database,
 a small native stack), independent of the tier. The AOT lane additionally
 skips `tests/jit-test-excludes.txt` and `tests/jstests-excludes.txt` (passed
 as `--exclude-from` / `--exclude-file`, so the same tests still run in the
-baseline lane): tests exercising designed-out capability -- the debugger /
+interpreter lane): tests exercising designed-out capability -- the debugger /
 frame-introspection / interrupt classes -- plus an annotated artifact class
 (GC-introspection tests sensitive to the tier's literal-string and
 allocation profile; each carries a comment). The SpiderMonkey tree carries

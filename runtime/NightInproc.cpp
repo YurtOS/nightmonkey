@@ -6,8 +6,10 @@
 // compile the tree into function blobs with night_inproc_build, bind the
 // table base through its exact-count host callback, and hand the blobs to the
 // host to install at that base, install the runtime environment, and arm
-// each compiled script's nightFuncIndex. Any failure past registration
-// degrades to the interpreter (fatal under NIGHTMONKEY_DEBUG).
+// each compiled script's nightFuncIndex. A failure before the module is
+// mounted degrades to the interpreter (fatal under NIGHT_INPROC_STRICT). One
+// after it (the environment install) ends the run with an error: the module
+// stays mounted, nothing is armed, and its data stays alive for it.
 // NIGHT_INPROCESS_STATS=1 in the environment prints a one-line summary.
 
 #include "mozilla/Assertions.h"

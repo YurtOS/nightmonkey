@@ -528,6 +528,23 @@ pub fn local_count(script: &Script) -> u32 {
     n
 }
 
+/// The most (bytecode bytes x frame slots) cells `frame_liveness` is asked to
+/// hold: it keeps one flag per slot per pc, so a function with tens of
+/// thousands of locals needs gigabytes, and the guest aborts out of memory
+/// (a Rust allocation failure does not return) instead of staying
+/// interpreted. A script over the bound has no liveness: the analysis treats
+/// every slot as live, and the MIR tier declines it.
+pub const MAX_LIVENESS_CELLS: usize = 1 << 26;
+
+/// Whether `frame_liveness` of `script` is within [`MAX_LIVENESS_CELLS`].
+pub fn liveness_fits(script: &Script, nargs: u32, nlocals: u32) -> bool {
+    script
+        .bytecode
+        .len()
+        .checked_mul((2 + nargs + nlocals) as usize)
+        .is_some_and(|cells| cells <= MAX_LIVENESS_CELLS)
+}
+
 pub fn frame_liveness(script: &Script, nargs: u32, nlocals: u32) -> BTreeMap<Pc, Vec<bool>> {
     let n = (2 + nargs + nlocals) as usize;
     let rval = n - 1;

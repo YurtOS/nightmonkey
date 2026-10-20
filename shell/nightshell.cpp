@@ -85,17 +85,15 @@ static bool OptionsParsed(OptionParser& op) {
   return true;
 }
 
-// nightTierEnabled(): true iff the AOT tier is active in this shell
-// (--night-inprocess, or an activated AOT snapshot). Tests that cannot run
+// nightTierEnabled(): true iff compiled code is active in this shell (an
+// installed in-process batch, or an activated AOT snapshot): false when
+// --night-inprocess was asked for but the compile failed and the run stayed
+// interpreted. Tests that cannot run
 // under the tier are listed in tests/*-excludes.txt rather than consulting
 // this, so it is for ad-hoc scripts.
 static bool NightTierEnabled(JSContext* cx, unsigned argc, JS::Value* vp) {
   JS::CallArgs args = JS::CallArgsFromVp(argc, vp);
-  bool enabled = night::gNightActivated;
-#ifdef ENABLE_JS_NIGHTMONKEY_INPROCESS
-  enabled = enabled || enableNightInprocess;
-#endif
-  args.rval().setBoolean(enabled);
+  args.rval().setBoolean(night::gNightActivated);
   return true;
 }
 

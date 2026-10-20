@@ -970,6 +970,13 @@ impl<'a> Shape<'a> {
             .into_iter()
             .map(|(h, e)| (Pc::new(h), Pc::new(e)))
             .collect();
+        if !layout::liveness_fits(script, fl.nargs, fl.nlocals) {
+            return Err(format!(
+                "script too large for the MIR tier ({} bytes x {} frame slots)",
+                script.bytecode.len(),
+                2 + fl.nargs + fl.nlocals
+            ));
+        }
         let live = layout::frame_liveness(script, fl.nargs, fl.nlocals);
         let wrap_ok = int32_demand(script, &ops);
         Ok(Shape {

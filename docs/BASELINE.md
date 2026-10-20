@@ -1,4 +1,4 @@
-> Imported unchanged from bytecodealliance/nightmonkey `docs/BASELINE.md` at `8f5360d` (upstream PR #2), because the compiler sources cite its sections. It describes the compiler's internals; where it differs from this repository's deployment (compilation happens in the guest, `docs/DESIGN.md` section 2), `DESIGN.md` is authoritative.
+> Imported from bytecodealliance/nightmonkey `docs/BASELINE.md` at `8f5360d` (upstream PR #2), because the compiler sources cite its sections; edited only where this fork differs (direct eval is declined, inner onramps are not given to functions that hold the elided `arguments` placeholder). It describes the compiler's internals; where it differs from this repository's deployment (compilation happens in the guest, `docs/DESIGN.md` section 2), `DESIGN.md` is authoritative. Stale here, from upstream: the status line below ("draft, nothing implemented"), references to the basic-block-versioning (BBV) backend and `--pipeline legacy` (removed), `tests/jit-test-excludes-baseline.txt` (does not exist), and the `night_compile` hostcall (not adopted).
 
 # NightMonkey baseline tier: design and plan (draft)
 
