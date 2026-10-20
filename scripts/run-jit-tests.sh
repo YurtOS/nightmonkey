@@ -36,11 +36,8 @@ if [ "${NIGHT_INPROCESS_OFF:-0}" != 1 ]; then
   cat "$here/tests/jit-test-excludes.txt" >> "$combined"
 fi
 
-python3 "$firefox/js/src/jit-test/jit_test.py" \
+python3 -u "$firefox/js/src/jit-test/jit_test.py" \
   --format=automation \
   --exclude-from "$combined" \
-  "$build/bin/inproc-shell.sh" "$@" | tee "$log"
-if ! grep -Eq '^Passed: [1-9][0-9]*$' "$log"; then
-  echo "no jit-tests executed: missing positive test total" >&2
-  exit 2
-fi
+  "$build/bin/inproc-shell.sh" "$@" 2>&1 | tee "$log"
+python3 "$here/scripts/check-test-log.py" jit "$log"

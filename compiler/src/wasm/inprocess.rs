@@ -4,7 +4,8 @@
 //! (`0x60 functype ++ code-entry body`, no size prefix). The runner
 //! reassembles them with the extern imports at function indices
 //! `0..nextern` and blob `i` at `nextern + i`, and appends blob `i` to the
-//! live funcref table at `table_base + i` -- both index spaces match this
+//! live funcref table at `table_base + i`, where the reservation callback
+//! chooses `table_base` once all functions exist -- both index spaces match this
 //! module by construction, so call/const immediates are correct as
 //! emitted. All region addresses come from a caller-supplied allocator
 //! (two calls: the fixed layout region, then the post-translation prop-IC/
@@ -40,12 +41,17 @@ pub struct HelperImportSpec {
 /// The built batch. `blobs[i]` is runner blob `i` (function index
 /// `nextern + i`, predicted table index `table_base + i`); `scripts` maps
 /// each compiled script's source id to its blob position; `env_desc` is the
-/// serialized environment descriptor (see `ENV_DESC_WORDS`).
+/// serialized environment descriptor (see `ENV_DESC_WORDS`). `module` is the
+/// batch assembled into one self-contained module, for hosts that mount one
+/// (filled on demand by `night_inproc_module`; see `assemble`).
 pub struct InprocOut {
     pub blobs: Vec<Vec<u8>>,
+    pub table_base: u32,
     pub extern_table_indices: Vec<u32>,
+    pub extern_sigs: Vec<SignatureData>,
     pub scripts: Vec<(u32, u32)>,
     pub env_desc: Vec<u8>,
+    pub module: Option<Vec<u8>>,
 }
 
 /// env_desc layout (the engine side is `NightEnvDescHeaderWords` and
@@ -216,7 +222,7 @@ pub fn build_inprocess_batch(
     root_id: SourceObjectId,
     opts: &Options,
     helper_specs: &[HelperImportSpec],
-    table_base: u32,
+    reserve: &mut dyn FnMut(u32) -> Result<u32, String>,
     alloc: &mut dyn FnMut(u32) -> Result<u32, String>,
 ) -> Result<InprocOut, String> {
     let mut m = Module::empty();
@@ -279,9 +285,9 @@ pub fn build_inprocess_batch(
 
     let indirect_table = m.tables.push(TableData {
         ty: Type::FuncRef,
-        initial: u64::from(table_base + PRE_BODIES),
+        initial: u64::from(PRE_BODIES),
         max: None,
-        func_elements: Some(vec![Func::invalid(); (table_base + PRE_BODIES) as usize]),
+        func_elements: Some(vec![Func::invalid(); PRE_BODIES as usize]),
     });
 
     let direct_call_stub = {
@@ -405,7 +411,7 @@ pub fn build_inprocess_batch(
         &mut |id, index| {
             if let Some((_, sh_name)) = source.selfhosted.iter().find(|(sid, _)| *sid == id) {
                 log::trace!(
-                    "night: compiled selfhosted script#{} ({sh_name}) -> table[{index}]",
+                    "night: compiled selfhosted script#{} ({sh_name}) -> logical table[{index}]",
                     id.id()
                 );
             }
@@ -425,9 +431,11 @@ pub fn build_inprocess_batch(
             }
             Ok(base)
         },
+        Some(reserve),
     )?;
     let TranslateOut {
         mut atoms,
+        table_base,
         source_id_to_func: _,
         source_id_to_table_func,
         sid_to_index,
@@ -541,10 +549,18 @@ pub fn build_inprocess_batch(
 
     Ok(InprocOut {
         blobs,
+        table_base,
         extern_table_indices: helper_specs.iter().map(|s| s.table_index).collect(),
+        extern_sigs: helper_specs.iter().map(|s| s.sig.clone()).collect(),
         scripts,
         env_desc,
+        module: None,
     })
+}
+
+#[cfg(test)]
+pub(crate) fn toy_inproc_out() -> InprocOut {
+    tests::toy_inproc_out()
 }
 
 #[cfg(test)]
@@ -746,130 +762,53 @@ mod tests {
         }
     }
 
-    fn enc_valtype(t: Type) -> wasm_encoder::ValType {
-        match t {
-            Type::I32 => wasm_encoder::ValType::I32,
-            Type::I64 => wasm_encoder::ValType::I64,
-            Type::F32 => wasm_encoder::ValType::F32,
-            Type::F64 => wasm_encoder::ValType::F64,
-            _ => panic!("unexpected type"),
-        }
-    }
-
-    /// Mirror wasm-jit-runner's `build_module`: extern-function types then
-    /// blob types; imports = functions, one memory, one table; blob i is
-    /// function (and type) index `n_extern + i`.
-    fn reassemble(blobs: &[Vec<u8>], extern_sigs: &[SignatureData]) -> Vec<u8> {
-        use wasm_encoder::{
-            CodeSection, EntityType, ExportKind as EExportKind, ExportSection, FunctionSection,
-            ImportSection, Module as EModule, TypeSection,
-        };
-        let n_extern = extern_sigs.len() as u32;
-        let mut parsed: Vec<(
-            Vec<wasm_encoder::ValType>,
-            Vec<wasm_encoder::ValType>,
-            Vec<u8>,
-        )> = Vec::new();
-        for b in blobs {
-            let mut reader = wasmparser::BinaryReader::new(b, 0);
-            assert_eq!(reader.read_u8().unwrap(), 0x60);
-            let fty: wasmparser::FuncType = reader.read().unwrap();
-            let params: Vec<_> = fty
-                .params()
-                .iter()
-                .map(|p| match p {
-                    wasmparser::ValType::I32 => wasm_encoder::ValType::I32,
-                    wasmparser::ValType::I64 => wasm_encoder::ValType::I64,
-                    wasmparser::ValType::F32 => wasm_encoder::ValType::F32,
-                    wasmparser::ValType::F64 => wasm_encoder::ValType::F64,
-                    other => panic!("unexpected valtype {other:?}"),
-                })
-                .collect();
-            let results: Vec<_> = fty
-                .results()
-                .iter()
-                .map(|r| match r {
-                    wasmparser::ValType::I32 => wasm_encoder::ValType::I32,
-                    wasmparser::ValType::I64 => wasm_encoder::ValType::I64,
-                    wasmparser::ValType::F32 => wasm_encoder::ValType::F32,
-                    wasmparser::ValType::F64 => wasm_encoder::ValType::F64,
-                    other => panic!("unexpected valtype {other:?}"),
-                })
-                .collect();
-            let body = b[reader.current_position()..].to_vec();
-            assert!(!body.is_empty());
-            parsed.push((params, results, body));
-        }
-
-        let mut module = EModule::new();
-        let mut types = TypeSection::new();
-        for sd in extern_sigs {
-            types.ty().function(
-                sd.params.iter().map(|&t| enc_valtype(t)),
-                sd.returns.iter().map(|&t| enc_valtype(t)),
-            );
-        }
-        for (params, results, _) in &parsed {
-            types
-                .ty()
-                .function(params.iter().copied(), results.iter().copied());
-        }
-        module.section(&types);
-
-        let mut import_sec = ImportSection::new();
-        let mut field = 0u32;
-        for i in 0..n_extern {
-            import_sec.import("e", &format!("i{field}"), EntityType::Function(i));
-            field += 1;
-        }
-        import_sec.import(
-            "e",
-            &format!("i{field}"),
-            EntityType::Memory(wasm_encoder::MemoryType {
+    /// Runner-shaped wrap of [`crate::wasm::assemble::assemble_blobs`]:
+    /// imports `e.iN`, exports `fN`. The type-index layout lives in the
+    /// assembler, not in a second parser.
+    fn runner_wrap(blobs: &[Vec<u8>], extern_sigs: &[SignatureData]) -> Vec<u8> {
+        use wasm_encoder::{MemoryType, RefType, TableType};
+        let n = extern_sigs.len();
+        let wrap = crate::wasm::assemble::ModuleWrap {
+            func_imports: (0..n).map(|i| ("e".to_string(), format!("i{i}"))).collect(),
+            memory_module: "e".to_string(),
+            memory_name: format!("i{n}"),
+            memory: MemoryType {
                 minimum: 0,
                 maximum: None,
                 memory64: false,
                 shared: false,
                 page_size_log2: None,
-            }),
-        );
-        field += 1;
-        import_sec.import(
-            "e",
-            &format!("i{field}"),
-            EntityType::Table(wasm_encoder::TableType {
-                element_type: wasm_encoder::RefType::FUNCREF,
+            },
+            table_module: "e".to_string(),
+            table_name: format!("i{}", n + 1),
+            table: TableType {
+                element_type: RefType::FUNCREF,
                 table64: false,
                 minimum: 0,
                 maximum: None,
                 shared: false,
-            }),
-        );
-        module.section(&import_sec);
+            },
+            export_names: (0..blobs.len()).map(|i| format!("f{i}")).collect(),
+        };
+        crate::wasm::assemble::assemble_blobs(blobs, extern_sigs, &wrap).expect("assemble")
+    }
 
-        let mut func_sec = FunctionSection::new();
-        for i in 0..parsed.len() as u32 {
-            func_sec.function(n_extern + i);
-        }
-        module.section(&func_sec);
-
-        let mut export_sec = ExportSection::new();
-        for i in 0..parsed.len() as u32 {
-            export_sec.export(&format!("f{i}"), EExportKind::Func, n_extern + i);
-        }
-        module.section(&export_sec);
-
-        let mut code = CodeSection::new();
-        for (_, _, body) in &parsed {
-            code.raw(body);
-        }
-        module.section(&code);
-        module.finish()
+    pub(super) fn toy_inproc_out() -> InprocOut {
+        build_toy().0
     }
 
     #[test]
-    fn inproc_batch_builds_and_validates() {
-        let source = toy_source();
+    fn reservation_matches_emitted_blob_count() {
+        let (out, _, reserved) = build_toy();
+        assert_eq!(reserved as usize, out.blobs.len());
+        assert_eq!(out.table_base, 5000);
+    }
+
+    fn build_toy() -> (InprocOut, usize, u32) {
+        build_toy_source(&toy_source())
+    }
+
+    fn build_toy_source(source: &Source) -> (InprocOut, usize, u32) {
         let specs: Vec<HelperImportSpec> = HELPER_NAMES
             .iter()
             .enumerate()
@@ -879,15 +818,19 @@ mod tests {
                 table_index: 100 + i as u32,
             })
             .collect();
-        let table_base = 5000u32;
         let mut n_allocs = 0usize;
+        let mut reserved = 0;
         let mut bump = 0x1000_0000u32;
         let out = build_inprocess_batch(
-            &source,
+            source,
             SourceObjectId::new(0),
             &Options::default(),
             &specs,
-            table_base,
+            &mut |count| {
+                assert_eq!(reserved, 0, "reserve called more than once");
+                reserved = count;
+                Ok(5000)
+            },
             &mut |size| {
                 n_allocs += 1;
                 let base = bump;
@@ -896,6 +839,36 @@ mod tests {
             },
         )
         .expect("build_inprocess_batch");
+        (out, n_allocs, reserved)
+    }
+
+    #[test]
+    fn regex_matcher_uses_reserved_base_and_preserves_missing_variant() {
+        let mut source = toy_source();
+        source.regex_programs.push(crate::source::RegexProgramSrc {
+            pattern: crate::ids::JsString::from_chars(vec![]),
+            flags: 0,
+            latin1_bytecode: vec![13, 0, 0, 0], // irregexp SUCCEED (empty pattern).
+            twobyte_bytecode: vec![],
+            num_registers: 2,
+            pair_count: 1,
+        });
+        let (out, _, reserved) = build_toy_source(&source);
+        assert_eq!(reserved as usize, out.blobs.len());
+        let word = |i: usize| u32::from_le_bytes(out.env_desc[i..i + 4].try_into().unwrap());
+        let field = crate::env_regions::REGION_NAMES
+            .iter()
+            .position(|&n| n == "regexPtr")
+            .unwrap();
+        let offset = word(4 * (ENV_DESC_HEADER_WORDS + field)) as usize;
+        assert_eq!(word(offset), 1, "regex must actually compile");
+        assert_eq!(word(offset + 8), out.table_base + reserved - 1);
+        assert_eq!(word(offset + 12), 0, "absent twobyte matcher is a sentinel");
+    }
+
+    #[test]
+    fn inproc_batch_builds_and_validates() {
+        let (out, n_allocs, _) = build_toy();
 
         assert_eq!(n_allocs, 2, "allocator called exactly twice");
         assert_eq!(out.extern_table_indices.len(), HELPER_NAMES.len());
@@ -945,11 +918,7 @@ mod tests {
             assert!((off + len) as usize <= out.env_desc.len());
         }
 
-        let extern_sigs: Vec<SignatureData> = HELPER_NAMES
-            .iter()
-            .map(|&n| parse_sig_str(sig_of(n)).unwrap())
-            .collect();
-        let reassembled = reassemble(&out.blobs, &extern_sigs);
+        let reassembled = runner_wrap(&out.blobs, &out.extern_sigs);
         wasmparser::validate(&reassembled).expect("reassembled batch validates");
     }
 }

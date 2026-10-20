@@ -35,12 +35,9 @@ fi
 
 log=$(mktemp)
 trap 'rm -f "$log"' EXIT
-python3 "$firefox/js/src/tests/jstests.py" \
+python3 -u "$here/scripts/run-jstests-checked.py" "$firefox/js/src/tests/jstests.py" \
   --format=automation \
   "${excludes[@]}" \
   --wpt=disabled \
-  "$build/bin/inproc-shell.sh" "$@" | tee "$log"
-if ! grep -Eq '^TEST-PASS( \(EXPECTED RANDOM\))? \|' "$log"; then
-  echo "no passing jstests results" >&2
-  exit 2
-fi
+  "$build/bin/inproc-shell.sh" "$@" 2>&1 | tee "$log"
+python3 "$here/scripts/check-test-log.py" jstests "$log"

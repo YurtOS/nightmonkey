@@ -37,6 +37,7 @@ resist-fingerprinting/math-fdlibm-sincostan.js
 typedarray/arraybuffer-transfer.js
 
 # !this.SharedArrayBuffer
+debug/bug-1995637.js
 cacheir/inlinable-native-accessor-7.js
 cacheir/inlinable-native-accessor-8.js
 dataview/resizable-dataview-bytelength-with-sab.js

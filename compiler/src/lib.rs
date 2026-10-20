@@ -79,8 +79,9 @@ pub use options::{Diagnostics, Options};
 /// serialized environment descriptor. `helper_*` describe the engine helpers
 /// (parallel arrays of length `n_helpers`): NUL-terminated name,
 /// NUL-terminated signature string (see night_compiler.h), and live funcref-table
-/// index. `table_base` is the current table size (`wasm_table_size()`);
-/// blob `i` is predicted at `table_base + i`. `alloc` is called exactly
+/// index. `reserve` receives the exact defined-function count and chooses the
+/// base reported by `night_inproc_table_base`; blob `i` lands at base + i.
+/// `alloc` is called exactly
 /// twice and must return zeroed, 8-aligned, non-null memory (calloc-style;
 /// it may be called with size 0). Returns null on failure (message on
 /// stderr); free with `night_inproc_delete`.
@@ -96,7 +97,7 @@ pub unsafe extern "C" fn night_inproc_build(
     helper_sigs: *const *const core::ffi::c_char,
     helper_funcptrs: *const u32,
     n_helpers: u32,
-    table_base: u32,
+    reserve: extern "C" fn(u32, &mut u32) -> i32,
     alloc: extern "C" fn(usize) -> u32,
 ) -> *mut wasm::inprocess::InprocOut {
     let n = usize::try_from(n_helpers).unwrap();
@@ -137,7 +138,14 @@ pub unsafe extern "C" fn night_inproc_build(
             root_id,
             &opts,
             &specs,
-            table_base,
+            &mut |count| {
+                let mut base = 0;
+                if reserve(count, &mut base) != 0 {
+                    Err("reserving table slots failed".to_string())
+                } else {
+                    Ok(base)
+                }
+            },
             &mut |size: u32| {
                 let p = alloc(usize::try_from(size).unwrap());
                 if p == 0 {
@@ -178,6 +186,35 @@ pub unsafe extern "C" fn night_inproc_build(
             core::ptr::null_mut()
         }
     }
+}
+
+/// The table base chosen by the host's exact-count reservation callback.
+#[no_mangle]
+pub extern "C" fn night_inproc_table_base(out: &wasm::inprocess::InprocOut) -> u32 {
+    out.table_base
+}
+
+/// The batch assembled into one module for a host that mounts it whole (the
+/// Yurt JIT mount ABI; see `wasm::assemble`). Writes the length to `len` and
+/// returns the bytes, which live as long as `out`; null on failure (message
+/// on stderr).
+#[no_mangle]
+pub extern "C" fn night_inproc_module(
+    out: &mut wasm::inprocess::InprocOut,
+    len: &mut u32,
+) -> *const u8 {
+    if out.module.is_none() {
+        match wasm::assemble::assemble_module(out) {
+            Ok(bytes) => out.module = Some(bytes),
+            Err(e) => {
+                crate::diag_line!("night: inprocess: assembling the module: {e}");
+                return core::ptr::null();
+            }
+        }
+    }
+    let bytes = out.module.as_ref().unwrap();
+    *len = u32::try_from(bytes.len()).unwrap();
+    bytes.as_ptr()
 }
 
 #[no_mangle]
@@ -232,3 +269,13 @@ pub extern "C" fn night_inproc_env_desc_len(out: &wasm::inprocess::InprocOut) ->
 
 #[no_mangle]
 pub extern "C" fn night_inproc_delete(_out: Box<wasm::inprocess::InprocOut>) {}
+
+/// Release compiler-only buffers after the host has copied/installed the code.
+/// The environment descriptor and script map remain valid until deletion.
+#[no_mangle]
+pub extern "C" fn night_inproc_release_code(out: &mut wasm::inprocess::InprocOut) {
+    out.blobs = Vec::new();
+    out.module = None;
+    out.extern_sigs = Vec::new();
+    out.extern_table_indices = Vec::new();
+}

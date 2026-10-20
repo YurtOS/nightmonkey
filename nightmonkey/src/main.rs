@@ -534,6 +534,7 @@ fn main() -> Result<()> {
         &mut |_| false,
         &mut |_, _| {},
         &mut |_, _| Ok(env.prop_ic_base),
+        None,
     )
     .map_err(|e| anyhow!(e))?;
     if stats {

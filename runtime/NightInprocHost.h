@@ -6,25 +6,31 @@
 
 #include <stdint.h>
 
+#include "compiler/night-compiler.h"
+
 namespace js {
 namespace night {
 
-// Wrappers over the wasm-jit-runner hostcall imports (env.wasm_table_size,
-// env.wasm_add_funcs2). The imports make the module instantiable only under
-// hosts that provide them (the runner; wizer stubs unknown imports; plain
-// `wasmtime run` needs `-W unknown-imports-trap`), so callers must gate on
-// --night-inprocess. On non-wasm targets the wrappers fail unconditionally.
-
-// Current size of funcref table 0, or a negative value on failure. Appended
-// functions are contiguous: blob i lands at the returned size + i.
-int32_t InprocHostTableSize();
-
-// Inject `nblobs` function blobs (runner blob format) resolving the extern
-// function imports from live table entries `externIdxs[0..nextern)`; writes
-// each blob's new table index to `out`. Returns 0 on success.
-int32_t InprocHostAddFuncs(const uint32_t* blobPtrs, const uint32_t* blobLens,
-                           uint32_t nblobs, const uint32_t* externIdxs,
-                           uint32_t nextern, uint32_t* out);
+// The in-process host: how a compiled batch reaches the running instance's
+// funcref table. One implementation is linked in, chosen at build time
+// (NIGHT_INPROC_HOST):
+//   runner  NightInprocHost.cpp      wasm-jit-runner's hostcall imports
+//   yurt    NightInprocHostYurt.cpp  Yurt's JIT mount ABI: a reserved table
+//                                    range and a self-assembled module
+//
+// Translation uses logical indices until all functions exist. The compiler
+// then calls Reserve with the exact blob count, binds absolute indices, and
+// serializes. Blob i must land at base + i:
+//   InprocHostReserve(nblobs, &base)    callback from night_inproc_build
+//   InprocHostInstall(out, base)        after it
+//   InprocHostRelease()                 when the build fails in between
+// Reserve and Install return false, with a message on stderr, on failure;
+// the caller then stays interpreted. Install releases the reservation on its
+// own failures. A published module that fails validation is unmounted;
+// failure to unmount is fatal because its entries remain callable.
+bool InprocHostReserve(uint32_t nblobs, uint32_t* tableBase);
+bool InprocHostInstall(night_inproc_out_t* out, uint32_t tableBase);
+void InprocHostRelease();
 
 }  // namespace night
 }  // namespace js
