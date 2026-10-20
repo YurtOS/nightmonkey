@@ -2,19 +2,40 @@
 // may-GC call) must not stay alive once its local is overwritten: the next GC
 // releases it, as in baseline, whose frame slot is overwritten. An exit that
 // treated the overwritten, dead local as "keep the frame's value" would keep a
-// finalizable object, or a weak-map key, alive.
-//
-// Known limit: overwriting with a non-constant (`o = {}`) is released only at
-// the next retaining store, not at an exit before it.
+// finalizable object, or a weak-map key, alive until the function returned.
 function collect() { gc(); }
 
-// `o` is live across the finalizeCount() call, so it has a home slot; it is
-// then overwritten and dead at collect().
+// `o` is live across the finalizeCount() call, so a retaining store puts it in
+// the frame; it is then overwritten and dead at collect().
 function overwriteUndefined() {
   gc();
   var o = makeFinalizeObserver();
   var c0 = finalizeCount();
   o = undefined;
+  collect();
+  return finalizeCount() - c0;
+}
+function overwriteObject() {
+  gc();
+  var o = makeFinalizeObserver();
+  var c0 = finalizeCount();
+  o = {};
+  collect();
+  return finalizeCount() - c0;
+}
+function overwriteFresh(x) {
+  gc();
+  var o = makeFinalizeObserver();
+  var c0 = finalizeCount();
+  o = { a: x };
+  collect();
+  return finalizeCount() - c0;
+}
+function overwriteParam(x) {
+  gc();
+  var o = makeFinalizeObserver();
+  var c0 = finalizeCount();
+  o = x;
   collect();
   return finalizeCount() - c0;
 }
@@ -30,7 +51,8 @@ function lastUseThenCall(flag) {
   collect();
   return finalizeCount() - c0;
 }
-// A value still held by its local must stay alive (no over-collection).
+// A value still held by its local must stay alive (no over-collection), and a
+// dead local that is never overwritten keeps its object, as baseline does.
 function stillHeld() {
   gc();
   var o = makeFinalizeObserver();
@@ -41,6 +63,9 @@ function stillHeld() {
 }
 for (var n = 0; n < 40; n++) {
   assertEq(overwriteUndefined(), 1);
+  assertEq(overwriteObject(), 1);
+  assertEq(overwriteFresh(n), 1);
+  assertEq(overwriteParam({}), 1);
   assertEq(lastUseThenCall(n & 1), 1);
   assertEq(stillHeld(), 0);
 }
