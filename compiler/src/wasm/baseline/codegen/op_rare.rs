@@ -40,9 +40,7 @@ impl<'a> Gen<'a> {
                     .unwrap();
                 self.set_slot(d, r);
             }
-            // Direct eval reads the caller's interpreter frame (its
-            // `arguments`, its Debugger frame), which a compiled frame does
-            // not carry: the script is interpreted.
+            // Direct eval (`is_direct_eval`): the script is interpreted.
             Eval | StrictEval | SpreadEval | StrictSpreadEval => {
                 return Err(format!("{} ({op:?})", super::super::UNSUPPORTED_OP));
             }

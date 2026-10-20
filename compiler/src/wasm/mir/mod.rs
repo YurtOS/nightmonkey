@@ -35,6 +35,10 @@ pub(crate) fn inline_eligible(ctx: &TranslateCtx, script: &Script) -> bool {
         && script.bytecode.len() <= INLINE_MAX_BYTECODE
         && !script.is_generator_or_async
         && !script.is_class_ctor
+        // Direct eval reads the caller's interpreter frame, which no inline
+        // frame has (even a binding-less strict arrow, which needs no
+        // environment).
+        && !script.parser().opcodes().any(baseline::is_direct_eval)
         // Mapped formals (write-through, aliasing): none with no formals.
         && !(script.has_mapped_args && script.nargs > 0)
         // No handler or close: `inline::splice` sends every throw straight

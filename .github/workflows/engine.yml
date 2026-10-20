@@ -22,7 +22,7 @@ defaults:
 # Every engine cache includes that revision; no neighboring build is reused.
 env:
   FIREFOX_REPO: YurtOS/firefox
-  FIREFOX_REF: issue3/external-slots
+  FIREFOX_REF: yurt
   SM_OBJDIR: obj-nightmonkey-sm
 
 jobs:

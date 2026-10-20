@@ -29,6 +29,15 @@ pub const FORCE_INTERPRETER: &str = "ForceInterpreter";
 /// gate accepts it, as a designed-out capability and not a gap.
 pub const UNSUPPORTED_OP: &str = "unsupported op";
 
+/// Whether `op` is a direct eval. It reads the caller's interpreter frame
+/// (its `arguments`, its Debugger frame), which a compiled frame, and an
+/// inlined callee's, does not carry: a script containing one is interpreted
+/// and is never inlined.
+pub(crate) fn is_direct_eval(op: crate::bytecode::JSOp) -> bool {
+    use crate::bytecode::JSOp::*;
+    matches!(op, Eval | StrictEval | SpreadEval | StrictSpreadEval)
+}
+
 /// Translate one script to a baseline body, or decline. Same contract as
 /// `mir::translate_script`: `Outcome::Compiled` with a `night_abi_sig2`
 /// body, or `Outcome::Skipped` with the reason (the script is then

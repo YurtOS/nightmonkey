@@ -1758,8 +1758,9 @@ compiles now, lowered onto baseline's helpers:
   out of loops with calls, and crypto lost 3.5% until 2026-09-28's fix.)
 - **Names through the chain and eval.** `GetName`, `BindName`,
   `BindUnqualifiedName`, `SetName`, `DelName`, `BindVar` and
-  `EnvCallee` read the frame's environment. A direct eval is `call.eval`,
-  a call frame for baseline's eval helper over the frame's environment.
+  `EnvCallee` read the frame's environment. A direct eval is `call.eval`
+  upstream; this fork declines scripts containing one (they are interpreted,
+  and never inlined), since the eval reads the caller's interpreter frame.
   (Such scripts keep their bindings in environments, which eval's code
   reads and writes; `call.eval`'s effects are a call's.)
 - **The rest.** `Callee`, `GlobalThis`, BigInt literals, `MutateProto`,
@@ -1771,7 +1772,7 @@ compiles now, lowered onto baseline's helpers:
   now also `js.rt` ops over baseline's helpers: `using` declarations
   (`AddDisposable`, `TakeDisposeCapability`, `CreateSuppressedError`),
   `GetBoundName`, `ObjWithProto`, `NewPrivateName`, `DynamicImport`,
-  and spread direct eval (`SpreadEval`).
+  and, upstream only, spread direct eval (`SpreadEval`; declined here).
 - **Generators and async functions** remained declined here; M5j builds
   them.
 - An inlined callee's `js.rt` atoms are renamed into the caller's table

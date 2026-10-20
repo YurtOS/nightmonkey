@@ -33,9 +33,9 @@ MIR.md changes that follow.
   waffle's reducifier handles that (§7).
 - **Two gates, but only one lasting.** A script runs the MIR pipeline
   only if baseline supports every op in it and the MIR builder does too.
-  Baseline is total: it supports every JSOp except `ForceInterpreter`
-  (§6), including scripts that call eval (the eval'd code itself is
-  interpreted). After that its gate is vacuous and the MIR
+  Baseline supports every JSOp except `ForceInterpreter` (§6) and, in this
+  fork, the four direct-eval ops (the script is interpreted; see §Direct
+  eval). After that its gate is vacuous and the MIR
   builder's gate is the only real one.
 
 ## 1. What exists and what we reuse
@@ -343,10 +343,13 @@ The cost is one compare per loop iteration in baseline code.
 
 ## 6. Covering every JSOp
 
-Baseline is **total**: it supports all 242 JSOps except
-`ForceInterpreter`, which by definition means "run in the interpreter".
-A script that calls eval is compiled like any other; the code eval
-produces at runtime is interpreted, since the compiler is AOT only.
+Baseline supports all 242 JSOps except `ForceInterpreter`, which by
+definition means "run in the interpreter", and (in this fork) the four
+direct-eval ops: a script containing one is interpreted and is never inlined
+(`baseline::is_direct_eval`), because the eval reads the caller's interpreter
+frame (its `arguments`, its Debugger frame), which a compiled or inlined frame
+does not carry. Upstream compiles such scripts; the code eval produces at
+runtime is interpreted either way.
 
 Beyond what BBV's GEN path already covers:
 
@@ -354,7 +357,7 @@ Beyond what BBV's GEN path already covers:
 |---|---|
 | `BigInt` | helper: `script->getBigInt(pc)` |
 | `NonSyntacticGlobalThis`, `EnvCallee`, `SetIntrinsic` | new helpers |
-| `Eval`, `StrictEval`, `SpreadEval`, `StrictSpreadEval` | helper around the engine's JIT-facing direct-eval entry. The frame supplies the env chain, `this` and new.target, and the caller script comes from the callee. The eval'd script runs in the interpreter. A non-strict direct eval can add bindings, but only to the environment object, which baseline keeps in its frame slot, so no baseline invariant is at stake |
+| `Eval`, `StrictEval`, `SpreadEval`, `StrictSpreadEval` | **Declined in this fork** (`unsupported op`; the script is interpreted). Upstream: helper around the engine's JIT-facing direct-eval entry. The frame supplies the env chain, `this` and new.target, and the caller script comes from the callee. The eval'd script runs in the interpreter. A non-strict direct eval can add bindings, but only to the environment object, which baseline keeps in its frame slot, so no baseline invariant is at stake |
 | `DynamicImport`, `ImportMeta`, `GetImport` | new helpers; module scripts are in scope (B4) |
 | `AddDisposable`, `TakeDisposeCapability`, `CreateSuppressedError` | new helpers |
 | `DebugCheckSelfHosted` | no-op |
@@ -698,8 +701,8 @@ Deviations from the plan above, and details it did not settle:
    indirection.
 5. **A script declined in `Baseline` mode is interpreted**, not
    compiled by BBV, so the lane measures baseline alone.
-6. **Baseline is total** except for `ForceInterpreter` (§6). Scripts
-   that call eval are compiled, and the eval'd code is interpreted.
+6. **Baseline supports every op** except `ForceInterpreter` (§6) and, in
+   this fork, direct eval, whose scripts are interpreted.
    Module ops are in B4.
 7. **Inline fast paths that decide from tags alone** (§3.1, B5). This
    amends the original "nothing else is special-cased" rule. The paths

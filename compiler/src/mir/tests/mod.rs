@@ -1131,5 +1131,8 @@ b10:\n  exit.throw pc=0 this=v1 args=[v2] locals=[v1] rval=v1 stack=[]\n}\n";
     let text = optimized(src);
     assert_eq!(text.matches("load_field").count(), 0, "{text}");
     assert_eq!(text.matches("load_slot").count(), 1, "{text}");
-    assert!(text.contains("frame.store"), "the release store was dropped:\n{text}");
+    assert!(
+        text.contains("frame.store"),
+        "the release store was dropped:\n{text}"
+    );
 }

@@ -277,6 +277,7 @@ bool js::CompileInProcess(JSContext* cx, JS::Handle<JSScript*> script,
       char what[64];
       snprintf(what, sizeof what, "script source#%u has no heap address", sid);
       if (InprocStrict()) {
+        night_snapshot_walk_delete(walk);
         return InprocFail(cx, what);
       }
       fprintf(stderr, "night: inprocess: %s\n", what);
