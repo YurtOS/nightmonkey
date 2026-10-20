@@ -1,9 +1,11 @@
 # NightMonkey design
 
-NightMonkey is an ahead-of-time compiler from SpiderMonkey bytecode to
-WebAssembly. SpiderMonkey and compiled JavaScript execute in the same Wasm
-module and linear memory, so compiled bodies can call engine helpers, inspect
-engine data structures, and call one another.
+NightMonkey is a compiler from SpiderMonkey bytecode to WebAssembly. It runs
+ahead of time (the snapshot flow) or inside the running instance (the
+in-process flow, which is how Yurt uses it as a JIT). SpiderMonkey and compiled
+JavaScript execute in the same Wasm module and linear memory, so compiled
+bodies can call engine helpers, inspect engine data structures, and call one
+another.
 
 This document describes the current implementation. It separates correctness
 contracts from policy: limits and predictions may reduce coverage or
@@ -46,13 +48,25 @@ Two deployment modes use the same analysis and translator.
 
 ### In-process flow
 
-1. The wasm shell captures live scripts and heap objects into `Source`.
-2. The NightMonkey compiler, inside the Wasm instance, builds a temporary
-   module with imported runtime helpers and serializes its defined functions as
-   runner blobs.
-3. `wasm-jit-runner` injects the functions into the running instance.
-4. The shell installs the environment descriptor and patches scripts to their
-   injected table entries.
+The compiler runs inside the Wasm instance (the `night-guest` staticlib linked
+into the shell); the host only provides table slots and installs a module.
+
+1. The wasm shell captures live scripts and heap objects into `Source`
+   (`--night-inprocess`; `NIGHT_INPROC_STRICT=1` makes a failed batch an error
+   instead of leaving the scripts interpreted).
+2. `night_inproc_build` analyses and translates the batch with the tiers the
+   `--night-options` string allows (`Options::parse_str`). Translation uses
+   logical table indices until every function exists.
+3. The compiler calls back into the in-process host to reserve exactly as many
+   funcref-table slots as it emitted blobs (`InprocHostReserve`), binds the
+   absolute indices, and serializes the module.
+4. The host installs it (`InprocHostInstall`): blob i lands at the reserved
+   base + i. Two hosts exist, chosen at build time (`NIGHT_INPROC_HOST`):
+   `wasm-jit-runner` (the testing host, via hostcalls) and Yurt's JIT mount ABI
+   (a reserved table range and a module the guest assembles itself).
+5. The shell installs the environment descriptor and patches scripts to their
+   table entries. If any step fails the reservation is released and the
+   scripts stay interpreted.
 
 The helper indices, table indices, region addresses, and serialized tables must
 describe exactly the module that receives the blobs.
@@ -140,61 +154,32 @@ maintaining separate arithmetic semantics. Predicted results remain untrusted;
 an interval originating at a guarded or canonical producer can become a proof
 inside codegen.
 
-## 5. Translation and basic-block versioning
+## 5. Translation: the tiers
 
 `wasm/mod.rs` runs analysis, lays out memory regions, translates scripts and
 regexps, places functions in the indirect table, and patches address
 placeholders after bases are known.
 
-`wasm/bbv` is the actual JavaScript bytecode to Wasm bytecode translator. Each
-bytecode operation ends a generated block; a workqueue emits every reachable
-structural version.
+Each script goes through up to two compiled tiers, then the interpreter
+(`Options::pipeline`; `docs/BASELINE.md` section 5 has the selection rules):
 
-### Versions, predictions, and tracks
+- **Baseline** (`wasm/baseline/`): a one-to-one translation of the bytecode
+  that keeps the interpreter's frame layout. It is the correctness floor and the
+  landing place of every MIR exit, so any script MIR compiles also carries a
+  baseline body. It declines a script for `ForceInterpreter`, for ops it does
+  not support (direct eval, which needs the caller's interpreter frame), and for
+  size limits; the script is then interpreted.
+- **MIR** (`mir/`, `wasm/mir/`): an SSA builder over the bytecode that uses the
+  likely facts, an optimizer, and a lowering to Wasm. Speculation is guarded:
+  a failed guard exits to the baseline body at the same pc. `docs/MIR.md`
+  describes the builder, optimizer and lowering; `docs/MIR-MEMORY.md` the memory
+  and effects model, including the property-layout stamps.
+- **Interpreter**: whatever a tier declines. `--strict-coverage` rejects a
+  decline unless the reason is a designed-out one (`ForceInterpreter`, an
+  unsupported op).
 
-The overall strategy of the codegen backend is to emit code in two "tracks":
-optimistic (OPT) and generic (GEN). The optimistic track is meant to align with
-all of the predictions that the static type analysis makes; if the program
-diverges from those types, execution is shunted to the generic track. Likewise,
-in the other direction, if execution in the generic track can prove that it
-meets all the assumptions of the optimistic track, we can shunt execution back.
-We sometimes call these "offramps" and "onramps", colloquially. Each transition
-may involve some boxing/unboxing, because OPT can carry values in raw unboxed
-form.
-
-Reducibility concerns (Wasm requires reducible CFGs) complexify the two-track
-design somewhat: we need to duplicate code further into versions that are keyed
-on which loop headers they are dominated by. Otherwise, an onramp or offramp
-would become a side-entrance to the other copy of any loop in the current
-loop-nest.
-
-A basic block in the emitted IR is part of the lowering for a given JSOp for
-one "version". That version is identified by its PC, execution track,
-nested-loop token-vector class (the above-mentioned reducibility scheme), and
-inline-segment depth (the means of conceptually duplicating code for inlining).
-
-Each version carries a fact context: known types, object class-stamps (see
-below), and unboxed representation choices for each value.  `predict.rs`
-computes one optimistic context per program point; the generic track carries no
-speculative facts.
-
-The translator first runs a context-only fixpoint, then emits against the
-closed prediction map. If emission discovers an unclosed successor, the script
-is retried with less specialization. The bottom compile-ladder rung emits
-generic-only code.
-
-The optimistic track carries facts proved by guards and prior operations. Side
-arms handle cases outside an optimistic lowering and continue with weakened
-facts. The generic track uses boxed values and runtime helpers and is the
-correctness floor.
-
-All inter-operation edges pass through the continuation and `theta` machinery
-in `version.rs` (named for the corresponding `theta` function in Static Basic
-Block Versioning, which our version management previously followed more
-closely). This code owns fact joining, track weakening, loop tokens, reducible
-CFG construction, values carried across blocks, and guarded recovery from weak
-loop or call-return paths. Lowerings must not bypass it for ordinary bytecode
-successors.
+An optimistic fact is never trusted on its own: it reaches generated code only
+through a guard, and the generic path stays correct when a guard fails.
 
 ### Representations and proofs
 
@@ -209,23 +194,20 @@ remove a required check. Generic helpers accept and return full boxed values
 and preserve JavaScript exception behavior.
 
 Before a may-GC call, every live GC value must be visible in the traced AOT
-stack or another engine root. `live.rs` and frame flushing determine what is
-materialized. Compiled direct calls return an error result and effect bits;
-effect bits kill heap, stamp, and binding facts but do not replace rooting.
+stack or another engine root. MIR roots a value in a home slot when it is live
+across a may-GC call, and writes each managed local to its frame slot so the GC
+sees it (`docs/MIR.md`, rooting). A local overwritten with a constant is
+released when its frame slot is overwritten, as in baseline. Compiled direct
+calls return an error result and effect bits; effect bits kill heap, stamp, and
+binding facts but do not replace rooting.
 
 ### Inlining
 
-Inlining creates a synthetic bytecode segment in the caller's PC space. The
-callee uses an alternate frame view and its returns rejoin the caller. Try
-notes, environments, arguments, script-relative operands, generator state, and
-absolute side-table PCs need special handling.
-
-The implementation currently admits a callee unless an opcode is in the manual
-`splice_blocked` list. That list is a correctness boundary: omitting a
-root-frame-relative or script-relative lowering can miscompile. The desired
-invariant is complete use of active frame/script abstractions so ordinary
-lowerings are splice-safe by construction; we will eventually complete that
-migration.
+MIR inlines small callees into the caller's frame (`wasm/mir/inline.rs`,
+`docs/MIR.md`): the callee gets an alternate frame view, its returns rejoin the
+caller, and a guard failure inside it exits through `exit.inline` to the
+callee's baseline body. Try notes, environments, `arguments`, script-relative
+operands and generator state are admission conditions.
 
 ## 6. Object layouts and stamps
 
@@ -291,7 +273,7 @@ installation; address and length words remain absolute.
 
 `NightHelperList.h` is the C++ helper manifest. Rust's `Helpers` structure and
 resolution logic manually duplicate it and should be generated from the same
-source. `bbv/abi.rs` records SpiderMonkey offsets and selector values baked into
+source. `wasm/mir/abi.rs` records SpiderMonkey offsets and selector values baked into
 Wasm. `NightInlineHeap.cpp` statically asserts the engine-layout half. New ABI
 data should use generated shared definitions rather than paired literals.
 
@@ -318,8 +300,8 @@ be enforced or redesigned before runtime destruction and recreation.
 
 ## 10. Generators, async, exceptions, and regexps
 
-Generator and async bodies have generic-track support in `bbv/generator.rs` and
-`NightGenerator.cpp`. Suspension stores locals and operands in an engine object
+Generator and async bodies are supported by the baseline tier
+(`wasm/baseline/codegen/resume.rs`) and `NightGenerator.cpp`. Suspension stores locals and operands in an engine object
 using an AOT-owned layout; resume re-enters the same compiled script. An
 AOT-suspended generator cannot resume in the interpreter. Bodies needing an
 arguments object remain unsupported, and resumable bodies do not receive the
@@ -343,9 +325,11 @@ various heuristics; cleanup is ongoing.
 
 ## 12. Capabilities and fallback
 
-The exhaustive match in `bbv/ops.rs` determines lowering support. Explicit
-declines include BigInt literals, eval variants, module imports,
-explicit-resource-management operations, and interpreter/debugger escapes.
+Baseline's lowering is the run of arms in `wasm/baseline/codegen/op_*.rs`; an op
+no run handles declines the script with a `BUG:` reason. Explicit declines are
+`ForceInterpreter` and the eval variants (an `unsupported op`, because eval reads
+the caller's interpreter frame). MIR declines anything its builder does not
+accept, and the script falls back to baseline.
 Environment gates reject frame shapes the runtime cannot model.
 
 Opcode knowledge is also duplicated in analysis transfer, effects, splice
@@ -375,17 +359,16 @@ diagnostics for degradation, skipped scripts, guards, effects, and caches.
 
 - **likely fact**: an untrusted analysis prediction.
 - **codegen fact**: a property proved by a guard or sound producer and carried
-  in a BBV context.
-- **track**: optimistic or generic execution state in version identity.
+  as a MIR value type.
+- **tier**: baseline, MIR, or the interpreter; the translation a script gets.
+- **exit**: leaving MIR code for the script's baseline body at a pc, with the
+  frame written; the landing for every failed guard.
 - **side arm**: a guarded alternative inside one lowering.
-- **rung**: a retry step of the compile ladder with less specialization.
-- **theta**: the continuation and version-interning logic between operations.
-- **carrier**: an unboxed SSA value passed between versions.
-- **splice**: an inlined callee represented as synthetic bytecode.
+- **splice**: an inlined callee represented in the caller's MIR function.
 - **stamp**: the object word identifying layout and valid subclaims.
 - **region**: a compatible contiguous family of layout keys.
 - **fuse**: an armed condition with a complete invalidation cut.
 - **choke/chokepoint**: an invalidation point. Prefer that standard term in new
   code.
-- **dirty**: a lineage whose facts were weakened by effects or a failed route.
-- **on-ramp**: a guarded edge from a weak lineage to an optimistic context.
+- **on-ramp**: a guarded edge from baseline code into an optimistic MIR
+  context at a loop head.
