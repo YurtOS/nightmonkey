@@ -375,10 +375,10 @@ impl<'a> Lower<'a> {
         let l = self.layout;
         // The fixed slots MIR does not keep current. The env slot is
         // written through (scopes), and the arguments-object slot holds the
-        // one `args.object` made, if any (the fresh entry cleared it).
-        if l.has_new_target {
-            self.store_i64(vp, l.new_target(), self.new_target);
-        }
+        // one `args.object` made, if any (the fresh entry cleared it). The
+        // new.target slot was written at entry and is rooted there: a
+        // collection since may have moved it, which the entry parameter
+        // would not show.
         let w64 = self.un(Operator::I64ExtendI32U, word, Type::I64);
         let tag = self.i64c(TAG_INT32 << 32);
         let wv = self.bin(Operator::I64Or, w64, tag, Type::I64);

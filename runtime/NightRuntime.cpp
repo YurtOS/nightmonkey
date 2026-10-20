@@ -7046,6 +7046,9 @@ bool night_runtime_create_this(JSContext* cx, uint32_t top, uint64_t calleeBits,
   SetNightTop(cx, top);
 #ifdef ENABLE_JS_NIGHTMONKEY
   uint64_t out = 0;
+  // The allocation may collect the nursery and move the callee: the cache
+  // fill below reads it through this root, not the pointer it was given.
+  JS::RootedValue callee(cx, JS::Value::fromRawBits(calleeBits));
   if (!js::night::NightCreateThis(cx, calleeBits, newTargetBits, nSlots, &out,
                                   stampWord)) {
     return false;
@@ -7058,7 +7061,7 @@ bool night_runtime_create_this(JSContext* cx, uint32_t top, uint64_t calleeBits,
   // protoSlotEnc@32]. The inline hit guards C's shape + generation + a LIVE
   // re-read of `.prototype == protoPtr` (a reassignment leaves the shape but
   // must not reuse the stale this-shape).
-  FillConstructCell(cx, cellAddr, out, calleeBits);
+  FillConstructCell(cx, cellAddr, out, callee.get().asRawBits());
   WriteNightOut(top, out);
   return true;
 #else
@@ -7080,11 +7083,12 @@ bool night_runtime_new_this(JSContext* cx, uint32_t top, uint64_t calleeBits,
   SetNightTop(cx, top);
 #ifdef ENABLE_JS_NIGHTMONKEY
   uint64_t out = 0;
+  JS::RootedValue callee(cx, JS::Value::fromRawBits(calleeBits));
   if (!js::night::NightNewThis(cx, calleeBits, protoBits, nSlots, &out,
                                stampWord)) {
     return false;
   }
-  FillConstructCell(cx, cellAddr, out, calleeBits);
+  FillConstructCell(cx, cellAddr, out, callee.get().asRawBits());
   WriteNightOut(top, out);
   return true;
 #else
@@ -7157,11 +7161,12 @@ uint32_t night_runtime_new_this_init(JSContext* cx, uint32_t top,
   }
   const std::vector<uint32_t>& row = RtLayouts(cx).rows[k - 1];
   uint64_t out = 0;
+  JS::RootedValue callee(cx, JS::Value::fromRawBits(calleeBits));
   if (!js::night::NightNewThis(cx, calleeBits, protoBits, nSlots, &out,
                                stampWord)) {
     return 0;
   }
-  FillConstructCell(cx, cellAddr, out, calleeBits);
+  FillConstructCell(cx, cellAddr, out, callee.get().asRawBits());
   JS::RootedObject obj(cx, &JS::Value::fromRawBits(out).toObject());
   for (uint32_t i = 0; i < n; i++) {
     // Reread each time: the values are rooted where they are (below
