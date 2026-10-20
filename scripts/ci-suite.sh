@@ -27,9 +27,13 @@ mkdir -p "$logs"
 failed=0
 for lane in "${lanes[@]}"; do
   off=0
-  if [ "$lane" = interpreter ]; then off=1; fi
+  strict=0
+  if [ "$lane" = interpreter ]; then off=1; else strict=1; fi
+  # A compiled lane runs strict: a failed batch must fail the run, not leave
+  # the scripts interpreted and every test green.
   if timeout --kill-after=30s "${seconds}s" \
-      env NIGHT_INPROCESS_OFF="$off" "${harness[@]}" 2>&1 | tee "$logs/$suite-$lane.log"; then
+      env NIGHT_INPROCESS_OFF="$off" NIGHT_INPROC_STRICT="$strict" \
+      "${harness[@]}" 2>&1 | tee "$logs/$suite-$lane.log"; then
     echo "$suite ($lane): passed"
   else
     status=$?

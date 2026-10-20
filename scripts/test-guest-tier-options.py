@@ -41,6 +41,17 @@ def main():
     assert "night: inprocess:" in result.stderr, result.stderr
     assert "42" not in result.stdout.splitlines(), "invalid options ran interpreted"
     print("PASS invalid guest options: strict failure before execution")
+    # The block census counts reach the dump: the flat per-block counter is
+    # keyed on the kind the compiler emits (98), and the dump runs while the
+    # context still holds the counts. Zero kind-98 lines would mean either broke.
+    result = subprocess.run(
+        [str(wrapper), "--night-options", "--pipeline mir --block-census", str(fixture)],
+        env=env, capture_output=True, text=True, timeout=600,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    counted = re.findall(r"^night: census kind 98 id \d+ n ([1-9]\d*)$", result.stderr, re.M)
+    assert counted, "no kind-98 block census counts were printed:\n" + result.stderr[-2000:]
+    print(f"PASS block census: {len(counted)} blocks counted")
 
 
 if __name__ == "__main__":

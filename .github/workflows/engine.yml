@@ -112,6 +112,10 @@ jobs:
           cmake --build build
           test -x build/bin/inproc-shell.sh
 
+      - name: Guest tier options contract
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: python3 scripts/test-guest-tier-options.py build
+
       - name: Local regressions
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         timeout-minutes: 65
