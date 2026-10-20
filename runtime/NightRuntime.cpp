@@ -1135,6 +1135,19 @@ static bool GetOwnDataPropertyValue(JSContext* cx, JS::HandleObject obj,
   return true;
 }
 
+// `GetOwnDataPropertyValue` by C-string name: the pristine builtin an install
+// step reads (`Array.prototype.push`, `Math.imul`, ...), never a getter.
+static bool GetOwnData(JSContext* cx, JS::HandleObject obj, const char* name,
+                       JS::MutableHandleValue v) {
+  JS::RootedString str(cx, JS_AtomizeAndPinString(cx, name));
+  JS::RootedId id(cx);
+  if (!str || !JS_StringToId(cx, str, &id)) {
+    JS_ClearPendingException(cx);
+    return false;
+  }
+  return GetOwnDataPropertyValue(cx, obj, id, v);
+}
+
 // Resolve a dotted global path ("Array.prototype.forEach") to a JSFunction.
 // A final "@@name" component is a well-known-symbol key (e.g.
 // "RegExp.prototype.@@replace"); a "%Name%" path is a self-hosting intrinsic.
@@ -1832,14 +1845,14 @@ bool night_runtime_install_env(JSContext* cx,
     JS::RootedValue ccat(cx), cat(cx), fcc(cx);
     JS::RootedValue strCtor(cx);
     if (JS_GetClassPrototype(cx, JSProto_String, &strProto) && strProto &&
-        JS_GetProperty(cx, strProto, "charCodeAt", &ccat) &&
-        JS_GetProperty(cx, strProto, "charAt", &cat) &&
-        JS_GetProperty(cx, strProto, "constructor", &strCtor) &&
+        GetOwnData(cx, strProto, "charCodeAt", &ccat) &&
+        GetOwnData(cx, strProto, "charAt", &cat) &&
+        GetOwnData(cx, strProto, "constructor", &strCtor) &&
         ccat.isObject() && cat.isObject() && strCtor.isObject()) {
       RtFns(cx).strCharCodeAt = new JS::PersistentRootedValue(cx, ccat);
       RtFns(cx).strCharAt = new JS::PersistentRootedValue(cx, cat);
       JS::RootedObject ctorObj(cx, &strCtor.toObject());
-      if (JS_GetProperty(cx, ctorObj, "fromCharCode", &fcc) && fcc.isObject()) {
+      if (GetOwnData(cx, ctorObj, "fromCharCode", &fcc) && fcc.isObject()) {
         RtFns(cx).strFromCharCode = new JS::PersistentRootedValue(cx, fcc);
       }
       RearmStringMethodCells();
@@ -1882,9 +1895,9 @@ bool night_runtime_install_env(JSContext* cx,
     {
       JS::RootedObject arrProto(cx);
       if (JS_GetClassPrototype(cx, JSProto_Array, &arrProto) && arrProto &&
-          JS_GetProperty(cx, arrProto, "push", &v)) {
+          GetOwnData(cx, arrProto, "push", &v)) {
         arm(0);
-        if (JS_GetProperty(cx, arrProto, "pop", &v)) {
+        if (GetOwnData(cx, arrProto, "pop", &v)) {
           arm(1);
         }
         // The pristine Array CONSTRUCTOR (BC_ARRAY_CTOR = 23): the compiled
@@ -1892,7 +1905,7 @@ bool night_runtime_install_env(JSContext* cx,
         // against this cell and nursery-bumps an empty dense array in
         // place; a shadowed/monkeypatched Array is a different value, the
         // compare self-misses, and the site takes the generic construct.
-        if (JS_GetProperty(cx, arrProto, "constructor", &v)) {
+        if (GetOwnData(cx, arrProto, "constructor", &v)) {
           arm(23);
         } else {
           JS_ClearPendingException(cx);
@@ -1912,11 +1925,11 @@ bool night_runtime_install_env(JSContext* cx,
       // the site takes the helper.
       JS::RootedObject funProto(cx);
       if (JS_GetClassPrototype(cx, JSProto_Function, &funProto) && funProto &&
-          JS_GetProperty(cx, funProto, "apply", &v)) {
+          GetOwnData(cx, funProto, "apply", &v)) {
         arm(24);
         // `Function.prototype.call` (BC_FUN_CALL = 25), the `.call` half of
         // the `hasOwnProperty.call(o, k)` arm's identity guard.
-        if (JS_GetProperty(cx, funProto, "call", &v)) {
+        if (GetOwnData(cx, funProto, "call", &v)) {
           arm(25);
         } else {
           JS_ClearPendingException(cx);
@@ -1930,7 +1943,7 @@ bool night_runtime_install_env(JSContext* cx,
       // half of the same guard.
       JS::RootedObject objProto(cx);
       if (JS_GetClassPrototype(cx, JSProto_Object, &objProto) && objProto &&
-          JS_GetProperty(cx, objProto, "hasOwnProperty", &v)) {
+          GetOwnData(cx, objProto, "hasOwnProperty", &v)) {
         arm(26);
       } else {
         JS_ClearPendingException(cx);
@@ -1942,7 +1955,7 @@ bool night_runtime_install_env(JSContext* cx,
           js::math_use_fdlibm_for_sin_cos_tan() ||
           (realm && JS::RealmCreationOptionsRef(realm).alwaysUseFdlibm());
       JS::RootedValue mathv(cx);
-      if (JS_GetProperty(cx, g, "Math", &mathv) && mathv.isObject()) {
+      if (GetOwnData(cx, g, "Math", &mathv) && mathv.isObject()) {
         JS::RootedObject math(cx, &mathv.toObject());
         // Math native-pointer slots: the compiled math arms compare a
         // classified-native callee's JSNative against these, which matches
@@ -1958,7 +1971,7 @@ bool night_runtime_install_env(JSContext* cx,
                         "more MN_* names than the region reserves slots for");
           auto* slots = LinMem<uint32_t>(RtEnv(cx).mathNativesPtr);
           for (int i = 0; i < 13; i++) {
-            if (JS_GetProperty(cx, math, kMnNames[i], &v) && v.isObject() &&
+            if (GetOwnData(cx, math, kMnNames[i], &v) && v.isObject() &&
                 v.toObject().is<JSFunction>() &&
                 v.toObject().as<JSFunction>().isNativeFun()) {
               slots[i] = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(
@@ -1971,19 +1984,19 @@ bool night_runtime_install_env(JSContext* cx,
         static const char* const kMathNames[8] = {
             "sqrt", "abs", "floor", "min", "max", "sin", "cos", "pow"};
         for (int i = 0; i < 8; i++) {
-          if (JS_GetProperty(cx, math, kMathNames[i], &v)) {
+          if (GetOwnData(cx, math, kMathNames[i], &v)) {
             arm(2 + i);
           } else {
             JS_ClearPendingException(cx);
           }
         }
         // clz32 -> BC_MATH_CLZ32 (11), imul -> BC_MATH_IMUL (12).
-        if (JS_GetProperty(cx, math, "clz32", &v)) {
+        if (GetOwnData(cx, math, "clz32", &v)) {
           arm(11);
         } else {
           JS_ClearPendingException(cx);
         }
-        if (JS_GetProperty(cx, math, "imul", &v)) {
+        if (GetOwnData(cx, math, "imul", &v)) {
           arm(12);
         } else {
           JS_ClearPendingException(cx);
@@ -1992,7 +2005,7 @@ bool night_runtime_install_env(JSContext* cx,
         JS_ClearPendingException(cx);
       }
     }
-    if (g && JS_GetProperty(cx, g, "parseInt", &v)) {
+    if (g && GetOwnData(cx, g, "parseInt", &v)) {
       arm(10);
     } else {
       JS_ClearPendingException(cx);
@@ -2009,7 +2022,7 @@ bool night_runtime_install_env(JSContext* cx,
             "toLowerCase", "toUpperCase", "trim",  "startsWith",
             "endsWith",    "includes"};
         for (int i = 0; i < 10; i++) {
-          if (JS_GetProperty(cx, strProto, kStrNames[i], &v)) {
+          if (GetOwnData(cx, strProto, kStrNames[i], &v)) {
             arm(13 + i);
           } else {
             JS_ClearPendingException(cx);
@@ -2045,21 +2058,21 @@ bool night_runtime_install_env(JSContext* cx,
   {
     JS::RootedValue objCtor(cx), reflect(cx), dp(cx), dps(cx), rdp(cx);
     JS::RootedObject globalObj(cx, JS::CurrentGlobalOrNull(cx));
-    if (globalObj && JS_GetProperty(cx, globalObj, "Object", &objCtor) &&
+    if (globalObj && GetOwnData(cx, globalObj, "Object", &objCtor) &&
         objCtor.isObject()) {
       JS::RootedObject octor(cx, &objCtor.toObject());
-      if (JS_GetProperty(cx, octor, "defineProperty", &dp) && dp.isObject()) {
+      if (GetOwnData(cx, octor, "defineProperty", &dp) && dp.isObject()) {
         RtFns(cx).defineProperty = new JS::PersistentRootedValue(cx, dp);
       }
-      if (JS_GetProperty(cx, octor, "defineProperties", &dps) &&
+      if (GetOwnData(cx, octor, "defineProperties", &dps) &&
           dps.isObject()) {
         RtFns(cx).defineProperties = new JS::PersistentRootedValue(cx, dps);
       }
     }
-    if (globalObj && JS_GetProperty(cx, globalObj, "Reflect", &reflect) &&
+    if (globalObj && GetOwnData(cx, globalObj, "Reflect", &reflect) &&
         reflect.isObject()) {
       JS::RootedObject robj(cx, &reflect.toObject());
-      if (JS_GetProperty(cx, robj, "defineProperty", &rdp) && rdp.isObject()) {
+      if (GetOwnData(cx, robj, "defineProperty", &rdp) && rdp.isObject()) {
         RtFns(cx).reflectDefineProperty = new JS::PersistentRootedValue(cx, rdp);
       }
     }
@@ -2074,10 +2087,10 @@ bool night_runtime_install_env(JSContext* cx,
     JS::RootedObject reProto(cx);
     JS::RootedValue ex(cx), te(cx);
     if (JS_GetClassPrototype(cx, JSProto_RegExp, &reProto) && reProto) {
-      if (JS_GetProperty(cx, reProto, "exec", &ex) && ex.isObject()) {
+      if (GetOwnData(cx, reProto, "exec", &ex) && ex.isObject()) {
         RtFns(cx).regExpExec = new JS::PersistentRootedValue(cx, ex);
       }
-      if (JS_GetProperty(cx, reProto, "test", &te) && te.isObject()) {
+      if (GetOwnData(cx, reProto, "test", &te) && te.isObject()) {
         RtFns(cx).regExpTest = new JS::PersistentRootedValue(cx, te);
       }
     }
@@ -2092,7 +2105,7 @@ bool night_runtime_install_env(JSContext* cx,
     JS::RootedObject mapProto(cx);
     JS::RootedValue mg(cx);
     if (JS_GetClassPrototype(cx, JSProto_Map, &mapProto) && mapProto &&
-        JS_GetProperty(cx, mapProto, "get", &mg) && mg.isObject()) {
+        GetOwnData(cx, mapProto, "get", &mg) && mg.isObject()) {
       RtFns(cx).builtins[29] = new JS::PersistentRootedValue(cx, mg);
     }
     if (JS_IsExceptionPending(cx)) {
