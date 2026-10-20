@@ -36,6 +36,7 @@ pub use bbv::{
     build_call_classify_helper, build_elem_append_helper, build_elem_mega_helpers,
     build_ic_set_cold_helper,
 };
+pub mod assemble;
 pub(crate) mod effects;
 pub mod inprocess;
 pub mod regex;
@@ -1863,6 +1864,8 @@ pub fn layout_env(
 
 pub struct TranslateOut {
     pub atoms: translate::AtomTable,
+    /// Base selected after the function list is complete (zero for snapshots).
+    pub table_base: u32,
     pub source_id_to_func: HashMap<u32, Func>,
     /// Per sid, the function actually sitting in the funcref table: the
     /// body itself (single-result ABI) or its `night_abi_sig` adapter
@@ -1896,7 +1899,10 @@ pub struct TranslateOut {
 /// post-translation region (prop-IC ways + cell regions), given its total
 /// size and the string-literal blob size (snapshot flow: the fixed
 /// `env.prop_ic_base`; in-process: a caller allocation that also reserves the
-/// strlit blob after an 8-aligned pad).
+/// strlit blob after an 8-aligned pad). `bind_table`, when present, reserves
+/// exactly the defined-function count after translation and returns the base
+/// added to logical table indices before patching/serialization. Snapshots
+/// pass None because their table indices already belong to the owner module.
 pub fn translate_all(
     m: &mut Module,
     source: &Source,
@@ -1914,6 +1920,7 @@ pub fn translate_all(
     skip: &mut dyn FnMut(SourceObjectId) -> bool,
     on_compiled: &mut dyn FnMut(SourceObjectId, u32),
     post_region: &mut dyn FnMut(u32, u32) -> Result<u32, String>,
+    bind_table: Option<&mut dyn FnMut(u32) -> Result<u32, String>>,
 ) -> Result<TranslateOut, String> {
     let mut atoms = translate::AtomTable::new(names);
 
@@ -2175,6 +2182,38 @@ pub fn translate_all(
         }
     }
 
+    // All bodies, adapters and regex matchers now exist. In-process batches
+    // use a logical table while translating, then reserve exactly this many
+    // defined functions before any absolute indices are serialized or patched.
+    let table_base = if let Some(bind_table) = bind_table {
+        let count = m
+            .funcs
+            .iter()
+            .filter(|f| !matches!(m.funcs[*f], FuncDecl::Import(..)))
+            .count();
+        let count = u32::try_from(count).map_err(|_| "too many in-process functions")?;
+        let base = bind_table(count)?;
+        base.checked_add(count)
+            .ok_or("in-process table range overflow")?;
+        for index in sid_to_index.values_mut() {
+            *index = index
+                .checked_add(base)
+                .ok_or("script table index overflow")?;
+        }
+        for (_, _, latin1, twobyte, _, _) in &mut regex_entries {
+            for index in [latin1, twobyte] {
+                if *index != 0 {
+                    *index = index
+                        .checked_add(base)
+                        .ok_or("regex table index overflow")?;
+                }
+            }
+        }
+        base
+    } else {
+        0
+    };
+
     // Likely-callee sites: patch the expected-funcidx const to the callee's
     // table index and the stub `call` to the callee body. An uncompiled
     // callee leaves the const at u32::MAX (never equals a live funcidx), so
@@ -2400,6 +2439,7 @@ pub fn translate_all(
 
     Ok(TranslateOut {
         atoms,
+        table_base,
         source_id_to_func,
         source_id_to_table_func,
         sid_to_index,

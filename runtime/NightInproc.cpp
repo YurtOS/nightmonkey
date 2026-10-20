@@ -1,13 +1,14 @@
 /* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
  * vim: set ts=8 sts=2 et sw=2 tw=80: */
 
-// In-process AOT compilation (the --night-inprocess shell flag, under
-// wasm-jit-runner): register the script as an AOT root, walk the live heap
-// with the night-snapshot reader, compile the tree into function blobs with
-// night_inproc_build, inject them into the running instance via the runner
-// hostcalls, install the runtime environment, and arm each compiled script's
-// nightFuncIndex. Any failure past registration degrades to the interpreter
-// (fatal under NIGHTMONKEY_DEBUG).
+// In-process AOT compilation (the --night-inprocess shell flag): register the
+// script as an AOT root, walk the live heap with the night-snapshot reader,
+// compile the tree into function blobs with night_inproc_build, bind the
+// table base through its exact-count host callback, and hand the blobs to the
+// host to install at that base, install the runtime environment, and arm
+// each compiled script's nightFuncIndex. Any failure past registration
+// degrades to the interpreter (fatal under NIGHTMONKEY_DEBUG).
+// NIGHT_INPROCESS_STATS=1 in the environment prints a one-line summary.
 
 #include "mozilla/Assertions.h"
 
@@ -16,6 +17,7 @@
 #include <stdlib.h>
 #include <string>
 #include <string.h>
+#include <time.h>
 #include <utility>
 #include <vector>
 
@@ -47,6 +49,12 @@ static uint32_t InprocAlloc(size_t size) {
   return static_cast<uint32_t>((addr + 7) & ~uintptr_t(7));
 }
 
+static double NowMs() {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
+}
+
 static bool InprocFail(const char* what) {
   fprintf(stderr, "night: inprocess: %s; staying interpreted\n", what);
 #ifdef NIGHTMONKEY_DEBUG
@@ -64,13 +72,6 @@ bool js::CompileInProcess(JSContext* cx, JS::Handle<JSScript*> script) {
 
   if (!JS::NightRegisterRoot(cx, script, /* executedAtInit = */ false)) {
     return false;
-  }
-
-  int32_t tableBase = night::InprocHostTableSize();
-  if (tableBase < 0) {
-    return InprocFail(
-        "wasm_table_size hostcall failed (not running under "
-        "wasm-jit-runner?)");
   }
 
   // Self-hosted builtins join the batch: resolve against the live global,
@@ -147,40 +148,28 @@ bool js::CompileInProcess(JSContext* cx, JS::Handle<JSScript*> script) {
     funcptrs[i] = night::kNightHelpers[i].funcptr;
   }
 
+  double t0 = NowMs();
   night_inproc_out_t* out = night_inproc_build(
       walkSource, night_snapshot_walk_root(walk), names, sigs, funcptrs,
       static_cast<uint32_t>(night::kNightHelperCount),
-      static_cast<uint32_t>(tableBase), InprocAlloc);
+      [](uint32_t count, uint32_t* base) -> int32_t {
+        return night::InprocHostReserve(count, base) ? 0 : -1;
+      }, InprocAlloc);
   if (!out) {
+    night::InprocHostRelease();
     night_snapshot_walk_delete(walk);
     return InprocFail("batch build failed");
   }
-
+  double t1 = NowMs();
   uint32_t nblobs = night_inproc_num_blobs(out);
-  std::vector<uint32_t> blobPtrs(nblobs), blobLens(nblobs), got(nblobs);
-  for (uint32_t i = 0; i < nblobs; i++) {
-    blobPtrs[i] = static_cast<uint32_t>(
-        reinterpret_cast<uintptr_t>(night_inproc_blob_ptr(out, i)));
-    blobLens[i] = night_inproc_blob_len(out, i);
-  }
-  uint32_t nextern = night_inproc_num_externs(out);
-  if (night::InprocHostAddFuncs(blobPtrs.data(), blobLens.data(), nblobs,
-                                night_inproc_extern_indices(out), nextern,
-                                got.data()) != 0) {
+  uint32_t tableBase = night_inproc_table_base(out);
+  if (!night::InprocHostInstall(out, tableBase)) {
     night_snapshot_walk_delete(walk);
     night_inproc_delete(out);
-    return InprocFail("wasm_add_funcs2 hostcall failed");
+    return InprocFail("installing the batch failed");
   }
-  for (uint32_t i = 0; i < nblobs; i++) {
-    if (got[i] != static_cast<uint32_t>(tableBase) + i) {
-      fprintf(stderr,
-              "night: inprocess: blob %u landed at table[%u], predicted %u\n",
-              i, got[i], static_cast<uint32_t>(tableBase) + i);
-      night_snapshot_walk_delete(walk);
-      night_inproc_delete(out);
-      return InprocFail("table index prediction mismatch");
-    }
-  }
+  double t2 = NowMs();
+  night_inproc_release_code(out);
 
   // The env_desc wire is documented at NightEnvDescHeaderWords in
   // NightEnv.h: a fixed header, then one word per NIGHT_ENV_REGIONS entry.
@@ -236,7 +225,7 @@ bool js::CompileInProcess(JSContext* cx, JS::Handle<JSScript*> script) {
 #undef NIGHT_INPROC_REGION_WORD
 
   // The installed tables alias the descriptor buffer; `out` is deliberately
-  // never deleted.
+  // retained for its environment descriptor and script map only.
   if (!night_runtime_install_env(cx, env)) {
     night_snapshot_walk_delete(walk);
     return false;
@@ -258,20 +247,22 @@ bool js::CompileInProcess(JSContext* cx, JS::Handle<JSScript*> script) {
     }
     auto* base =
         reinterpret_cast<js::BaseScript*>(static_cast<uintptr_t>(addr));
-    base->setExternalTierWord(static_cast<uint32_t>(tableBase) +
-                            night_inproc_script_blob(out, i));
+    base->setExternalTierWord(tableBase + night_inproc_script_blob(out, i));
     armed++;
   }
   night_snapshot_walk_delete(walk);
 
+  bool stats = getenv("NIGHT_INPROCESS_STATS") != nullptr;
 #ifdef NIGHTMONKEY_DEBUG
-  fprintf(stderr,
-          "night: inprocess batch: %u scripts compiled (%u armed), %u blobs, "
-          "table base %d\n",
-          nscripts, armed, nblobs, tableBase);
-#else
-  (void)armed;
+  stats = true;
 #endif
+  if (stats) {
+    fprintf(stderr,
+            "night: inprocess batch: %u scripts compiled (%u armed), %u "
+            "blobs, table base %u, build %.0f ms, install %.0f "
+            "ms\n",
+            nscripts, armed, nblobs, tableBase, t1 - t0, t2 - t1);
+  }
   night::gNightActivated = true;
   return true;
 }

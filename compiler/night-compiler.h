@@ -177,7 +177,7 @@ void night_source_script_set_body_scope(night_source_t* source,
                                         night_source_object_t scope);
 
 // In-process AOT batch build. Compiles the Source graph into wasm-jit-runner
-// function blobs (blob i is predicted at funcref-table index table_base + i)
+// function blobs (blob i lands at night_inproc_table_base(out) + i)
 // plus a serialized environment descriptor.
 //
 // Helper signature strings ("i(ii)" style): "<ret>(<params>)", one char per
@@ -200,14 +200,17 @@ void night_source_script_set_body_scope(night_source_t* source,
 // The string-literal payload at [strlit_off, strlit_off+strlit_len) must be
 // copied to linear address strlit_addr before compiled code runs.
 typedef uint32_t (*night_alloc_fn)(size_t size);
+// Called once all functions exist; returns 0 on success and writes the base.
+typedef int32_t (*night_reserve_fn)(uint32_t nblobs, uint32_t* base);
 typedef void night_inproc_out_t;
 night_inproc_out_t* night_inproc_build(night_source_t* analysis_source,
                                        night_source_object_t root_id,
                                        const char* const* helper_names,
                                        const char* const* helper_sigs,
                                        const uint32_t* helper_funcptrs,
-                                       uint32_t n_helpers, uint32_t table_base,
+                                       uint32_t n_helpers, night_reserve_fn reserve,
                                        night_alloc_fn alloc);
+uint32_t night_inproc_table_base(night_inproc_out_t* out);
 uint32_t night_inproc_num_blobs(night_inproc_out_t* out);
 const uint8_t* night_inproc_blob_ptr(night_inproc_out_t* out, uint32_t i);
 uint32_t night_inproc_blob_len(night_inproc_out_t* out, uint32_t i);
@@ -218,6 +221,15 @@ uint32_t night_inproc_script_source_id(night_inproc_out_t* out, uint32_t i);
 uint32_t night_inproc_script_blob(night_inproc_out_t* out, uint32_t i);
 const uint8_t* night_inproc_env_desc_ptr(night_inproc_out_t* out);
 uint32_t night_inproc_env_desc_len(night_inproc_out_t* out);
+// The batch assembled into one self-contained module for hosts that mount
+// whole modules (the Yurt JIT mount ABI: shared env.memory,
+// env.__indirect_function_table, helpers as yurt.table "<funcptr>", blob i
+// exported as __jit_entry_<i>). Writes the byte length to *len; the bytes
+// live as long as `out`. Null on failure.
+const uint8_t* night_inproc_module(night_inproc_out_t* out, uint32_t* len);
+// After Install: invalidate blob/module/extern pointers and free their buffers.
+// env_desc and the script map remain valid until night_inproc_delete.
+void night_inproc_release_code(night_inproc_out_t* out);
 void night_inproc_delete(night_inproc_out_t* out);
 
 #ifdef __cplusplus
