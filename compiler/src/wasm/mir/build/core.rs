@@ -230,7 +230,7 @@ impl<'s, 'a> Run<'s, 'a> {
         if ix == 0
             || ix >= self.frame_len()
             || self.write_through(ix)
-            || !(Self::managed_ty(x.ty) || Self::managed_ty(old.ty))
+            || !(Self::managed_ty(x.ty) || Self::managed_ty(old.ty) || old.ty == Ty::Dead)
         {
             return;
         }
@@ -239,7 +239,10 @@ impl<'s, 'a> Run<'s, 'a> {
             .and_then(|n| self.s.live.get(&n))
             .is_some_and(|l| ix < l.len() && !l[ix]);
         // A live scalar replacing a managed value releases it too: `retain_all`
-        // skips scalar slots, so nothing else would clear the frame copy.
+        // skips scalar slots, so nothing else would clear the frame copy. A
+        // slot a block enters dead has no type (`Ty::Dead`), yet a
+        // predecessor's retaining store may have left an object in the frame:
+        // it counts as possibly managed.
         if dead_after || !Self::managed_ty(x.ty) {
             let v = if Self::managed_ty(x.ty) {
                 x.v
