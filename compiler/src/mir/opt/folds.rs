@@ -4,8 +4,7 @@ use super::*;
 
 /// `load_field` through a receiver whose type proves the field's slot
 /// (`ops::slot_of`) lowers to one load and a branch to `ok_clean`; its
-/// `ok_dirty` and `err` edges are dead, and so are the retaining
-/// `frame.store`s before it. It becomes `load_slot` and a jump
+/// `ok_dirty` and `err` edges are dead. It becomes `load_slot` and a jump
 /// to the clean successor with its value, which the value-numbering and
 /// hoisting passes treat as a pure read (MIR-MEMORY.md §1.1). Returns how
 /// many it rewrote.
@@ -29,15 +28,9 @@ pub fn canon_loads(m: &Module, f: &mut Func) -> usize {
         };
         let frame = f.inst_frame[t];
         f.blocks[b].insts.pop();
-        // The retaining stores the builder put before the load for its GC
-        // point (`retain_locals`): a slot read has none. (The lowering
-        // dropped them unwritten after a load that did not call.)
-        while let Some(&i) = f.blocks[b].insts.last() {
-            if !matches!(f.insts[i].op, Opcode::FrameStore(_)) {
-                break;
-            }
-            f.blocks[b].insts.pop();
-        }
+        // The frame stores before it stay: they include the release of a dead
+        // local's old object, and the lowering writes the retaining ones only
+        // where a GC point runs.
         let (l, rs) = f.add_inst(
             b,
             Opcode::LoadSlot(name),
@@ -90,14 +83,9 @@ pub fn canon_stores(m: &Module, f: &mut Func) -> usize {
         }
         let frame = f.inst_frame[t];
         f.blocks[b].insts.pop();
-        // Its retaining stores (`retain_locals`): a slot write has no GC
-        // point.
-        while let Some(&i) = f.blocks[b].insts.last() {
-            if !matches!(f.insts[i].op, Opcode::FrameStore(_)) {
-                break;
-            }
-            f.blocks[b].insts.pop();
-        }
+        // The frame stores before it stay: they include the release of a dead
+        // local's old object, and the lowering writes the retaining ones only
+        // where a GC point runs.
         let (s, _) = f.add_inst(b, Opcode::StoreSlot(name), d.args.clone(), &[], vec![]);
         let (j, _) = f.add_inst(b, Opcode::Jump, vec![], &[], vec![d.succs[0].clone()]);
         f.inst_frame[s] = frame;

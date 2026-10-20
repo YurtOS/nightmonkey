@@ -2,6 +2,7 @@
 """Execute the guest compiler's options contract against a built shell."""
 
 import argparse
+import json
 import os
 from pathlib import Path
 import re
@@ -52,6 +53,28 @@ def main():
     counted = re.findall(r"^night: census kind 98 id \d+ n ([1-9]\d*)$", result.stderr, re.M)
     assert counted, "no kind-98 block census counts were printed:\n" + result.stderr[-2000:]
     print(f"PASS block census: {len(counted)} blocks counted")
+
+    # A callee with direct eval is never inlined: the eval reads the caller's
+    # interpreter frame, which an inlined callee does not have. `caller` has no
+    # eval of its own, so any `call.eval` in its MIR came from inlining.
+    eval_fixture = fixture.with_name("mir-eval-inline.js")
+    viz = build / "eval-inline.viz"
+    viz.unlink(missing_ok=True)
+    result = subprocess.run(
+        [str(wrapper), "--night-options", f"--pipeline mir --viz {viz}", str(eval_fixture)],
+        env=env, capture_output=True, text=True, timeout=600,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    seen = False
+    for line in viz.read_text().splitlines():
+        if not line.startswith("{"):
+            continue
+        func = json.loads(line)
+        if func.get("name") == "caller":
+            seen = True
+            assert "call.eval" not in func["mir"], "an eval callee was inlined into caller"
+    assert seen, "caller was not compiled by MIR"
+    print("PASS direct eval is not inlined")
 
 
 if __name__ == "__main__":
