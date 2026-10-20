@@ -6,7 +6,7 @@
 # Both lanes skip tests/wasi-jit-test-excludes.txt (tests the wasm32-wasi
 # shell cannot run at all). The AOT lane (default) compiles every test
 # in-process and also skips tests/jit-test-excludes.txt; NIGHT_INPROCESS_OFF=1
-# runs the same shell with the tier off (the baseline lane).
+# runs the same shell with the tier off (the interpreter lane).
 # Automation output is required to verify a nonempty executed suite.
 set -euo pipefail
 

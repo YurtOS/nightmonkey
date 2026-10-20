@@ -78,6 +78,18 @@ def main():
     assert seen, "caller was not compiled by MIR"
     print("PASS direct eval is not inlined")
 
+    # A function with thousands of locals is too large for the MIR tier's
+    # liveness (the guest aborted out of memory on tens of thousands): it is
+    # declined, not compiled, and still runs.
+    large = fixture.with_name("mir-large-function.js")
+    result = subprocess.run(
+        [str(wrapper), "--night-options", "--pipeline mir --dump-tiers", str(large)],
+        env=env, capture_output=True, text=True, timeout=600,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert re.search(r"too large for the MIR tier", result.stderr), result.stderr[-2000:]
+    print("PASS a very large function is declined, not compiled")
+
 
 if __name__ == "__main__":
     main()
