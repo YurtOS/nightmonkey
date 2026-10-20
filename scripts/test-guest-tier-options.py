@@ -71,8 +71,10 @@ def main():
             continue
         func = json.loads(line)
         if func.get("name") == "caller":
+            mir = func.get("mir")
+            assert mir, "caller was not compiled by MIR"
             seen = True
-            assert "call.eval" not in func["mir"], "an eval callee was inlined into caller"
+            assert "call.eval" not in mir, "an eval callee was inlined into caller"
     assert seen, "caller was not compiled by MIR"
     print("PASS direct eval is not inlined")
 

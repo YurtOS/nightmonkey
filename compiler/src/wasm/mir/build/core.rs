@@ -219,8 +219,8 @@ impl<'s, 'a> Run<'s, 'a> {
     }
 
     /// A local that held, or now holds, a managed value, overwritten by a
-    /// value it is never read again from: retain the new value (`undefined`
-    /// for a scalar, which is dead anyway) in its frame slot, like
+    /// value it is never read again from (or by a scalar, dead or not): retain
+    /// the new value (`undefined` for a scalar) in its frame slot, like
     /// `retain_all`, lazily. An earlier retaining store may have put the old
     /// object there, and the frame is all that keeps it, so an exit that
     /// finds the local dead would leave it alive. Baseline's write of the new
@@ -238,7 +238,9 @@ impl<'s, 'a> Run<'s, 'a> {
             .next_pc
             .and_then(|n| self.s.live.get(&n))
             .is_some_and(|l| ix < l.len() && !l[ix]);
-        if dead_after {
+        // A live scalar replacing a managed value releases it too: `retain_all`
+        // skips scalar slots, so nothing else would clear the frame copy.
+        if dead_after || !Self::managed_ty(x.ty) {
             let v = if Self::managed_ty(x.ty) {
                 x.v
             } else {

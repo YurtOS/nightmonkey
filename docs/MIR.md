@@ -1125,9 +1125,9 @@ MIR builder meets one of these** (under `pipeline=mir`; BASELINE.md §5):
 - a generator or async body that reads its actuals past its formals (a
   resume re-enters with none)
 
-(Generator and async bodies, `arguments` and rest, `with`, direct eval
-and the environment ops were on this list; they compile now: M5d, M5i,
-M5j.)
+(Generator and async bodies, `arguments` and rest, `with` and the
+environment ops were on this list; they compile now: M5d, M5i, M5j. Direct
+eval compiles upstream; this fork declines it.)
 
 Try/catch is supported (§5.3). There is no hidden decline for inlining.
 The MIR builder does not inline anything, so calls in a MIR-compiled

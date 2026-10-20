@@ -34,8 +34,8 @@ MIR.md changes that follow.
 - **Two gates, but only one lasting.** A script runs the MIR pipeline
   only if baseline supports every op in it and the MIR builder does too.
   Baseline supports every JSOp except `ForceInterpreter` (§6) and, in this
-  fork, the four direct-eval ops (the script is interpreted; see §Direct
-  eval). After that its gate is vacuous and the MIR
+  fork, the four direct-eval ops (the script is interpreted; see §6 and the
+  "Direct eval" item in §7). After that its gate is vacuous and the MIR
   builder's gate is the only real one.
 
 ## 1. What exists and what we reuse
@@ -566,7 +566,9 @@ Deviations from the plan above, and details it did not settle:
   It declines only when actuals are read after the first suspend. The
   frontend reads them in the prologue, and the resume path stages
   undefined formals.
-- **Direct eval** is `NightDirectEval`, a copy of the engine's
+- **Direct eval** is declined in this fork (`unsupported op`; such a script
+  is interpreted and never inlined). Upstream compiles it through
+  `NightDirectEval`, a copy of the engine's
   `EvalKernel` (DIRECT_EVAL) in the MPL `NightOpsInterp.cpp` that takes
   the caller's script, pc and env as arguments. It omits the eval cache
   and the JSON fast path.
@@ -590,7 +592,8 @@ Deviations from the plan above, and details it did not settle:
 - **The baseline-tier lane excludes ten more tests**
   (`tests/jit-test-excludes-baseline.txt`). They are frame-introspection
   and decompiled-message tests that pass in the legacy lane only because
-  BBV leaves their eval-using scripts interpreted.
+  the old backend left their eval-using scripts interpreted; this fork's
+  eval decline does the same.
 - **The resume entry (for M1).** `translate_script` takes a MIR body's
   resume words.
   - With any, the body gains an `ARGC_RESUME_BIT` fork ahead of the

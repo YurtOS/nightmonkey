@@ -1,4 +1,4 @@
-// new.target read after a guard-failure exit that follows a collection: the
+// new.target read after a speculation-failure exit that follows a collection: the
 // baseline frame must hold the entry's new.target as the collection
 // forwarded it, not the entry parameter's pre-collection copy.
 var nt;
@@ -7,7 +7,7 @@ for (var i = 0; i < 2000; i++) objs.push(i < 1990 ? { p: i } : { q: 1, p: i });
 function F(k) {
   minorgc();
   var o = objs[k];
-  var p = o.p; // layout guard: fails for the last objects, after the minorgc
+  var p = o.p; // a speculation exit follows the minorgc above
   minorgc();
   var t = new.target;
   return [t === nt, p];
