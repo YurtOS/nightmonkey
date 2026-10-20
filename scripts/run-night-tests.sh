@@ -5,20 +5,35 @@
 # exits 0.
 #
 #   scripts/run-night-tests.sh [build-dir]
-set -uo pipefail
+set -euo pipefail
 
 here=$(cd "$(dirname "$0")/.." && pwd)
 build=${1:-$here/build}
+if [ ! -x "$build/bin/inproc-shell.sh" ]; then
+  echo "missing executable shell wrapper: $build/bin/inproc-shell.sh" >&2
+  exit 2
+fi
+if [ ! -d "$here/tests/jit-test" ]; then
+  echo "missing regression test directory: $here/tests/jit-test" >&2
+  exit 2
+fi
+tests=$(mktemp)
+trap 'rm -f "$tests"' EXIT
+find "$here/tests/jit-test" -name '*.js' -type f -print0 > "$tests"
+if [ ! -s "$tests" ]; then
+  echo "no regression tests found in $here/tests/jit-test" >&2
+  exit 2
+fi
 fail=0
 pass=0
-for t in $(find "$here/tests/jit-test" -name '*.js' | sort); do
+while IFS= read -r -d '' t; do
   if out=$("$build/bin/inproc-shell.sh" "$t" 2>&1); then
     pass=$((pass + 1))
   else
     fail=$((fail + 1))
     echo "FAIL ${t#$here/}"
-    echo "$out" | grep -v 'neither Wasm' | head -5
+    printf '%s\n' "$out"
   fi
-done
+done < "$tests"
 echo "night tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -1,0 +1,27 @@
+name: Full jstests
+
+on:
+  schedule:
+    - cron: '23 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Scheduled runs use the default branch (yurt). Do not cancel long suites
+# when a newer commit lands; preserve the completed result for each run.
+concurrency:
+  group: jstests-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  aot:
+    uses: ./.github/workflows/engine.yml
+    with:
+      lane: aot
+      full_jstests: true
+  interpreter:
+    uses: ./.github/workflows/engine.yml
+    with:
+      lane: interpreter
+      full_jstests: true

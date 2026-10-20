@@ -1,0 +1,137 @@
+name: Engine integration
+
+on:
+  workflow_call:
+    inputs:
+      full_jstests:
+        type: boolean
+        default: false
+      lane:
+        description: 'aot, interpreter, or both'
+        type: string
+        default: both
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+# Resolve the supported engine branch once and record its exact SHA.
+# Every engine cache includes that revision; no neighboring build is reused.
+env:
+  FIREFOX_REPO: bytecodealliance/firefox
+  FIREFOX_REF: wasi-ff147
+  SM_OBJDIR: obj-nightmonkey-sm
+
+jobs:
+  jit-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      CI_LANE: ${{ inputs.lane }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Rust from rust-toolchain.toml
+        run: |
+          rustup show
+          rustup target add wasm32-wasip1
+          rustup component add rust-src
+      - name: Prepare logs
+        run: mkdir -p "$RUNNER_TEMP/nightmonkey-logs"
+
+      - name: Resolve the SpiderMonkey revision
+        id: smrev
+        run: |
+          sha=$(git ls-remote "https://github.com/$FIREFOX_REPO" "refs/heads/$FIREFOX_REF" | cut -f1)
+          if [ -z "$sha" ]; then
+            echo "::error::branch $FIREFOX_REF not found on https://github.com/$FIREFOX_REPO"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "SpiderMonkey: $FIREFOX_REPO@$sha" | tee "$RUNNER_TEMP/nightmonkey-logs/engine.txt"
+          echo "SpiderMonkey: $FIREFOX_REPO@$sha" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cache the SpiderMonkey checkout
+        id: cache-src
+        uses: actions/cache@v4
+        with:
+          path: firefox
+          key: firefox-src-${{ steps.smrev.outputs.sha }}
+
+      - name: Fetch SpiderMonkey (shallow)
+        if: steps.cache-src.outputs.cache-hit != 'true'
+        run: |
+          git init firefox
+          cd firefox
+          git remote add origin "https://github.com/$FIREFOX_REPO"
+          git fetch --depth 1 origin "${{ steps.smrev.outputs.sha }}"
+          git checkout --detach FETCH_HEAD
+
+      - name: Verify cached engine identity
+        env:
+          EXPECTED_SHA: ${{ steps.smrev.outputs.sha }}
+        run: test "$(git -C firefox rev-parse HEAD)" = "$EXPECTED_SHA"
+
+      - name: Cache the mach toolchains
+        uses: actions/cache@v4
+        with:
+          path: ~/.mozbuild
+          key: mozbuild-${{ runner.os }}-${{ steps.smrev.outputs.sha }}
+          restore-keys: mozbuild-${{ runner.os }}-
+
+      - name: Bootstrap SpiderMonkey
+        run: |
+          cd firefox
+          ./mach --no-interactive bootstrap --application-choice=js
+          # mach bootstrap only fetches host-target toolchains; the wasm32-wasi
+          # sysroot (crt1.o, libc) must be fetched explicitly into ~/.mozbuild.
+          cd ~/.mozbuild && "$GITHUB_WORKSPACE/firefox/mach" --log-no-times artifact toolchain --from-build sysroot-wasm32-wasi
+
+      - name: Cache the SpiderMonkey objdir
+        uses: actions/cache@v4
+        with:
+          path: firefox/${{ env.SM_OBJDIR }}
+          key: firefox-obj-v3-ubuntu-24.04-${{ steps.smrev.outputs.sha }}-${{ hashFiles('rust-toolchain.toml', 'spidermonkey/mozconfig', 'configs/**', 'scripts/build-spidermonkey.sh') }}
+
+      - name: Build SpiderMonkey
+        run: scripts/build-spidermonkey.sh firefox
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> build/cargo
+          key: engine-ubuntu-24.04
+
+      - name: Build NightMonkey
+        id: build
+        run: |
+          cmake -S . -B build -DSPIDERMONKEY_DIST="$GITHUB_WORKSPACE/firefox/$SM_OBJDIR/dist"
+          cmake --build build
+          test -x build/bin/inproc-shell.sh
+
+      - name: Local regressions
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 65
+        run: scripts/ci-suite.sh local "$CI_LANE"
+
+      - name: jit-tests
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 125
+        run: scripts/ci-suite.sh jit "$CI_LANE"
+
+      - name: Full jstests
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.full_jstests }}
+        timeout-minutes: 245
+        run: scripts/ci-suite.sh jstests "$CI_LANE"
+
+      - name: Upload execution logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightmonkey-execution-${{ inputs.lane }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nightmonkey-logs
+          if-no-files-found: error
+          retention-days: 7
