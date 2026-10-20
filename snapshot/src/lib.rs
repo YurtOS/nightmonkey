@@ -8,6 +8,7 @@
 //! reads cannot soundly derive (gcthing trace kinds, scope bindings) come
 //! from the registration digest the engine serializes.
 
+#[cfg(target_family = "wasm")]
 pub mod ffi;
 pub mod layout;
 pub mod mem;
