@@ -190,19 +190,49 @@ impl<'s, 'a> Run<'s, 'a> {
     pub(super) fn retain_all(&mut self) {
         for ix in 1..self.frame_len().min(self.st.len()) {
             let x = self.st[ix];
-            let managed = matches!(
-                x.ty,
-                Ty::Val(_)
-                    | Ty::Fn(_)
-                    | Ty::Obj(..)
-                    | Ty::ObjHint(_)
-                    | Ty::Ctor(..)
-                    | Ty::Native
-                    | Ty::Ta(_)
-            );
-            if !managed {
+            if !Self::managed_ty(x.ty) {
                 continue;
             }
+            self.f.add_inst(
+                self.cur,
+                Opcode::FrameStore(u32::try_from(ix).unwrap()),
+                vec![x.v],
+                &[],
+                vec![],
+            );
+        }
+    }
+
+    /// Whether a value of type `t` can hold a GC thing, so the frame must
+    /// keep it visible to the GC while its local holds it.
+    fn managed_ty(t: Ty) -> bool {
+        matches!(
+            t,
+            Ty::Val(_)
+                | Ty::Fn(_)
+                | Ty::Obj(..)
+                | Ty::ObjHint(_)
+                | Ty::Ctor(..)
+                | Ty::Native
+                | Ty::Ta(_)
+        )
+    }
+
+    /// A managed local overwritten by a value it is never read again from:
+    /// retain the new value in its frame slot (like `retain_all`, lazily). An
+    /// earlier retaining store may have put the old object there, and the
+    /// frame is all that keeps it, so an exit that finds the local dead would
+    /// leave it alive. Baseline's write of the new value releases it.
+    fn retain_dead_overwrite(&mut self, ix: usize) {
+        let x = self.st[ix];
+        if ix == 0 || ix >= self.frame_len() || self.write_through(ix) || !Self::managed_ty(x.ty) {
+            return;
+        }
+        let dead_after = self
+            .next_pc
+            .and_then(|n| self.s.live.get(&n))
+            .is_some_and(|l| ix < l.len() && !l[ix]);
+        if dead_after {
             self.f.add_inst(
                 self.cur,
                 Opcode::FrameStore(u32::try_from(ix).unwrap()),
@@ -382,6 +412,7 @@ impl<'s, 'a> Run<'s, 'a> {
             );
         }
         self.st[ix] = x;
+        self.retain_dead_overwrite(ix);
     }
 
     pub(super) fn arg_ix(&self, n: u32) -> usize {

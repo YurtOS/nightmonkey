@@ -1090,6 +1090,13 @@ fn apply_plan(f: &mut Func, p: &Plan, inst_block: &mut BTreeMap<Inst, Block>, un
         let (j, _) = f.add_inst(b, Opcode::Jump, vec![], &[], vec![e]);
         f.inst_frame[j] = frame;
     }
+    // A retaining store still overwrites its slot: with `undefined`, so the
+    // object the local held before is released as in baseline.
+    for &i in fstores.iter() {
+        let b = inst_block[&i];
+        let undef = crate::mir::pea::insert_undef_before(f, b, i);
+        f.insts[i].args[0] = undef;
+    }
     // And the rest of its uses go.
     let slot_stores = stores
         .iter()
@@ -1098,7 +1105,6 @@ fn apply_plan(f: &mut Func, p: &Plan, inst_block: &mut BTreeMap<Inst, Block>, un
     let dead: BTreeSet<Inst> = stamps
         .iter()
         .chain(convs.iter())
-        .chain(fstores.iter())
         .chain(loads.iter())
         .copied()
         .chain(slot_stores)

@@ -325,6 +325,10 @@ impl<'a> Lower<'a> {
                 b
             }
         };
+        // The retaining stores still pending belong to this frame: write them
+        // before the baseline body runs on it.
+        self.flush_retain(None)?;
+        self.pending_retain.clear();
         let mut args = vec![self.i32c(w.encode() as u32)];
         args.extend(ops.iter().zip(dead).filter(|(_, &d)| !d).map(|(&v, _)| v));
         self.terminate(Terminator::Br {

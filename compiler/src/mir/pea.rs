@@ -915,33 +915,15 @@ fn pea_one(m: &Module, f: &mut Func, cfg: &Cfg, t: Inst, tried: &mut BTreeSet<In
         match k {
             UseKind::Init | UseKind::Guard => to_jump.push(i),
             UseKind::Store if f.insts[i].op.is_terminator() => to_jump.push(i),
-            UseKind::Store
-            | UseKind::Stamp
-            | UseKind::Conv
-            | UseKind::Load
-            | UseKind::FrameStore => {
+            UseKind::Store | UseKind::Stamp | UseKind::Conv | UseKind::Load => {
                 dead.insert(i);
             }
-            UseKind::Enter => {
+            UseKind::Enter | UseKind::FrameStore => {
                 // The callee's frame slot: a placeholder (its exits write
-                // their own operands).
-                let undef = f
-                    .add_inst(
-                        inst_block[&i],
-                        Opcode::ConstVal(crate::mir::ops::ConstVal::Undefined),
-                        vec![],
-                        &[Type::val(TagSet::prims(crate::opsem::PRIM_UNDEFINED))],
-                        vec![],
-                    )
-                    .1[0];
-                let b = inst_block[&i];
-                f.blocks[b].insts.pop();
-                let pos = f.blocks[b].insts.iter().position(|&x| x == i).unwrap();
-                let ci = match f.values[undef].def {
-                    ValueDef::Result(ci, _) => ci,
-                    _ => unreachable!(),
-                };
-                f.blocks[b].insts.insert(pos, ci);
+                // their own operands). A retaining store still overwrites
+                // its slot, so the object the local held before is released
+                // as in baseline.
+                let undef = insert_undef_before(f, inst_block[&i], i);
                 for a in &mut f.insts[i].args {
                     if vvals.contains(a) {
                         *a = undef;
@@ -986,6 +968,27 @@ fn pea_one(m: &Module, f: &mut Func, cfg: &Cfg, t: Inst, tried: &mut BTreeSet<In
     }
     tried.insert(t);
     true
+}
+
+/// A fresh `undefined` constant placed just before `i` in block `b`.
+pub(crate) fn insert_undef_before(f: &mut Func, b: Block, i: Inst) -> Value {
+    let undef = f
+        .add_inst(
+            b,
+            Opcode::ConstVal(crate::mir::ops::ConstVal::Undefined),
+            vec![],
+            &[Type::val(TagSet::prims(crate::opsem::PRIM_UNDEFINED))],
+            vec![],
+        )
+        .1[0];
+    f.blocks[b].insts.pop();
+    let pos = f.blocks[b].insts.iter().position(|&x| x == i).unwrap();
+    let ci = match f.values[undef].def {
+        ValueDef::Result(ci, _) => ci,
+        _ => unreachable!(),
+    };
+    f.blocks[b].insts.insert(pos, ci);
+    undef
 }
 
 /// Replace, in block `b`, uses of the virtual part's aliases by the real
