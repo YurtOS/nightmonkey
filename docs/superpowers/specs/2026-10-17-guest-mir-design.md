@@ -18,7 +18,7 @@ guest execution or the engine ABI. Upstream performance claims are unverified.
 No speedup is a release acceptance criterion until measured locally.
 
 Compilation must call the compiler linked into the guest. Retain and adapt
-`night_inproc_build`, `night_inproc_max_blobs`, `night_inproc_module`, the compiler
+`night_inproc_build`, `night_inproc_module`, the compiler
 C header, snapshot FFI, guest staticlib, and guest build target. Do not introduce
 `night_compile` or `InprocHostCompile`, including in the runner lane.
 

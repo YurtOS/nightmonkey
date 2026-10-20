@@ -301,11 +301,11 @@ be enforced or redesigned before runtime destruction and recreation.
 ## 10. Generators, async, exceptions, and regexps
 
 Generator and async bodies are supported by the baseline tier
-(`wasm/baseline/codegen/resume.rs`) and `NightGenerator.cpp`. Suspension stores locals and operands in an engine object
-using an AOT-owned layout; resume re-enters the same compiled script. An
-AOT-suspended generator cannot resume in the interpreter. Bodies needing an
-arguments object remain unsupported, and resumable bodies do not receive the
-ordinary optimistic specialization.
+(`wasm/baseline/codegen/resume.rs`) and `NightGenerator.cpp`. Suspension stores
+locals and operands in an engine object using an AOT-owned layout; resume
+re-enters the same compiled script. An AOT-suspended generator cannot resume in
+the interpreter. A generator that reads its actuals is declined, and resumable
+bodies do not receive the ordinary optimistic specialization.
 
 Try notes feed CFG and frame construction. Calls and helpers propagate pending
 exceptions through the error result. Inlining rejects contexts whose exception
@@ -330,6 +330,20 @@ no run handles declines the script with a `BUG:` reason. Explicit declines are
 `ForceInterpreter` and the eval variants (an `unsupported op`, because eval reads
 the caller's interpreter frame). MIR declines anything its builder does not
 accept, and the script falls back to baseline.
+Compiled frames are not interpreter frames, and some observable behavior
+follows from that. These are designed-out capabilities, kept covered by the
+interpreter lane (`tests/jit-test-excludes.txt`):
+
+- The Debugger does not see compiled frames: hooks such as `onExceptionUnwind`
+  are not called for exceptions thrown in compiled code, and `evalInFrame`
+  finds no frame. This is why direct eval is declined: it reads the caller's
+  interpreter frame.
+- A compiled frame carries no pc, so an error message that names an expression
+  prints the value instead (`[] is not ...` where the interpreter prints
+  `arr is not ...`). The text is implementation-defined.
+- An `arguments` element that the interpreter keeps alive after `delete` or a
+  strict `defineProperty` may be released earlier. The specification allows it.
+
 Environment gates reject frame shapes the runtime cannot model.
 
 Opcode knowledge is also duplicated in analysis transfer, effects, splice
