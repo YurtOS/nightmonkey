@@ -12,4 +12,5 @@ var r = 0;
 for (var m = 0; m < 16; m++) {
   try { var k = new K2(m, m); r += typeof k.r === "string" ? 1 : 0; } catch (err) { r += 100; }
 }
-assertEq(typeof r, "number");
+// All sixteen constructions succeed and build a string: none throws.
+assertEq(r, 16);
