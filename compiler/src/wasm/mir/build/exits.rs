@@ -213,7 +213,7 @@ impl<'s, 'a> Run<'s, 'a> {
             let in_frame = self.write_through(i);
             let is_dead =
                 in_frame || x.ty == Ty::Dead || live.as_ref().is_some_and(|l| i < l.len() && !l[i]);
-            if is_dead && !in_frame && self.overwritten.contains(&i) {
+            if is_dead && !in_frame && !self.is_formal(i) && self.overwritten.contains(&i) {
                 // The frame may hold an object this local no longer does:
                 // the exit overwrites it (baseline would, before any read).
                 ops.push(self.release_undef());

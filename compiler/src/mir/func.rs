@@ -28,9 +28,23 @@ pub struct FrameShape {
     pub locals: u32,
     /// Operand-stack depth at each pc an exit or onramp names.
     pub depths: BTreeMap<Pc, u32>,
+    /// Frame slots that may hold the elided `arguments` placeholder (a
+    /// value standing for an object no one made): an exit that names one
+    /// needs the builder's `args.object` first, so the optimizer builds no
+    /// exit of its own over a frame with a live one.
+    pub elided_args: std::collections::BTreeSet<u32>,
 }
 
 impl FrameShape {
+    /// Whether any live slot (per `slots`, one flag per exit operand) may hold
+    /// the elided `arguments` placeholder.
+    pub fn live_elided_args(&self, slots: &[bool]) -> bool {
+        slots
+            .iter()
+            .enumerate()
+            .any(|(i, &live)| live && self.elided_args.contains(&(i as u32)))
+    }
+
     /// Operand count of an exit at `pc`: `this`, formals, locals, rval,
     /// stack.
     pub fn exit_arity(&self, pc: Pc) -> Option<usize> {

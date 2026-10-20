@@ -222,6 +222,7 @@ pub fn hoist_guards(m: &Module, f: &mut Func) -> usize {
         };
         if entry.slots.iter().filter(|&&x| x).count() != params.len()
             || f.frame.exit_arity(entry.pc) != Some(entry.slots.len())
+            || f.frame.live_elided_args(&entry.slots)
         {
             continue;
         }
@@ -495,6 +496,7 @@ pub fn hoist_reads(m: &Module, f: &mut Func) -> usize {
         };
         if entry.slots.iter().filter(|&&x| x).count() != params.len()
             || f.frame.exit_arity(entry.pc) != Some(entry.slots.len())
+            || f.frame.live_elided_args(&entry.slots)
         {
             continue;
         }

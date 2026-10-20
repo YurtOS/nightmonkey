@@ -173,6 +173,19 @@ function overwriteLiveUndefinedThenScalar(k) {
   gc();
   return finalizeCount() - c0;
 }
+// A loop copies the object into a dead local and overwrites the original: the
+// builder meets the copy before it knows the original is overwritten by the
+// previous iteration, so it needs a second pass over the loop.
+function copyInLoop() {
+  gc();
+  var o = makeFinalizeObserver();
+  var c0 = finalizeCount();
+  var z = 0;
+  for (var w = 0; w < 2; w++) { z = o; o = {}; }
+  churn();
+  gc();
+  return finalizeCount() - c0;
+}
 // Dead through a branch rather than an overwrite: the last use is before the
 // second call.
 function lastUseThenCall(flag) {
@@ -210,6 +223,7 @@ for (var n = 0; n < 40; n++) {
   assertEq(overwriteThenAdd(), 1);
   assertEq(overwriteLoopThenCompare(3), 1);
   assertEq(overwriteInFinally(), 1);
+  assertEq(copyInLoop(), 1);
   assertEq(overwriteLiveObject(n & 1), 1);
   assertEq(overwriteLiveUndefinedThenScalar(n & 1), 1);
   assertEq(overwritePolymorphic(n & 1 ? 5 : 'str'), 1);

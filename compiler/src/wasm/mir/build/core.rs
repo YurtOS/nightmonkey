@@ -7,11 +7,13 @@ impl<'s, 'a> Run<'s, 'a> {
         s: &'s Shape<'a>,
         table: &'s BTreeMap<Pc, Vec<Ty>>,
         hoist: &'s BTreeMap<(Pc, usize), Ty>,
+        released: &Released,
     ) -> Run<'s, 'a> {
         let frame = FrameShape {
             formals: s.nargs,
             locals: s.nlocals,
             depths: BTreeMap::new(),
+            elided_args: Default::default(),
         };
         let mut f = mir::Func::new(s.sid, frame);
         let cur = f.add_block();
@@ -43,8 +45,8 @@ impl<'s, 'a> Run<'s, 'a> {
             throw_blk: None,
             renames: vec![],
             next_pc: None,
-            overwritten: std::collections::BTreeSet::new(),
-            retained_once: std::collections::BTreeSet::new(),
+            overwritten: released.overwritten.clone(),
+            retained_once: released.retained_once.clone(),
             block_undef: None,
             likely_targets: vec![],
             gname_vals: BTreeMap::new(),
@@ -196,7 +198,7 @@ impl<'s, 'a> Run<'s, 'a> {
             let v = if Self::managed_ty(x.ty) {
                 self.retained_once.insert(ix);
                 x.v
-            } else if self.overwritten.contains(&ix) && !self.write_through(ix) {
+            } else if self.overwritten.contains(&ix) && !self.is_formal(ix) {
                 self.release_undef()
             } else {
                 continue;
@@ -263,6 +265,7 @@ impl<'s, 'a> Run<'s, 'a> {
         let x = self.st[ix];
         if ix == 0
             || ix >= self.frame_len()
+            || self.is_formal(ix)
             || self.write_through(ix)
             || !(Self::managed_ty(x.ty) || Self::managed_ty(old.ty) || old.ty == Ty::Dead)
         {
@@ -440,6 +443,14 @@ impl<'s, 'a> Run<'s, 'a> {
         (2 + self.s.nargs + self.s.nlocals) as usize
     }
 
+    /// Whether slot `ix` is a formal: its frame slot is where the caller put
+    /// the actual, which `Rest`, `arguments` and spread forwarding read, so a
+    /// release store must not clobber it. (The caller keeps what it passed
+    /// rooted for the call; baseline shares the slot.)
+    pub(super) fn is_formal(&self, ix: usize) -> bool {
+        ix >= 1 && ix <= self.s.nargs as usize
+    }
+
     /// Whether frame slot `ix` is written through: only the formals of a
     /// mapped `arguments`, which aliases them. Its frame copy then always
     /// holds its value, so exits leave it (§5.1). Everything else stays in
@@ -461,6 +472,7 @@ impl<'s, 'a> Run<'s, 'a> {
         };
         if self.args_placeholder == Some(x.v) || self.args_copies.contains(&x.v) {
             self.args_locals.insert(ix);
+            self.f.frame.elided_args.insert(u32::try_from(ix).unwrap());
         }
         if x.ty != Ty::Dead && self.write_through(ix) {
             self.inst(
