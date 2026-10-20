@@ -64,6 +64,19 @@ function overwriteDouble() {
   collect();
   return finalizeCount() - c0;
 }
+// Overwritten by a scalar that is still read afterwards: the slot is live, but
+// the frame must not keep the old object.
+function overwriteLiveScalar() {
+  gc();
+  var o = makeFinalizeObserver();
+  var c0 = finalizeCount();
+  o = 5;
+  var r = o + 1;
+  o = 6;
+  assertEq(r, 6);
+  collect();
+  return finalizeCount() - c0;
+}
 // Dead through a branch rather than an overwrite: the last use is before the
 // second call.
 function lastUseThenCall(flag) {
@@ -94,6 +107,7 @@ for (var n = 0; n < 40; n++) {
   assertEq(overwriteInt(), 1);
   assertEq(overwriteBool(), 1);
   assertEq(overwriteDouble(), 1);
+  assertEq(overwriteLiveScalar(), 1);
   assertEq(lastUseThenCall(n & 1), 1);
   assertEq(stillHeld(), 0);
 }
