@@ -62,3 +62,10 @@ typedarray/resizable-typedarray-set-elem-with-sab.js
 
 # Excluded by the SpiderMonkey CI for every configuration (long-running).
 wasm/atomicity.js
+
+# Bare-engine observers of the external-compiler hooks (YurtOS/firefox#3): they
+# assert that no external tier is installed. The NightMonkey shell installs its
+# hook table in both lanes, so they cannot pass here; they run against the bare
+# engine only.
+external-compiler/assign-slot-policy.js
+external-compiler/object-fuse-notifications.js
