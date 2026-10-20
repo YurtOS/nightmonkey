@@ -32,6 +32,9 @@ static void JitError(const char* what, int32_t rc) {
 }
 
 bool js::night::InprocHostReserve(uint32_t nblobs, uint32_t* tableBase) {
+  // One reservation at a time: drop one still held rather than leak its fd
+  // (and its table range) by overwriting it below.
+  InprocHostRelease();
   struct yurt_jit_info info;
   int32_t fd = yurt_jit_reserve(nblobs, &info);
   if (fd < 0) {

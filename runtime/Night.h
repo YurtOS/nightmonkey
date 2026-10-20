@@ -106,13 +106,12 @@ static constexpr size_t kWizenThisSlots = 8;
 // `script`'s tree and arm dispatch into the injected bodies. One batch per
 // process; later calls are no-ops. Failures degrade to the interpreter
 // (returning true); false means a real error (pending exception).
-bool CompileInProcess(JSContext* cx, JS::Handle<JSScript*> script);
-
-// Compiler options for the in-process batch: the nightmonkey CLI's
-// compiler flags, space-separated (e.g. "--pipeline baseline
-// --dump-tiers"). Null or empty means the defaults. The string must outlive
-// the batch build.
-void SetInprocOptions(const char* options);
+//
+// `options` is the compiler option string for the batch (the nightmonkey
+// CLI's flags, space-separated, e.g. "--pipeline baseline --dump-tiers");
+// null means the defaults. It need only live for the call.
+bool CompileInProcess(JSContext* cx, JS::Handle<JSScript*> script,
+                      const char* options);
 #endif
 
 }  // namespace js

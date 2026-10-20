@@ -602,167 +602,17 @@ mod tests {
     use crate::bytecode::JSOp;
     use crate::source::SourceObject;
 
-    const HELPER_NAMES: &[&str] = &[
-        "night_runtime_add",
-        "night_runtime_concat",
-        "night_runtime_call",
-        "night_runtime_call_iter",
-        "night_runtime_native_dispatch",
-        "night_runtime_apply_fwd",
-        "night_runtime_construct",
-        "night_runtime_set_property",
-        "night_runtime_get_prop_ic_miss",
-        "night_runtime_set_prop_ic_miss",
-        "night_runtime_get_gname",
-        "night_runtime_get_element",
-        "night_runtime_set_element",
-        "night_runtime_binop",
-        "night_runtime_compare",
-        "night_runtime_string",
-        "night_runtime_get_intrinsic",
-        "night_runtime_get_intrinsic_cell",
-        "night_runtime_str_chars_eq",
-        "night_runtime_tonumeric",
-        "night_runtime_pos",
-        "night_runtime_neg",
-        "night_runtime_instanceof",
-        "night_runtime_del_prop",
-        "night_runtime_arguments",
-        "night_runtime_arguments_env",
-        "night_runtime_box_nonstrict_this",
-        "night_runtime_get_mapped_arg",
-        "night_runtime_set_mapped_arg",
-        "night_runtime_in",
-        "night_runtime_has_own",
-        "night_runtime_to_property_key",
-        "night_runtime_mutate_proto",
-        "night_runtime_init_home_object",
-        "night_runtime_super_base",
-        "night_runtime_super_fun",
-        "night_runtime_get_prop_super",
-        "night_runtime_get_elem_super",
-        "night_runtime_set_prop_super",
-        "night_runtime_set_elem_super",
-        "night_runtime_tostring",
-        "night_runtime_pow",
-        "night_runtime_check_obj_coercible",
-        "night_runtime_check_class_heritage",
-        "night_runtime_create_generator",
-        "night_runtime_gen_suspend",
-        "night_runtime_gen_restore",
-        "night_runtime_gen_check_resume",
-        "night_runtime_gen_closing",
-        "night_runtime_gen_final",
-        "night_runtime_async_await",
-        "night_runtime_async_resolve",
-        "night_runtime_async_reject",
-        "night_runtime_can_skip_await",
-        "night_runtime_maybe_extract_await",
-        "night_runtime_check_is_obj",
-        "night_runtime_check_this",
-        "night_runtime_check_lexical",
-        "night_runtime_throw_set_const",
-        "night_runtime_push_lexical_env",
-        "night_runtime_push_class_body_env",
-        "night_runtime_freshen_lexical_env",
-        "night_runtime_recreate_lexical_env",
-        "night_runtime_init_glexical",
-        "night_runtime_get_name",
-        "night_runtime_bind_name",
-        "night_runtime_get_bound_name",
-        "night_runtime_bind_unqualified_name",
-        "night_runtime_bind_var",
-        "night_runtime_del_name",
-        "night_runtime_push_var_env",
-        "night_runtime_enter_with",
-        "night_runtime_throw_msg",
-        "night_runtime_builtin_object",
-        "night_runtime_builtin_object_cell",
-        "night_runtime_del_elem",
-        "night_runtime_global_this",
-        "night_runtime_regexp",
-        "night_runtime_init_prop_getset",
-        "night_runtime_to_boolean",
-        "night_runtime_typeof",
-        "night_runtime_typeof_eq",
-        "night_runtime_constant_strict_eq",
-        "night_runtime_regexp_leaf",
-        "night_runtime_bind_unqualified_gname",
-        "night_runtime_set_name",
-        "night_runtime_new_object",
-        "night_runtime_new_array",
-        "night_runtime_init_prop",
-        "night_runtime_init_elem",
-        "night_runtime_init_elem_getset",
-        "night_runtime_check_private_field",
-        "night_runtime_new_private_name",
-        "night_runtime_env_setup",
-        "night_runtime_get_aliased",
-        "night_runtime_set_aliased",
-        "night_runtime_lambda",
-        "night_runtime_exception",
-        "night_runtime_throw",
-        "night_runtime_throw_with_stack",
-        "night_runtime_get_exception_for_finally",
-        "night_runtime_global_decl_instantiation",
-        "night_runtime_iter",
-        "night_runtime_more_iter",
-        "night_runtime_end_iter",
-        "night_runtime_post_whole_cell",
-        "night_runtime_close_iter_for_exception",
-        "night_runtime_symbol",
-        "night_runtime_optimize_get_iterator",
-        "night_runtime_close_iter",
-        "night_runtime_to_async_iter",
-        "night_runtime_spread_call",
-        "night_runtime_optimize_spread_call",
-        "night_runtime_object",
-        "night_runtime_post_write_barrier",
-        "night_runtime_post_write_barrier_elem",
-        "night_runtime_pre_write_barrier",
-        "night_runtime_resolve_global_slot_guarded",
-        "night_runtime_binding_written",
-        "night_runtime_math_unary",
-        "night_runtime_math_pow",
-        "night_runtime_fmod",
-        "night_runtime_create_this",
-        "night_runtime_rest",
-        "night_runtime_implicit_this",
-        "night_runtime_check_this_reinit",
-        "night_runtime_check_return",
-        "night_runtime_obj_with_proto",
-        "night_runtime_fun_with_proto",
-        "night_runtime_set_fun_name",
-        "night_runtime_gen_is_closing",
-        "night_runtime_mir_stress",
-        "night_runtime_slots_covered",
-        "night_runtime_ctor_stamp",
-        "night_runtime_ctor_restamp",
-        "night_runtime_init_field",
-        "night_runtime_elem_grow",
-        "night_runtime_get_prop_pure",
-        "night_runtime_set_prop_pure",
-        "night_runtime_to_primitive_pure",
-        "night_runtime_get_elem_pure",
-        "night_runtime_set_elem_pure",
-        "night_runtime_new_this",
-        "night_runtime_new_this_init",
-        "night_runtime_method_arm",
-        "night_runtime_bigint",
-        "night_runtime_non_syntactic_global_this",
-        "night_runtime_set_intrinsic",
-        "night_runtime_env_callee",
-        "night_runtime_eval",
-        "night_runtime_spread_eval",
-        "night_runtime_dynamic_import",
-        "night_runtime_import_meta",
-        "night_runtime_get_import",
-        "night_runtime_add_disposable",
-        "night_runtime_take_dispose_capability",
-        "night_runtime_create_suppressed_error",
-        "night_runtime_resume",
-        "night_runtime_regex_ci_compare",
-    ];
+    /// The engine helpers, from the runtime's X-macro list (the one list the
+    /// shell hands the compiler); `helper_lists_agree` ties it to the resolver.
+    fn helper_names() -> Vec<&'static str> {
+        include_str!("../../../runtime/NightHelperList.h")
+            .match_indices("NIGHT_RUNTIME_HELPER(night_")
+            .map(|(i, m)| {
+                let rest = &include_str!("../../../runtime/NightHelperList.h")[i + m.len() - 6..];
+                &rest[..rest.find(')').unwrap()]
+            })
+            .collect()
+    }
 
     /// Signature strings for the helpers the toy batch's emitted code
     /// actually calls (validation checks call-site arg types against the
@@ -859,15 +709,27 @@ mod tests {
         assert_eq!(out.table_base, 5000);
     }
 
-    fn build_toy() -> (InprocOut, usize, u32) {
-        build_toy_source(&toy_source())
+    /// The default pipeline emits the most blobs per script (MIR body,
+    /// baseline companion, adapter); the exact reservation must still match.
+    #[test]
+    fn reservation_matches_mir_blob_count() {
+        let (out, _, reserved) =
+            build_toy_source(&toy_source(), crate::options::Pipeline::Mir);
+        assert_eq!(reserved as usize, out.blobs.len());
     }
 
-    fn build_toy_source(source: &Source) -> (InprocOut, usize, u32) {
-        let specs: Vec<HelperImportSpec> = HELPER_NAMES
-            .iter()
+    fn build_toy() -> (InprocOut, usize, u32) {
+        build_toy_source(&toy_source(), crate::options::Pipeline::Baseline)
+    }
+
+    fn build_toy_source(
+        source: &Source,
+        pipeline: crate::options::Pipeline,
+    ) -> (InprocOut, usize, u32) {
+        let specs: Vec<HelperImportSpec> = helper_names()
+            .into_iter()
             .enumerate()
-            .map(|(i, &name)| HelperImportSpec {
+            .map(|(i, name)| HelperImportSpec {
                 name: name.to_string(),
                 sig: parse_sig_str(sig_of(name)).unwrap(),
                 table_index: 100 + i as u32,
@@ -880,7 +742,7 @@ mod tests {
             source,
             SourceObjectId::new(0),
             &Options {
-                pipeline: crate::options::Pipeline::Baseline,
+                pipeline,
                 ..Options::default()
             },
             &specs,
@@ -911,7 +773,7 @@ mod tests {
             num_registers: 2,
             pair_count: 1,
         });
-        let (out, _, reserved) = build_toy_source(&source);
+        let (out, _, reserved) = build_toy_source(&source, crate::options::Pipeline::Baseline);
         assert_eq!(reserved as usize, out.blobs.len());
         let word = |i: usize| u32::from_le_bytes(out.env_desc[i..i + 4].try_into().unwrap());
         let field = crate::env_regions::REGION_NAMES
@@ -929,7 +791,7 @@ mod tests {
         let (out, n_allocs, _) = build_toy();
 
         assert_eq!(n_allocs, 2, "allocator called exactly twice");
-        assert_eq!(out.extern_table_indices.len(), HELPER_NAMES.len());
+        assert_eq!(out.extern_table_indices.len(), helper_names().len());
         assert_eq!(out.extern_table_indices[0], 100);
         // stub + 2 TA poly helpers + stub2 precede the compiled script's
         // widened-ABI body (slot PRE_BODIES); the script's dispatched table
@@ -978,5 +840,34 @@ mod tests {
 
         let reassembled = runner_wrap(&out.blobs, &out.extern_sigs);
         wasmparser::validate(&reassembled).expect("reassembled batch validates");
+    }
+
+    /// The runtime's X-macro (`NightHelperList.h`, which sizes the import
+    /// table the shell hands the compiler) mirrors `resolve_helpers` (which
+    /// pushes one import per helper, in order); the tests above read the
+    /// header rather than keeping a copy. Lookup is by name, so a drift would
+    /// not mis-bind, but the header documents that it mirrors the resolver.
+    #[test]
+    fn helper_lists_agree() {
+        fn names(text: &str, prefix: &str) -> Vec<String> {
+            text.match_indices(prefix)
+                .map(|(i, _)| {
+                    let rest = &text[i + prefix.len()..];
+                    rest[..rest.find(['"', ')']).unwrap()].to_string()
+                })
+                .collect()
+        }
+        let header = names(
+            include_str!("../../../runtime/NightHelperList.h"),
+            "NIGHT_RUNTIME_HELPER(",
+        );
+        let header: Vec<String> = header.into_iter().filter(|n| n.starts_with("night_")).collect();
+        let src = include_str!("mod.rs");
+        let start = src.find("pub fn resolve_helpers(").unwrap();
+        let body = &src[start..start + src[start..].find("\n}\n").unwrap()];
+        let mut resolver = names(body, "resolve(m, \"");
+        // The one helper `translate_all` resolves on its own.
+        resolver.push("night_runtime_regex_ci_compare".to_string());
+        assert_eq!(header, resolver, "NightHelperList.h vs resolve_helpers");
     }
 }

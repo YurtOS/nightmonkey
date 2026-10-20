@@ -46,7 +46,7 @@ fn pipeline_selection_compiles_and_reports_the_requested_tier() {
     )));
     std::fs::create_dir(&scratch.0).unwrap();
 
-    let control = compile(&snapshot, &scratch.0, &["--force-interp"]);
+    let control = compile(&snapshot, &scratch.0, &[]);
     assert!(control.status.success(), "{}", diagnostics(&control));
 
     for pipeline in ["mir", "baseline"] {

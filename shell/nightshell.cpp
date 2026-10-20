@@ -46,6 +46,9 @@ using js::cli::OptionParser;
 static bool enableNightSnapshot = false;
 #ifdef ENABLE_JS_NIGHTMONKEY_INPROCESS
 static bool enableNightInprocess = false;
+// Compiler options for the in-process batch (--night-options); owned by the
+// option parser, which outlives every script compile.
+static const char* nightInprocOptions = nullptr;
 #endif
 
 static bool AddOptions(OptionParser& op) {
@@ -62,6 +65,12 @@ static bool AddOptions(OptionParser& op) {
                         "bodies (requires the wasm-jit-runner hostcalls)")) {
     return false;
   }
+  if (!op.addStringOption('\0', "night-options", "OPTIONS",
+                          "Compiler options for --night-inprocess, "
+                          "space-separated as the nightmonkey CLI takes them "
+                          "(e.g. \"--pipeline baseline --dump-tiers\")")) {
+    return false;
+  }
 #endif
   return true;
 }
@@ -71,6 +80,7 @@ static bool OptionsParsed(OptionParser& op) {
   night::NightSetWizening(enableNightSnapshot);
 #ifdef ENABLE_JS_NIGHTMONKEY_INPROCESS
   enableNightInprocess = op.getBoolOption("night-inprocess");
+  nightInprocOptions = op.getStringOption("night-options");
 #endif
   return true;
 }
@@ -118,7 +128,7 @@ static bool ScriptCompiled(JSContext* cx, JS::HandleScript script,
   }
 #ifdef ENABLE_JS_NIGHTMONKEY_INPROCESS
   if (enableNightInprocess && primary) {
-    if (!CompileInProcess(cx, script)) {
+    if (!CompileInProcess(cx, script, nightInprocOptions)) {
       return false;
     }
   }

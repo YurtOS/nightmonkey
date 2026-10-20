@@ -78,6 +78,9 @@ pub use options::{Diagnostics, Options};
 /// NUL-terminated signature string (see night_compiler.h), and live funcref-table
 /// index. `reserve` receives the exact defined-function count and chooses the
 /// base reported by `night_inproc_table_base`; blob `i` lands at base + i.
+/// `options` is null for the default options or a NUL-terminated compiler
+/// option string (the nightmonkey CLI's flags, space-separated) for
+/// [`Options::parse_str`]; an unparsable string fails the build.
 /// `alloc` is called exactly
 /// twice and must return zeroed, 8-aligned, non-null memory (calloc-style;
 /// it may be called with size 0). Returns null on failure (message on
@@ -85,7 +88,8 @@ pub use options::{Diagnostics, Options};
 ///
 /// # Safety
 /// `helper_names`/`helper_sigs` must point to `n_helpers` valid
-/// NUL-terminated strings and `helper_funcptrs` to `n_helpers` u32s.
+/// NUL-terminated strings, `helper_funcptrs` to `n_helpers` u32s, and
+/// `options` must be null or a valid NUL-terminated string.
 #[no_mangle]
 pub unsafe extern "C" fn night_inproc_build(
     analysis_source: &source::Source,
@@ -95,8 +99,25 @@ pub unsafe extern "C" fn night_inproc_build(
     helper_funcptrs: *const u32,
     n_helpers: u32,
     reserve: extern "C" fn(u32, &mut u32) -> i32,
+    options: *const core::ffi::c_char,
     alloc: extern "C" fn(usize) -> u32,
 ) -> *mut wasm::inprocess::InprocOut {
+    let opts = if options.is_null() {
+        Options::default()
+    } else {
+        let parsed = core::ffi::CStr::from_ptr(options)
+            .to_str()
+            .map_err(|e| e.to_string())
+            .and_then(Options::parse_str);
+        match parsed {
+            Ok(o) => o,
+            Err(e) => {
+                crate::diag_line!("night: inprocess: {e}");
+                log::error!("night_inproc_build: options: {e}");
+                return core::ptr::null_mut();
+            }
+        }
+    };
     let n = usize::try_from(n_helpers).unwrap();
     let mut specs = Vec::with_capacity(n);
     for i in 0..n {
@@ -128,7 +149,6 @@ pub unsafe extern "C" fn night_inproc_build(
         });
     }
     let root_id = source::SourceObjectId::new(root_id);
-    let opts = Options::default();
     let build = move || {
         wasm::inprocess::build_inprocess_batch(
             analysis_source,

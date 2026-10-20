@@ -138,11 +138,6 @@ pub fn translate_script(
             _ => None,
         })
         .collect();
-    let base =
-        match baseline::build_body(ctx, m, atoms, sid, script, is_global, &resumes, &onramps)? {
-            Ok(b) => b,
-            Err(reason) => return Ok(Err(format!("baseline declined: {reason}"))),
-        };
     let gname_bids = mm
         .atoms
         .iter()
@@ -213,6 +208,14 @@ pub fn translate_script(
         Ok(l) => l,
         Err(reason) => return Ok(Err(reason)),
     };
+    // The baseline companion is built only once lowering has succeeded: a
+    // declined script falls back to a standalone baseline body (built
+    // without onramps), so building it earlier would be thrown away.
+    let base =
+        match baseline::build_body(ctx, m, atoms, sid, script, is_global, &resumes, &onramps)? {
+            Ok(b) => b,
+            Err(reason) => return Ok(Err(format!("baseline declined: {reason}"))),
+        };
     // A lowering bug (a value used where its definition does not
     // dominate) shows here, not at module serialization.
     if ctx.opts.strict_coverage || ctx.opts.mir_stress > 0 {

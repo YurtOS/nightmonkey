@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "jsapi.h"
 #include "js/GCVector.h"
 #include "compiler/night-compiler.h"
 #include "runtime/Night.h"
@@ -55,15 +56,27 @@ static double NowMs() {
   return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
 }
 
-static bool InprocFail(const char* what) {
+// NIGHT_INPROC_STRICT=1 (qualification runs): a failed batch is an error,
+// not a silent fall back to the interpreter.
+static bool InprocStrict() {
+  const char* v = getenv("NIGHT_INPROC_STRICT");
+  return v && v[0] && strcmp(v, "0") != 0;
+}
+
+static bool InprocFail(JSContext* cx, const char* what) {
   fprintf(stderr, "night: inprocess: %s; staying interpreted\n", what);
 #ifdef NIGHTMONKEY_DEBUG
   MOZ_CRASH("in-process AOT compilation failed");
 #endif
+  if (InprocStrict()) {
+    JS_ReportErrorASCII(cx, "night: inprocess: %s", what);
+    return false;
+  }
   return true;
 }
 
-bool js::CompileInProcess(JSContext* cx, JS::Handle<JSScript*> script) {
+bool js::CompileInProcess(JSContext* cx, JS::Handle<JSScript*> script,
+                          const char* options) {
   // Single batch: only the first registered tree compiles; everything else
   // (eval, -f prologues, other realms) stays interpreted.
   if (night::gNightActivated || night::gNightRegistration.numRoots != 0) {
@@ -80,7 +93,7 @@ bool js::CompileInProcess(JSContext* cx, JS::Handle<JSScript*> script) {
   JS::RootedVector<JSScript*> shScripts(cx);
   std::vector<const char*> shPaths;
   if (!night::ResolveSelfHostedRoots(cx, &shScripts, shPaths)) {
-    return InprocFail("selfhosted resolution failed");
+    return InprocFail(cx, "selfhosted resolution failed");
   }
 
   // Regex literal programs (user tree + self-hosted trees). May GC; done
@@ -88,12 +101,12 @@ bool js::CompileInProcess(JSContext* cx, JS::Handle<JSScript*> script) {
   std::set<std::pair<std::u16string, uint32_t>> regexSeen;
   std::vector<night::NightRegexProgram> regexPrograms;
   if (!night::CollectRegexPrograms(cx, script, regexSeen, regexPrograms)) {
-    return InprocFail("regex collection failed");
+    return InprocFail(cx, "regex collection failed");
   }
   for (size_t i = 0; i < shScripts.length(); i++) {
     JS::Rooted<JSScript*> sh(cx, shScripts[i]);
     if (!night::CollectRegexPrograms(cx, sh, regexSeen, regexPrograms)) {
-      return InprocFail("regex collection failed");
+      return InprocFail(cx, "regex collection failed");
     }
   }
 
@@ -108,7 +121,7 @@ bool js::CompileInProcess(JSContext* cx, JS::Handle<JSScript*> script) {
   // from the traced copies first, exactly as the snapshot flow does before
   // its capture (NightRegistration.h).
   if (!night::NightSealSnapshotAddresses(cx)) {
-    return InprocFail("sealing the registration addresses failed");
+    return InprocFail(cx, "sealing the registration addresses failed");
   }
 
   night_snapshot_walk_t* walk = night_snapshot_walk_live(
@@ -117,7 +130,7 @@ bool js::CompileInProcess(JSContext* cx, JS::Handle<JSScript*> script) {
       shAddrs.empty() ? nullptr : shAddrs.data(),
       static_cast<uint32_t>(shAddrs.size()));
   if (!walk) {
-    return InprocFail("live-heap walk failed");
+    return InprocFail(cx, "live-heap walk failed");
   }
 
   night_source_t* walkSource = night_snapshot_walk_source(walk);
@@ -154,28 +167,26 @@ bool js::CompileInProcess(JSContext* cx, JS::Handle<JSScript*> script) {
       static_cast<uint32_t>(night::kNightHelperCount),
       [](uint32_t count, uint32_t* base) -> int32_t {
         return night::InprocHostReserve(count, base) ? 0 : -1;
-      }, InprocAlloc);
+      },
+      options && options[0] ? options : nullptr, InprocAlloc);
   if (!out) {
     night::InprocHostRelease();
     night_snapshot_walk_delete(walk);
-    return InprocFail("batch build failed");
+    return InprocFail(cx, "batch build failed");
   }
   double t1 = NowMs();
   uint32_t nblobs = night_inproc_num_blobs(out);
   uint32_t tableBase = night_inproc_table_base(out);
-  if (!night::InprocHostInstall(out, tableBase)) {
-    night_snapshot_walk_delete(walk);
-    night_inproc_delete(out);
-    return InprocFail("installing the batch failed");
-  }
-  double t2 = NowMs();
-  night_inproc_release_code(out);
 
   // The env_desc wire is documented at NightEnvDescHeaderWords in
   // NightEnv.h: a fixed header, then one word per NIGHT_ENV_REGIONS entry.
   // Check the version and the region count the same way the external
   // reader checks the layout descriptor -- a silently shifted word here is
-  // a wrong region base, which no guard downstream can catch.
+  // a wrong region base, which no guard downstream can catch. The
+  // descriptor is complete as soon as the build returns, so validate it
+  // (and copy the string literals) before mounting anything: past
+  // InprocHostInstall the module cannot be unmounted, and a failure here
+  // must leave the reservation released and nothing leaked.
   const uint8_t* desc = night_inproc_env_desc_ptr(out);
   uint32_t descLen = night_inproc_env_desc_len(out);
   auto word = [&](uint32_t i) {
@@ -183,9 +194,14 @@ bool js::CompileInProcess(JSContext* cx, JS::Handle<JSScript*> script) {
     memcpy(&w, desc + 4 * i, sizeof(w));
     return w;
   };
-  if (descLen < night::NightEnvDescHeaderWords * sizeof(uint32_t)) {
+  auto failBeforeInstall = [&](const char* what) {
+    night::InprocHostRelease();
     night_snapshot_walk_delete(walk);
-    return InprocFail("environment descriptor too short");
+    night_inproc_delete(out);
+    return InprocFail(cx, what);
+  };
+  if (descLen < night::NightEnvDescHeaderWords * sizeof(uint32_t)) {
+    return failBeforeInstall("environment descriptor too short");
   }
   if (word(0) != night::NightAotAbiVersion ||
       word(1) != night::NightEnvRegionCount) {
@@ -194,13 +210,11 @@ bool js::CompileInProcess(JSContext* cx, JS::Handle<JSScript*> script) {
             "regions, engine expects v%u with %u\n",
             word(0), word(1), night::NightAotAbiVersion,
             night::NightEnvRegionCount);
-    night_snapshot_walk_delete(walk);
-    return InprocFail("environment descriptor ABI mismatch");
+    return failBeforeInstall("environment descriptor ABI mismatch");
   }
   if (descLen < (night::NightEnvDescHeaderWords + night::NightEnvRegionCount) *
                     sizeof(uint32_t)) {
-    night_snapshot_walk_delete(walk);
-    return InprocFail("environment descriptor truncated");
+    return failBeforeInstall("environment descriptor truncated");
   }
   uint32_t descBase = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(desc));
 
@@ -210,6 +224,9 @@ bool js::CompileInProcess(JSContext* cx, JS::Handle<JSScript*> script) {
   uint32_t strlitLen = word(3);
   uint32_t strlitAddr = word(4);
   if (strlitAddr && strlitLen) {
+    if (strlitOff > descLen || strlitLen > descLen - strlitOff) {
+      return failBeforeInstall("environment descriptor string table truncated");
+    }
     memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(strlitAddr)),
            desc + strlitOff, strlitLen);
   }
@@ -224,12 +241,24 @@ bool js::CompileInProcess(JSContext* cx, JS::Handle<JSScript*> script) {
   NIGHT_ENV_REGIONS(NIGHT_INPROC_REGION_WORD)
 #undef NIGHT_INPROC_REGION_WORD
 
+  if (!night::InprocHostInstall(out, tableBase)) {
+    // Install released the reservation itself.
+    night_snapshot_walk_delete(walk);
+    night_inproc_delete(out);
+    return InprocFail(cx, "installing the batch failed");
+  }
+  double t2 = NowMs();
+
   // The installed tables alias the descriptor buffer; `out` is deliberately
-  // retained for its environment descriptor and script map only.
+  // retained for its environment descriptor and script map only. The
+  // compiler's blob/module buffers are released only now that both the
+  // install and the environment install have succeeded.
   if (!night_runtime_install_env(cx, env)) {
     night_snapshot_walk_delete(walk);
+    night_inproc_delete(out);
     return false;
   }
+  night_inproc_release_code(out);
   // In-process mode always has interpreter coverage (skipped scripts, eval,
   // shell evaluate, -f prologues): interpreted global writes bypass the
   // compiled fuse hooks, so the value fuses cannot be trusted.

@@ -4924,7 +4924,8 @@ int32_t night_runtime_census(uint32_t kind, uint32_t id) {
     NightCensusTrace(kind, id);
   }
   if (kind == 96) {
-    // A layout guard's failing object (`id` its address): printed while
+    // MIR_GUARD_OBJECT_CENSUS_KIND (compiler/src/options.rs): a layout
+    // guard's failing object (`id` its address): printed while
     // tracing, never counted.
     if (RtCensus(cx).trace > 0) {
       NightCensusTraceObject(LinMem<JSObject>(id));

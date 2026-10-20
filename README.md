@@ -201,13 +201,12 @@ nightmonkey --shell build/bin/js program.js --keep-snapshot snap.wasm -o out.was
 nightmonkey snap.wasm -o out.wasm      # recompile without re-wizening
 ```
 
-`nightmonkey --help` lists the diagnostics (`--stats`, `--dump-bytecode`,
-`--dump-bbv`, `--dump-facts`, `--dump-graph`, `--viz`, `--viz-lower`,
-`--viz-facts`) and the compilation options (`--force-interp`,
-`--keep-names`). `--dump-bytecode`
-takes an optional comma-separated source-id list
-(`--dump-bytecode=145,153`); a whole-bundle disassembly is megabytes.
-Debug sections are stripped by default; `--keep-names` retains them.
+`nightmonkey --help` lists the diagnostics (`--stats`, `--dump-tiers`,
+`--dump-mir`, `--dump-facts`, `--dump-graph`, `--viz <path>`), the
+instrumentation flags (`--mir-exit-census`, `--block-census`,
+`--root-census`, `--guard-census`) and the compilation options (`--pipeline
+mir|baseline`, `--strict-coverage`, `--keep-names`). Debug sections are
+stripped by default; `--keep-names` retains them.
 
 ## Flow 2: in-process (drop-in shell for jit-tests)
 

@@ -128,23 +128,66 @@ pub struct Instrumentation {
     pub mir_exits: bool,
 }
 
+// The census kinds of the MIR tier. The runtime keeps one count map keyed by
+// `kind << 32 | id` (`night_runtime_census`) and the instrumentation flags
+// are independent, so every kind here must be distinct from every other and
+// from the legacy kinds below 90 and at or above 150 (`mir_census_kinds_are_unique`).
+// Kind 90 and 92 also print a trace line (`NIGHT_CENSUS_TRACE`), and kind 96
+// is trace-only, never counted; the runtime special-cases those numbers.
+
 /// The census kind of MIR exits (`Instrumentation::mir_exits`).
 pub const MIR_EXIT_CENSUS_KIND: u32 = 90;
+/// The census kind of MIR property-get IC misses (with `--mir-exit-census`).
+pub const MIR_GET_MISS_CENSUS_KIND: u32 = 91;
 /// The census kind of MIR guard failures that exit, by guard (with
 /// `--mir-exit-census`): an exit's block is shared by its pc's guards.
 pub const MIR_GUARD_CENSUS_KIND: u32 = 92;
-/// The census kind of MIR property-get IC misses (with `--mir-exit-census`).
-pub const MIR_GET_MISS_CENSUS_KIND: u32 = 91;
+/// The census kind of a failed guard's class-word detail: `id * 32` plus a
+/// bit per cause (with `--mir-exit-census`).
+pub const MIR_GUARD_CLASS_CENSUS_KIND: u32 = 93;
+/// The census kind of stores that drop TYPES from an object under
+/// construction, by site (with `--mir-exit-census`).
+pub const MIR_TYPES_DROP_CENSUS_KIND: u32 = 94;
+/// The census kind of property-set IC misses, by site (with
+/// `--mir-exit-census`).
+pub const MIR_SET_MISS_CENSUS_KIND: u32 = 95;
+/// The census kind of a layout guard's failing object (`id` is its address).
+/// Printed while tracing, never counted.
+pub const MIR_GUARD_OBJECT_CENSUS_KIND: u32 = 96;
 /// The census kind of split ops' runtime-helper calls (`getprop.data`,
 /// `setprop.data`, `getelem.data`, `setelem.data`, `prim.*`), with
 /// `--mir-exit-census`.
 pub const MIR_SLOW_CENSUS_KIND: u32 = 97;
 /// Census kind for `--block-census` under MIR: one count per MIR block.
-pub const MIR_BLOCK_CENSUS_KIND: u32 = 92;
+pub const MIR_BLOCK_CENSUS_KIND: u32 = 98;
 /// Census kind for `--root-census`: one count per executed rooting site.
-pub const MIR_ROOT_CENSUS_KIND: u32 = 93;
+pub const MIR_ROOT_CENSUS_KIND: u32 = 99;
 /// Census kind for `--value-census`: one count per executed Wasm block.
-pub const MIR_VALUE_CENSUS_KIND: u32 = 94;
+pub const MIR_VALUE_CENSUS_KIND: u32 = 100;
+/// The census kind of stamps that publish without the TYPES their layout
+/// claims, by layout (with `--mir-exit-census`).
+pub const MIR_STAMP_NO_TYPES_CENSUS_KIND: u32 = 101;
+/// The census kind of megamorphic property-set lookups: `id * 2` plus the hit
+/// bit (with `--mir-exit-census`).
+pub const MIR_MEGA_SET_CENSUS_KIND: u32 = 102;
+
+/// Every MIR census kind, for the uniqueness test.
+#[cfg(test)]
+const MIR_CENSUS_KINDS: [(&str, u32); 13] = [
+    ("EXIT", MIR_EXIT_CENSUS_KIND),
+    ("GET_MISS", MIR_GET_MISS_CENSUS_KIND),
+    ("GUARD", MIR_GUARD_CENSUS_KIND),
+    ("GUARD_CLASS", MIR_GUARD_CLASS_CENSUS_KIND),
+    ("TYPES_DROP", MIR_TYPES_DROP_CENSUS_KIND),
+    ("SET_MISS", MIR_SET_MISS_CENSUS_KIND),
+    ("GUARD_OBJECT", MIR_GUARD_OBJECT_CENSUS_KIND),
+    ("SLOW", MIR_SLOW_CENSUS_KIND),
+    ("BLOCK", MIR_BLOCK_CENSUS_KIND),
+    ("ROOT", MIR_ROOT_CENSUS_KIND),
+    ("VALUE", MIR_VALUE_CENSUS_KIND),
+    ("STAMP_NO_TYPES", MIR_STAMP_NO_TYPES_CENSUS_KIND),
+    ("MEGA_SET", MIR_MEGA_SET_CENSUS_KIND),
+];
 
 /// Which compiled tiers a script may use (`docs/BASELINE.md` §5).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -264,6 +307,19 @@ impl Options {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mir_census_kinds_are_unique() {
+        for (i, (a, ka)) in MIR_CENSUS_KINDS.iter().enumerate() {
+            // Below 90 and from 150 the runtime's legacy kinds live
+            // (depart/block census at 60-70, the 150-158 depart family and
+            // their +200/+400 variants).
+            assert!((90..150).contains(ka), "{a} = {ka} is outside 90..150");
+            for (b, kb) in &MIR_CENSUS_KINDS[i + 1..] {
+                assert_ne!(ka, kb, "census kinds {a} and {b} are both {ka}");
+            }
+        }
+    }
 
     #[test]
     fn parse_option_strings() {

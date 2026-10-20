@@ -197,7 +197,7 @@ file(MAKE_DIRECTORY "${NIGHT_BIN_DIR}")
 # The host AOT compiler (snapshot in, module out) with wizer driving built in.
 add_custom_target(nightmonkey_host ALL
   COMMAND ${CMAKE_COMMAND} -E env ${CARGO_ENV} RUSTFLAGS=-Cdebuginfo=0
-          ${NIGHT_CARGO} build --release -p nightmonkey ${CARGO_ENGINE_FEATURES} --features wizen
+          ${NIGHT_CARGO} build --release -p nightmonkey ${CARGO_ENGINE_FEATURES} --features wizen,parallel
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           "${CARGO_TARGET_DIR}/release/nightmonkey" "${NIGHT_BIN_DIR}/nightmonkey"
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"

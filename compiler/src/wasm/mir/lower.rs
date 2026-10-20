@@ -5306,11 +5306,11 @@ impl<'a> Lower<'a> {
             }
             let base = self.i32c(id * 32);
             let rid = self.bin(Operator::I32Add, base, r, Type::I32);
-            let k = self.i32c(crate::options::MIR_GUARD_CENSUS_KIND + 1);
+            let k = self.i32c(crate::options::MIR_GUARD_CLASS_CENSUS_KIND);
             self.call1(census, &[k, rid], Type::I32);
             // The object itself (the runtime's trace prints it).
             let obj = self.guard_obj.unwrap();
-            let k = self.i32c(crate::options::MIR_GUARD_CENSUS_KIND + 4);
+            let k = self.i32c(crate::options::MIR_GUARD_OBJECT_CENSUS_KIND);
             self.call1(census, &[k, obj], Type::I32);
         }
         self.terminate(Terminator::Br { target: f });
@@ -7139,7 +7139,7 @@ impl<'a> Lower<'a> {
                 std::string::String::from_utf16_lossy(self.mm.atoms[name].chars())
             );
             let (k, i) = (
-                self.i32c(crate::options::MIR_GUARD_CENSUS_KIND + 3),
+                self.i32c(crate::options::MIR_SET_MISS_CENSUS_KIND),
                 self.i32c(id),
             );
             self.call1(census, &[k, i], Type::I32);
@@ -7533,7 +7533,7 @@ impl<'a> Lower<'a> {
                 .attach
                 .and_then(|a| self.f.attachments[a].site);
             crate::diag_line!("night: mir megaset {id} sid#{} {:?}", self.f.script, site);
-            let k = self.i32c(crate::options::MIR_GUARD_CENSUS_KIND + 4);
+            let k = self.i32c(crate::options::MIR_MEGA_SET_CENSUS_KIND);
             let base = self.i32c(id * 2);
             let i = self.bin(Operator::I32Add, base, mhit, Type::I32);
             self.call1(census, &[k, i], Type::I32);
@@ -7975,7 +7975,7 @@ impl<'a> Lower<'a> {
             self.cond_br(t, Self::to(go), Self::to(count));
             self.cur = count;
             let (k, i) = (
-                self.i32c(crate::options::MIR_GUARD_CENSUS_KIND + 3),
+                self.i32c(crate::options::MIR_STAMP_NO_TYPES_CENSUS_KIND),
                 self.i32c(layout),
             );
             self.call1(census, &[k, i], Type::I32);
@@ -8261,7 +8261,7 @@ impl<'a> Lower<'a> {
             self.cond_br(hit, Self::to(count), Self::to(go));
             self.cur = count;
             let (k, i) = (
-                self.i32c(crate::options::MIR_GUARD_CENSUS_KIND + 2),
+                self.i32c(crate::options::MIR_TYPES_DROP_CENSUS_KIND),
                 self.i32c(id),
             );
             self.call1(census, &[k, i], Type::I32);
