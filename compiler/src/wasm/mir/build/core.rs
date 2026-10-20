@@ -43,6 +43,8 @@ impl<'s, 'a> Run<'s, 'a> {
             throw_blk: None,
             renames: vec![],
             next_pc: None,
+            overwritten: std::collections::BTreeSet::new(),
+            retained_once: std::collections::BTreeSet::new(),
             likely_targets: vec![],
             gname_vals: BTreeMap::new(),
             math_fns: BTreeMap::new(),
@@ -190,13 +192,18 @@ impl<'s, 'a> Run<'s, 'a> {
     pub(super) fn retain_all(&mut self) {
         for ix in 1..self.frame_len().min(self.st.len()) {
             let x = self.st[ix];
-            if !Self::managed_ty(x.ty) {
+            let v = if Self::managed_ty(x.ty) {
+                self.retained_once.insert(ix);
+                x.v
+            } else if self.overwritten.contains(&ix) && !self.write_through(ix) {
+                self.const_val(ConstVal::Undefined)
+            } else {
                 continue;
-            }
+            };
             self.f.add_inst(
                 self.cur,
                 Opcode::FrameStore(u32::try_from(ix).unwrap()),
-                vec![x.v],
+                vec![v],
                 &[],
                 vec![],
             );
@@ -216,6 +223,20 @@ impl<'s, 'a> Run<'s, 'a> {
                 | Ty::Native
                 | Ty::Ta(_)
         )
+    }
+
+    /// Whether slot `ix`, of type `t`, may have held a heap value: not
+    /// `undefined`, a number or a boolean. A slot a block enters dead has no
+    /// type, so it may have if a retaining store put a managed value in it.
+    fn may_hold_gc_thing(&self, ix: usize, t: Ty) -> bool {
+        use crate::opsem::{NUM, PRIM_BOOLEAN, PRIM_NULL, PRIM_UNDEFINED};
+        match t {
+            Ty::Val(tags) => !tags.subset_of(TagSet::prims(
+                PRIM_UNDEFINED | PRIM_NULL | PRIM_BOOLEAN | NUM,
+            )),
+            Ty::Dead => self.retained_once.contains(&ix),
+            t => Self::managed_ty(t),
+        }
     }
 
     /// A local that held, or now holds, a managed value, overwritten by a
@@ -244,7 +265,11 @@ impl<'s, 'a> Run<'s, 'a> {
         // predecessor's retaining store may have left an object in the frame:
         // it counts as possibly managed.
         if dead_after || !Self::managed_ty(x.ty) {
+            if self.may_hold_gc_thing(ix, old.ty) {
+                self.overwritten.insert(ix);
+            }
             let v = if Self::managed_ty(x.ty) {
+                self.retained_once.insert(ix);
                 x.v
             } else {
                 self.const_val(ConstVal::Undefined)

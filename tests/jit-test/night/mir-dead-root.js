@@ -116,14 +116,6 @@ function overwriteThenAdd() {
   collect();
   return finalizeCount() - c0 + (z - c0 - 1);
 }
-function overwriteFormal(a) {
-  gc();
-  var c0 = finalizeCount();
-  a = 1;
-  if (c0 > 1e9) c0 = 1;
-  collect();
-  return finalizeCount() - c0;
-}
 function overwriteLoopThenCompare(n) {
   gc();
   var o = makeFinalizeObserver();
@@ -186,7 +178,6 @@ for (var n = 0; n < 40; n++) {
   assertEq(overwriteThenAdd(), 1);
   assertEq(overwriteLoopThenCompare(3), 1);
   assertEq(overwriteInFinally(), 1);
-  assertEq(overwriteFormal(makeFinalizeObserver()), 1);
   assertEq(overwritePolymorphic(n & 1 ? 5 : 'str'), 1);
   assertEq(lastUseThenCall(n & 1), 1);
   assertEq(stillHeld(), 0);

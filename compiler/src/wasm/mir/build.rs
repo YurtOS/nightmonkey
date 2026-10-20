@@ -1084,6 +1084,17 @@ struct Run<'s, 'a> {
     renames: Vec<(mir::Value, Slot)>,
     /// The pc after the op being built (`js_keep`'s exits).
     next_pc: Option<Pc>,
+    /// Frame slots whose local was overwritten (so far in build order) with a
+    /// value that is not managed, from one that was or may have been: their
+    /// frame copy may hold an object the local no longer does, so each
+    /// may-GC op and each exit writes `undefined` over it while the local is
+    /// not managed (a one-shot release would be spent on an op whose GC is
+    /// slow-path only). Over-releasing a dead local is always sound.
+    overwritten: std::collections::BTreeSet<usize>,
+    /// Frame slots a retaining store has put a managed value in so far. A
+    /// slot that is `Ty::Dead` counts as having held a heap value only if
+    /// it is in this set (the first assignment to a local finds it dead).
+    retained_once: std::collections::BTreeSet<usize>,
     /// The likely callees the next generic `call` gets (`attach_targets`).
     likely_targets: Vec<ScriptId>,
     /// Values read from a global by name, and the Math functions read off
