@@ -68,7 +68,8 @@ Block Versioning, but that did not converge well.)
 | `compiler/src/likelier/` | The speculative likely-types analysis (`scan`/`heap`/`calls`/`engine`/`emit`/`dump`). |
 | `compiler/src/opsem.rs` | Interval algebra and op semantics; the vocabulary shared by analysis and codegen. |
 | `compiler/src/facts.rs` | `LikelyFacts`: the analysis-to-codegen fact contract. |
-| `compiler/src/wasm/bbv.rs` | The workqueue-BBV bytecode-to-Wasm codegen driver. |
+| `compiler/src/wasm/baseline/` | The baseline tier: bytecode-to-Wasm codegen. |
+| `compiler/src/mir/`, `compiler/src/wasm/mir/` | The MIR tier: SSA builder and optimizer (`mir/`), lowering to Wasm (`wasm/mir/`). |
 | `compiler/src/wasm/translate.rs` | Shared translation substrate: `Helpers`/`AtomTable`/`Outcome`/ctx types, layout constants. |
 | `compiler/src/wasm/regex.rs` | The regex AOT compiler (irregexp bytecode to Wasm matchers). |
 | `compiler/src/wasm/mod.rs` | The `layout_env` / `translate_all` seams: analysis prepass, reserved linear-memory region layout, body translation, table patching. |
@@ -84,7 +85,7 @@ Block Versioning, but that did not converge well.)
 | `wasm-jit-runner/` | Wasmtime-based runner exposing function-injection hostcalls for the in-process flow. |
 | `configs/` | Benchmark-lane mozconfigs for the SpiderMonkey tree (`mozconfig-native`/`-ion`/`-wasm`/`-weval`); the NightMonkey build itself uses `spidermonkey/mozconfig`. |
 | `docs/` | `DESIGN.md`, `INTEGRATION.md` (the SpiderMonkey hook surface), `TODO`. |
-| `tools/` | Profiling, benchmarking, and visualization helpers (`viz.py`, `opprof.py`, `pairab.sh`, ...). |
+| `tools/` | Profiling, benchmarking, and visualization helpers (`opprof.py`, `pairab.sh`, ...). |
 
 ## Building
 
