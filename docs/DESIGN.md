@@ -65,8 +65,12 @@ into the shell); the host only provides table slots and installs a module.
    `wasm-jit-runner` (the testing host, via hostcalls) and Yurt's JIT mount ABI
    (a reserved table range and a module the guest assembles itself).
 5. The shell installs the environment descriptor and patches scripts to their
-   table entries. If any step fails the reservation is released and the
-   scripts stay interpreted.
+   table entries. A failure before the module is mounted releases the
+   reservation and the scripts stay interpreted. Once the module is mounted
+   nothing is unmounted: if the environment install then fails, the run
+   reports the error and the compile output stays alive (the install may
+   already have published pointers into its descriptor); a script that cannot
+   be armed stays interpreted, and fails the run under `NIGHT_INPROC_STRICT`.
 
 The helper indices, table indices, region addresses, and serialized tables must
 describe exactly the module that receives the blobs.
