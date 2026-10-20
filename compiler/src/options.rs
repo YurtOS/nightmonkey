@@ -132,8 +132,9 @@ pub struct Instrumentation {
 // `kind << 32 | id` (`night_runtime_census`) and the instrumentation flags
 // are independent, so every kind here must be distinct from every other and
 // from the legacy kinds below 90 and at or above 150 (`mir_census_kinds_are_unique`).
-// Kind 90 and 92 also print a trace line (`NIGHT_CENSUS_TRACE`), and kind 96
-// is trace-only, never counted; the runtime special-cases those numbers.
+// How the runtime treats each kind (counted, traced, trace-only, or the flat
+// per-block counter) is in `runtime/NightCensusKinds.h`, which
+// `census_kinds_match_runtime_list` checks against the list below.
 
 /// The census kind of MIR exits (`Instrumentation::mir_exits`).
 pub const MIR_EXIT_CENSUS_KIND: u32 = 90;

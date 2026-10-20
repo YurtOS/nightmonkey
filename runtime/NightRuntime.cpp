@@ -53,6 +53,7 @@
 #include "runtime/NightEntry.h"  // js::night::EnterNightStatus, NightApplyOrCall
 #include "runtime/NightEnv.h"  // js::night::NightEnvDesc, night_runtime_install_env
 #include "runtime/NightGenerator.h"  // js::night::NightGen* (generator engine half)
+#include "runtime/NightCensusKinds.h"
 #include "runtime/NightHelperList.h"  // js::night::kNightHelpers (compile check)
 #include "runtime/NightInlineCaches.h"  // js::night::NightPopulate* (IC populate)
 #include "runtime/NightInlineHeap.h"  // js::night::NightAllocCell, the barriers
@@ -4773,9 +4774,10 @@ struct NightDepartCells {
 struct NightCensusState {
   std::map<uint64_t, uint64_t>* counts = nullptr;
   std::vector<NightDepartCells>* depart = nullptr;
-  // Kind 70 (the per-block execution census, MIR's `block_census`) ticks
-  // once per executed lowered block -- several per bytecode op -- so it
-  // keeps a flat per-id counter instead of paying the map on every tick.
+  // The FlatBlock kind (the per-block execution census, MIR's
+  // `block_census`) ticks once per executed lowered block -- several per
+  // bytecode op -- so it keeps a flat per-id counter instead of paying the
+  // map on every tick.
   std::vector<uint64_t>* block = nullptr;
   bool lastCallIntact = false;
   // `NIGHT_CENSUS_TRACE=N`: also print the first N MIR exits (kind 90),
@@ -4804,7 +4806,8 @@ void NightCensusDump() {
   if (RtCensus(cx).block) {
     for (size_t i = 0; i < RtCensus(cx).block->size(); i++) {
       if ((*RtCensus(cx).block)[i]) {
-        fprintf(stderr, "night: census kind 70 id %zu n %llu\n", i,
+        fprintf(stderr, "night: census kind %u id %zu n %llu\n",
+                js::night::kCensusBlockKind, i,
                 static_cast<unsigned long long>((*RtCensus(cx).block)[i]));
       }
     }
@@ -4920,12 +4923,12 @@ static void NightCensusTrace(uint32_t kind, uint64_t id) {
 
 int32_t night_runtime_census(uint32_t kind, uint32_t id) {
   JSContext* cx = CurrentNightContext();
-  if (kind == 90 || kind == 92) {
+  const js::night::CensusMode mode = js::night::CensusModeOf(kind);
+  if (mode == js::night::CensusMode::Trace) {
     NightCensusTrace(kind, id);
   }
-  if (kind == 96) {
-    // MIR_GUARD_OBJECT_CENSUS_KIND (compiler/src/options.rs): a layout
-    // guard's failing object (`id` its address): printed while
+  if (mode == js::night::CensusMode::TraceOnly) {
+    // A layout guard's failing object (`id` its address): printed while
     // tracing, never counted.
     if (RtCensus(cx).trace > 0) {
       NightCensusTraceObject(LinMem<JSObject>(id));
@@ -4938,7 +4941,7 @@ int32_t night_runtime_census(uint32_t kind, uint32_t id) {
         {kNightNoDepart, kNightNoDepart, false, RtState(cx).stampEpoch}};
     atexit(NightCensusDump);
   }
-  if (kind == 70) {
+  if (mode == js::night::CensusMode::FlatBlock) {
     if (!RtCensus(cx).block) {
       RtCensus(cx).block = new std::vector<uint64_t>();
     }
