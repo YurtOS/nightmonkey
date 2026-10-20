@@ -198,3 +198,20 @@ basic/bug1100623.js
 debug/Frame-eval-32.js
 debug/uncaughtExceptionHook-03.js
 parser/bug-1263355-27.js
+
+# Compiled frames are invisible to Debugger hooks: onExceptionUnwind is not
+# called for an exception thrown in compiled code (base-reproduced with a
+# variant that throws without import(); the old backend passed this test only
+# because it bailed on import()). Keep covered by the interpreter lane.
+modules/bug-1502669.js
+
+# Compiled frames carry no pc, so an error naming an argument expression
+# prints the value (`[]`) where the interpreter prints the name (`arr`)
+# (base-reproduced with a variant run in a compiled function).
+heap-analysis/shortestPaths.js
+
+# The test pins the interpreter's retention of an arguments element after
+# `delete arguments[0]` or a strict defineProperty; its own comment calls that
+# "okay for spec correctness, but not optimal". The compiled tiers release it
+# earlier, which the spec allows.
+arguments/bug1762575-3.js

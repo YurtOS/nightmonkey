@@ -40,6 +40,15 @@ pub struct Decline {
     pub allowed: bool,
 }
 
+/// Whether tier `tier` declining a script for `reason` is a designed-out
+/// capability the coverage gate accepts (`ForceInterpreter`, or an op the
+/// compiled tiers do not support), not a gap.
+pub fn decline_is_allowed(tier: Tier, reason: &str) -> bool {
+    tier == Tier::Baseline
+        && (reason == super::baseline::FORCE_INTERPRETER
+            || reason.starts_with(super::baseline::UNSUPPORTED_OP))
+}
+
 impl Decline {
     pub fn new(tier: Tier, reason: impl Into<String>) -> Decline {
         Decline {
@@ -151,6 +160,22 @@ impl TierCensus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn declines_the_gate_accepts() {
+        assert!(decline_is_allowed(Tier::Baseline, "ForceInterpreter"));
+        assert!(decline_is_allowed(Tier::Baseline, "unsupported op (Eval)"));
+        assert!(!decline_is_allowed(
+            Tier::Baseline,
+            "script too large (1 bytes)"
+        ));
+        assert!(!decline_is_allowed(
+            Tier::Baseline,
+            "BUG: unterminated block"
+        ));
+        // Only baseline's decline ends in the interpreter; MIR's is a fallback.
+        assert!(!decline_is_allowed(Tier::Mir, "unsupported op (Eval)"));
+    }
 
     #[test]
     fn census_and_strictness() {

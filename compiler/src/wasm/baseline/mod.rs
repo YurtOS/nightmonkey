@@ -24,6 +24,11 @@ use waffle::{FunctionBody, Module};
 /// The coverage gate accepts it.
 pub const FORCE_INTERPRETER: &str = "ForceInterpreter";
 
+/// The decline reason for a script containing an op the compiled tiers do not
+/// support: the script is interpreted, which is always sound. The coverage
+/// gate accepts it, as a designed-out capability and not a gap.
+pub const UNSUPPORTED_OP: &str = "unsupported op";
+
 /// Translate one script to a baseline body, or decline. Same contract as
 /// `mir::translate_script`: `Outcome::Compiled` with a `night_abi_sig2`
 /// body, or `Outcome::Skipped` with the reason (the script is then

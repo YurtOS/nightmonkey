@@ -2749,26 +2749,11 @@ impl<'a> Gen<'a> {
                     .unwrap();
                 self.set_slot(d, r);
             }
-            Eval | StrictEval => {
-                let argc = u32::from(p.next_uint16().unwrap());
-                let need = argc + 2;
-                let base = self.top_addr(d - need);
-                let av = self.i32c(argc);
-                let env = self.env();
-                let script = self.script_ptr();
-                let pcv = self.i32c(self.pc.get());
-                let r = self.rt(h.eval, &[base, av, env, script, pcv]);
-                self.set_slot(d - need, r);
-            }
-            SpreadEval | StrictSpreadEval => {
-                let callee = self.slot(d - 3);
-                let thisv = self.slot(d - 2);
-                let arr = self.slot(d - 1);
-                let env = self.env();
-                let script = self.script_ptr();
-                let pcv = self.i32c(self.pc.get());
-                let r = self.rt(h.spread_eval, &[callee, thisv, arr, env, script, pcv]);
-                self.set_slot(d - 3, r);
+            // Direct eval reads the caller's interpreter frame (its
+            // `arguments`, its Debugger frame), which a compiled frame does
+            // not carry: the script is interpreted.
+            Eval | StrictEval | SpreadEval | StrictSpreadEval => {
+                return Err(format!("{} ({op:?})", super::UNSUPPORTED_OP));
             }
             DynamicImport => {
                 let spec = self.slot(d - 2);

@@ -1826,7 +1826,7 @@ fn translate_for_pipeline(
         translate::Outcome::Compiled { .. } => first,
         translate::Outcome::Skipped(reason) => {
             declines.push(Decline {
-                allowed: first == Tier::Baseline && reason == baseline::FORCE_INTERPRETER,
+                allowed: tier::decline_is_allowed(first, reason),
                 ..Decline::new(first, reason.clone())
             });
             Tier::Interp
