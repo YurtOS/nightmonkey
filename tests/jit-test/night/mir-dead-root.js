@@ -141,6 +141,38 @@ function overwritePolymorphic(x) {
   collect();
   return finalizeCount() - c0;
 }
+// The new value is a managed one that is still read, and a ten-array churn()
+// before the collection reuses the home slots, so only the frame can keep the
+// old object (and the local's death at a block boundary must not lose the
+// overwrite).
+function churn() {
+  var a = [], b = [], c = [], d = [], e = [], f = [], g = [], h = [], i = [], j = [];
+  gc();
+  return a.length + b.length + c.length + d.length + e.length + f.length +
+         g.length + h.length + i.length + j.length;
+}
+function overwriteLiveObject(k) {
+  gc();
+  var o = makeFinalizeObserver();
+  var c0 = finalizeCount();
+  o = {};
+  if (o.x === 1) k++;
+  churn();
+  gc();
+  return finalizeCount() - c0;
+}
+function overwriteLiveUndefinedThenScalar(k) {
+  gc();
+  var o = makeFinalizeObserver();
+  var c0 = finalizeCount();
+  o = null;
+  if (o === 1) k++;
+  o = 5;
+  if (o === 1) k++;
+  churn();
+  gc();
+  return finalizeCount() - c0;
+}
 // Dead through a branch rather than an overwrite: the last use is before the
 // second call.
 function lastUseThenCall(flag) {
@@ -178,6 +210,8 @@ for (var n = 0; n < 40; n++) {
   assertEq(overwriteThenAdd(), 1);
   assertEq(overwriteLoopThenCompare(3), 1);
   assertEq(overwriteInFinally(), 1);
+  assertEq(overwriteLiveObject(n & 1), 1);
+  assertEq(overwriteLiveUndefinedThenScalar(n & 1), 1);
   assertEq(overwritePolymorphic(n & 1 ? 5 : 'str'), 1);
   assertEq(lastUseThenCall(n & 1), 1);
   assertEq(stillHeld(), 0);
