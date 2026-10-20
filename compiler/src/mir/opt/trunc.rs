@@ -250,6 +250,96 @@ pub(super) fn trunc_demand_once(m: &Module, f: &mut Func) -> usize {
             }
         }
     }
+    // Which results are made wrapping. An exit recomputes a wrapped value
+    // exactly from its operands, `RECOVER_DEPTH` levels down (`recover_at_exits`),
+    // and only for a result that is itself wrapped: so a chain deeper than that
+    // keeps its checks, and so does any producer feeding an add that keeps its
+    // check (its wrapped result would reach an exit with no recipe).
+    let arith = |op: &Opcode| {
+        matches!(
+            op,
+            Opcode::I32Ovf(ArithOp::Add | ArithOp::Sub | ArithOp::Mul)
+                | Opcode::I32Wrap(ArithOp::Add | ArithOp::Sub | ArithOp::Mul)
+        )
+    };
+    let mut arith_prod: HashMap<Value, Inst> = HashMap::new();
+    for &b in &live {
+        for &i in &f.blocks[b].insts {
+            if arith(&f.insts[i].op) {
+                if let Some(r) = produced(f, &f.insts[i]) {
+                    arith_prod.insert(r, i);
+                }
+            }
+        }
+    }
+    let mut depth: HashMap<Value, u32> = HashMap::new();
+    let depth_of = |depth: &HashMap<Value, u32>, v: Value| depth.get(&v).copied().unwrap_or(0);
+    for _ in 0..=RECOVER_DEPTH + 1 {
+        let mut changed = false;
+        for (&r, &i) in &arith_prod {
+            let a = &f.insts[i].args;
+            let d = (1 + depth_of(&depth, a[0]).max(depth_of(&depth, a[1]))).min(RECOVER_DEPTH + 1);
+            if d > depth_of(&depth, r) {
+                depth.insert(r, d);
+                changed = true;
+            }
+        }
+        for (&p, ins) in &params_in {
+            let d = ins.iter().map(|&x| depth_of(&depth, x)).max().unwrap_or(0);
+            if d > depth_of(&depth, p) {
+                depth.insert(p, d);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mul_fits = |f: &Func, i: Inst| {
+        let a = &f.insts[i].args;
+        let (Type::I32(x), Type::I32(y)) = (f.values[a[0]].ty, f.values[a[1]].ty) else {
+            return false;
+        };
+        [x.lo * y.lo, x.lo * y.hi, x.hi * y.lo, x.hi * y.hi]
+            .iter()
+            .all(|&p| (i64::from(i32::MIN)..=i64::from(i32::MAX)).contains(&p))
+    };
+    let mut wrapped: BTreeSet<Value> = BTreeSet::new();
+    for (&r, &i) in &arith_prod {
+        let op_ok = match f.insts[i].op {
+            Opcode::I32Ovf(ArithOp::Mul) | Opcode::I32Wrap(ArithOp::Mul) => mul_fits(f, i),
+            _ => unit(&units, f, r) <= TRUNC_UNITS_CAP,
+        };
+        if trunc.contains(&r) && op_ok && depth_of(&depth, r) <= RECOVER_DEPTH {
+            wrapped.insert(r);
+        }
+    }
+    // A wrapped value an add that keeps its check consumes (directly or
+    // through a param) is made exact: drop it, and repeat.
+    loop {
+        let mut changed = false;
+        for (&r, &i) in &arith_prod {
+            if wrapped.contains(&r) {
+                continue;
+            }
+            let mut seen: BTreeSet<Value> = BTreeSet::new();
+            let mut stack: Vec<Value> = f.insts[i].args.clone();
+            while let Some(x) = stack.pop() {
+                if !seen.insert(x) {
+                    continue;
+                }
+                if wrapped.remove(&x) {
+                    changed = true;
+                }
+                if let Some(ins) = params_in.get(&x) {
+                    stack.extend(ins.iter().copied());
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
     // Rewrite.
     let mut n = 0;
     for b in live {
@@ -271,11 +361,11 @@ pub(super) fn trunc_demand_once(m: &Module, f: &mut Func) -> usize {
             let fits = ps
                 .iter()
                 .all(|&p| (i64::from(i32::MIN)..=i64::from(i32::MAX)).contains(&p));
-            if !fits || out.is_some_and(|r| !trunc.contains(&r)) {
+            if !fits || out.is_some_and(|r| !wrapped.contains(&r)) {
                 continue;
             }
         } else if let Some(r) = out {
-            if !trunc.contains(&r) || unit(&units, f, r) > TRUNC_UNITS_CAP {
+            if !wrapped.contains(&r) {
                 continue;
             }
         }

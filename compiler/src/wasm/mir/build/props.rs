@@ -267,19 +267,10 @@ impl<'s, 'a> Run<'s, 'a> {
             self.push(n, Ty::I32);
             return Ok(());
         }
-        // A typed array's length: its length slot.
-        if let Ty::Ta(_) = recv.ty {
-            if self.mm.atoms[a].chars() == "length".encode_utf16().collect::<Vec<u16>>().as_slice()
-            {
-                let n = self.inst(
-                    Opcode::LengthTa,
-                    vec![recv.v],
-                    Some(MType::i32_range(0, i64::from(i32::MAX))),
-                );
-                self.push(n, Ty::I32);
-                return Ok(());
-            }
-        }
+        // A typed array's `length` is not folded to its length slot: the kind
+        // guard proves the class, not that no own `length` shadows the builtin
+        // getter or that the prototype's getter is still the engine's. The
+        // generic read (`PureLengthRead`) decides that.
         if self.mm.atoms[a].chars() == "length".encode_utf16().collect::<Vec<u16>>().as_slice()
             && self.length_op(recv)
         {

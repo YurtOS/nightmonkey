@@ -235,9 +235,16 @@ impl<'s, 'a> Run<'s, 'a> {
                 };
                 // Against a null or undefined constant: tag tests, which
                 // run no user code (no fence).
+                // A strict compare needs the constant to be one of them: for a
+                // union of the two, `x`'s tag matching either says nothing.
+                let strict = matches!(op, StrictEq | StrictNe);
                 let nullish = |t: Ty| {
                     let tags = t.tags();
-                    !tags.is_empty() && tags.subset_of(TagSet::prims(PRIM_NULL | PRIM_UNDEFINED))
+                    !tags.is_empty()
+                        && tags.subset_of(TagSet::prims(PRIM_NULL | PRIM_UNDEFINED))
+                        && (!strict
+                            || tags == TagSet::prims(PRIM_NULL)
+                            || tags == TagSet::prims(PRIM_UNDEFINED))
                 };
                 let equality = matches!(op, Eq | Ne | StrictEq | StrictNe);
                 let konst = if equality && nullish(b.ty) {

@@ -156,9 +156,14 @@ impl<'s, 'a> Run<'s, 'a> {
         match x.ty {
             Ty::Dead => unreachable!("a dead slot is never read"),
             Ty::Bool => x.v,
-            // A closure never emulates `undefined`.
-            Ty::Obj(..) | Ty::ObjHint(_) | Ty::Ctor(..) | Ty::Native | Ty::Ta(_) | Ty::Fn(_) => {
+            // A layout-keyed object, a closure or a typed array never emulates
+            // `undefined`; a native object of unproven class may (document.all).
+            Ty::Obj(..) | Ty::ObjHint(_) | Ty::Ctor(..) | Ty::Ta(_) | Ty::Fn(_) => {
                 self.inst(Opcode::ConstBool(true), vec![], Some(MType::Bool))
+            }
+            Ty::Native => {
+                let v = self.boxed(x);
+                self.inst(Opcode::JsToBool, vec![v], Some(MType::Bool))
             }
             Ty::I32 => {
                 let z = self.const_i32(0);
