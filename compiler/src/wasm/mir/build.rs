@@ -2125,16 +2125,32 @@ impl<'s, 'a> Run<'s, 'a> {
             .insert(pc, u32::try_from(depth).unwrap());
         // A slot dead at the exit's pc goes as `const.val dead`: baseline
         // never reads it before writing it, so the frame keeps whatever
-        // (valid) value it has.
+        // (valid) value it has. Except a managed local that now holds a
+        // constant (`o = undefined`): a retaining store may have put its
+        // previous value in the frame, which would stay alive after the
+        // local was overwritten, as baseline's own write would not leave it.
+        // Writing a constant extends no live range.
         let live = self.s.live.get(&pc).cloned();
         let mut dead = None;
         let mut ops = vec![];
+        let frame_len = self.frame_len();
         for (i, &x) in st.iter().enumerate() {
             // A written-through slot is already in the frame.
             let in_frame = self.write_through(i);
             let is_dead =
                 in_frame || x.ty == Ty::Dead || live.as_ref().is_some_and(|l| i < l.len() && !l[i]);
-            if is_dead {
+            let overwritten_const = is_dead
+                && !in_frame
+                && (1..frame_len).contains(&i)
+                && matches!(x.ty, Ty::Val(_))
+                && matches!(
+                    self.f.values[x.v].def,
+                    mir::func::ValueDef::Result(c, _)
+                        if matches!(self.f.insts[c].op, Opcode::ConstVal(k) if k != ConstVal::Dead)
+                );
+            if overwritten_const {
+                ops.push(x.v);
+            } else if is_dead {
                 let d = *dead.get_or_insert_with(|| self.const_val(ConstVal::Dead));
                 ops.push(d);
             } else {
