@@ -45,6 +45,7 @@ impl<'s, 'a> Run<'s, 'a> {
             next_pc: None,
             overwritten: std::collections::BTreeSet::new(),
             retained_once: std::collections::BTreeSet::new(),
+            block_undef: None,
             likely_targets: vec![],
             gname_vals: BTreeMap::new(),
             math_fns: BTreeMap::new(),
@@ -196,7 +197,7 @@ impl<'s, 'a> Run<'s, 'a> {
                 self.retained_once.insert(ix);
                 x.v
             } else if self.overwritten.contains(&ix) && !self.write_through(ix) {
-                self.const_val(ConstVal::Undefined)
+                self.release_undef()
             } else {
                 continue;
             };
@@ -223,6 +224,18 @@ impl<'s, 'a> Run<'s, 'a> {
                 | Ty::Native
                 | Ty::Ta(_)
         )
+    }
+
+    /// This block's `undefined` for a release store.
+    pub(super) fn release_undef(&mut self) -> mir::Value {
+        if let Some((b, v)) = self.block_undef {
+            if b == self.cur {
+                return v;
+            }
+        }
+        let v = self.const_val(ConstVal::Undefined);
+        self.block_undef = Some((self.cur, v));
+        v
     }
 
     /// Whether slot `ix`, of type `t`, may have held a heap value: not
@@ -264,15 +277,19 @@ impl<'s, 'a> Run<'s, 'a> {
         // slot a block enters dead has no type (`Ty::Dead`), yet a
         // predecessor's retaining store may have left an object in the frame:
         // it counts as possibly managed.
+        // The old object may be in the frame whatever the new value is, and the
+        // slot may die later (a block boundary makes it `Ty::Dead`, which
+        // `retain_all` skips): remember the overwrite even when the new value
+        // is managed and still read.
+        if self.may_hold_gc_thing(ix, old.ty) || self.retained_once.contains(&ix) {
+            self.overwritten.insert(ix);
+        }
         if dead_after || !Self::managed_ty(x.ty) {
-            if self.may_hold_gc_thing(ix, old.ty) {
-                self.overwritten.insert(ix);
-            }
             let v = if Self::managed_ty(x.ty) {
                 self.retained_once.insert(ix);
                 x.v
             } else {
-                self.const_val(ConstVal::Undefined)
+                self.release_undef()
             };
             self.f.add_inst(
                 self.cur,

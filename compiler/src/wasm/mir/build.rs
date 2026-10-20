@@ -1095,6 +1095,10 @@ struct Run<'s, 'a> {
     /// slot that is `Ty::Dead` counts as having held a heap value only if
     /// it is in this set (the first assignment to a local finds it dead).
     retained_once: std::collections::BTreeSet<usize>,
+    /// The `undefined` constant already made in a block, for the release
+    /// stores: one value per block lets the lowering see that the frame
+    /// already holds it (`framed`) and drop the repeats.
+    block_undef: Option<(mir::Block, mir::Value)>,
     /// The likely callees the next generic `call` gets (`attach_targets`).
     likely_targets: Vec<ScriptId>,
     /// Values read from a global by name, and the Math functions read off

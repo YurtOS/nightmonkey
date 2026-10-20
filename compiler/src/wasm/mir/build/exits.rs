@@ -216,7 +216,7 @@ impl<'s, 'a> Run<'s, 'a> {
             if is_dead && !in_frame && self.overwritten.contains(&i) {
                 // The frame may hold an object this local no longer does:
                 // the exit overwrites it (baseline would, before any read).
-                ops.push(self.const_val(ConstVal::Undefined));
+                ops.push(self.release_undef());
             } else if is_dead {
                 let d = *dead.get_or_insert_with(|| self.const_val(ConstVal::Dead));
                 ops.push(d);
