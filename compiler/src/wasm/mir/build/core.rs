@@ -45,6 +45,7 @@ impl<'s, 'a> Run<'s, 'a> {
             throw_blk: None,
             renames: vec![],
             next_pc: None,
+            bug: None,
             overwritten: released.overwritten.clone(),
             retained_once: released.retained_once.clone(),
             block_undef: None,

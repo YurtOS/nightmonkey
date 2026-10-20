@@ -1113,6 +1113,9 @@ struct Run<'s, 'a> {
     renames: Vec<(mir::Value, Slot)>,
     /// The pc after the op being built (`js_keep`'s exits).
     next_pc: Option<Pc>,
+    /// A builder invariant that failed where the code cannot return an error
+    /// (`enter`); the run reports it when it ends.
+    bug: Option<String>,
     /// Frame slots whose local was overwritten (so far in build order) with a
     /// value that is not managed, from one that was or may have been: their
     /// frame copy may hold an object the local no longer does, so each

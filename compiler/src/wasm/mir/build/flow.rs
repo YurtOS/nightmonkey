@@ -69,18 +69,20 @@ impl<'s, 'a> Run<'s, 'a> {
         // where the target takes a value for it, the current one, read
         // back (else the target's entry types never settle).
         if self.mapped() {
-            if let Some(want) = self.entry_types.get(&to).cloned() {
-                for n in 0..self.s.nargs {
-                    let ix = self.arg_ix(n);
-                    if self.st.get(ix).is_some_and(|x| x.ty == Ty::Dead)
-                        && want.get(ix).is_some_and(|&t| t != Ty::Dead)
-                    {
-                        let v = self.inst(Opcode::ArgsMapped(n), vec![], Some(MType::VAL_TOP));
-                        self.st[ix] = Slot {
-                            v,
-                            ty: Ty::Val(TagSet::ALL),
-                        };
-                    }
+            let live = self.s.live.get(&to).cloned();
+            for n in 0..self.s.nargs {
+                let ix = self.arg_ix(n);
+                // Live at the target, whether it is a back edge to a block
+                // already entered or a forward edge to one not yet entered
+                // (a join, whose entry takes a value for it on every edge).
+                if self.st.get(ix).is_some_and(|x| x.ty == Ty::Dead)
+                    && live.as_ref().is_some_and(|l| ix < l.len() && l[ix])
+                {
+                    let v = self.inst(Opcode::ArgsMapped(n), vec![], Some(MType::VAL_TOP));
+                    self.st[ix] = Slot {
+                        v,
+                        ty: Ty::Val(TagSet::ALL),
+                    };
                 }
             }
         }

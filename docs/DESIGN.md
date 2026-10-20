@@ -310,8 +310,9 @@ Generator and async bodies are supported by the baseline tier
 (`wasm/baseline/codegen/resume.rs`) and `NightGenerator.cpp`. Suspension stores
 locals and operands in an engine object using an AOT-owned layout; resume
 re-enters the same compiled script. An AOT-suspended generator cannot resume in
-the interpreter. A generator that reads its actuals is declined, and resumable
-bodies do not receive the ordinary optimistic specialization.
+the interpreter. A generator that reads its actuals after suspension is declined. The MIR tier
+compiles generators and async functions with guarded resume roots (a guard that
+fails at a resume exits to baseline at the landing).
 
 Try notes feed CFG and frame construction. Calls and helpers propagate pending
 exceptions through the error result. Inlining rejects contexts whose exception
@@ -328,6 +329,15 @@ fallback. Exhausting fixed backtracking storage must return retry.
 translation, and diagnostic policy. Structural ABI limits stay with their
 representations. Some limits are scattered throughout the implementations of
 various heuristics; cleanup is ongoing.
+
+Size limits keep the guest compile within the guest's memory (a Rust
+allocation failure aborts the guest; it does not return): the MIR tier declines
+a script whose (bytecode bytes x frame slots) exceeds `MAX_LIVENESS_CELLS`, a
+script of over 1 MiB of bytecode is declined, and one assembled batch holds at
+most about 100,000 blobs (wasmparser's 1,000,000 effective-type-size limit; a
+larger program installs nothing and stays interpreted). A function's lowered
+body may not exceed wasmparser's 7,654,321 bytes either; inner-loop onramps,
+which make waffle copy code, are what grows it (`wants_onramp`).
 
 ## 12. Capabilities and fallback
 
@@ -347,6 +357,11 @@ interpreter lane (`tests/jit-test-excludes.txt`):
 - A compiled frame carries no pc, so an error message that names an expression
   prints the value instead (`[] is not ...` where the interpreter prints
   `arr is not ...`). The text is implementation-defined.
+- Anything that walks the interpreter's frames sees nothing for compiled ones:
+  `new Error().stack` is empty and `lineNumber` is 0 for an error made in
+  compiled code, `f.caller` is `null`, and an uncaught exception's report loses
+  its `file:line:col` and `Stack:` lines. The jstests that depend on these are
+  listed in `tests/jstests-excludes.txt`.
 - An `arguments` element that the interpreter keeps alive after `delete` or a
   strict `defineProperty` may be released earlier. The specification allows it.
 

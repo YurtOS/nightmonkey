@@ -565,7 +565,15 @@ pub fn hoist_reads(m: &Module, f: &mut Func) -> usize {
                 let d = &f.insts[i];
                 if depth > 8
                     || f.inst_frame[i] != 0
-                    || !matches!(d.op, Opcode::Box | Opcode::Weaken | Opcode::Unbox(_))
+                    || !matches!(
+                        d.op,
+                        Opcode::Box
+                            | Opcode::Weaken
+                            | Opcode::Unbox(_)
+                            | Opcode::ConstBool(_)
+                            | Opcode::ConstI32(_)
+                            | Opcode::ConstVal(_)
+                    )
                 {
                     return None;
                 }
@@ -620,10 +628,22 @@ pub fn hoist_reads(m: &Module, f: &mut Func) -> usize {
             if !starts || !movable(t) {
                 continue;
             }
+            // The entry's operands, and what its edges pass: the op moves
+            // to the preheader with its edges, so both must be there.
+            let edge_vals = d
+                .succs
+                .iter()
+                .flat_map(|s| s.args.iter())
+                .filter_map(|a| match *a {
+                    EdgeArg::Value(v) => Some(v),
+                    _ => None,
+                });
             let Some(mut lift) = d
                 .args
                 .iter()
-                .map(|&a| chain(a))
+                .copied()
+                .chain(edge_vals)
+                .map(&chain)
                 .collect::<Option<Vec<_>>>()
                 .map(|c| c.concat())
             else {

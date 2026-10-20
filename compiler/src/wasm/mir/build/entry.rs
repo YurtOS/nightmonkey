@@ -74,7 +74,10 @@ impl<'s, 'a> Run<'s, 'a> {
                 self.onramp_root(h);
             }
         }
-        Ok(())
+        match self.bug.take() {
+            Some(bug) => Err(bug),
+            None => Ok(()),
+        }
     }
 
     /// The onramp-root policy (`docs/BASELINE.md` §7): every outermost
@@ -267,7 +270,7 @@ impl<'s, 'a> Run<'s, 'a> {
             };
             let mut exit_b = None;
             let mut args = vec![];
-            for (&from_ty, &to_ty) in ttys.iter().zip(&tys) {
+            for (i, (&from_ty, &to_ty)) in ttys.iter().zip(&tys).enumerate() {
                 let v = if from_ty == Ty::Dead {
                     None
                 } else {
@@ -276,7 +279,18 @@ impl<'s, 'a> Run<'s, 'a> {
                 if to_ty == Ty::Dead {
                     continue;
                 }
-                let v = v.expect("a slot live at a block is live on each edge into it");
+                let Some(v) = v else {
+                    // A builder bug, not a program's: reported when the run
+                    // ends, so the script declines instead of the guest
+                    // aborting.
+                    self.bug.get_or_insert_with(|| {
+                        format!(
+                            "BUG: slot {i} live at pc {} but not on an edge into it",
+                            pc.get()
+                        )
+                    });
+                    continue;
+                };
                 if matches!((from_ty, to_ty), (Ty::Val(_), Ty::Native | Ty::Ta(_))) {
                     let fail = *exit_b.get_or_insert_with(|| {
                         let here = self.cur;
