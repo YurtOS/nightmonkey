@@ -218,14 +218,20 @@ impl<'s, 'a> Run<'s, 'a> {
         )
     }
 
-    /// A managed local overwritten by a value it is never read again from:
-    /// retain the new value in its frame slot (like `retain_all`, lazily). An
-    /// earlier retaining store may have put the old object there, and the
-    /// frame is all that keeps it, so an exit that finds the local dead would
-    /// leave it alive. Baseline's write of the new value releases it.
-    fn retain_dead_overwrite(&mut self, ix: usize) {
+    /// A local that held, or now holds, a managed value, overwritten by a
+    /// value it is never read again from: retain the new value (`undefined`
+    /// for a scalar, which is dead anyway) in its frame slot, like
+    /// `retain_all`, lazily. An earlier retaining store may have put the old
+    /// object there, and the frame is all that keeps it, so an exit that
+    /// finds the local dead would leave it alive. Baseline's write of the new
+    /// value releases it.
+    fn retain_dead_overwrite(&mut self, ix: usize, old: Slot) {
         let x = self.st[ix];
-        if ix == 0 || ix >= self.frame_len() || self.write_through(ix) || !Self::managed_ty(x.ty) {
+        if ix == 0
+            || ix >= self.frame_len()
+            || self.write_through(ix)
+            || !(Self::managed_ty(x.ty) || Self::managed_ty(old.ty))
+        {
             return;
         }
         let dead_after = self
@@ -233,10 +239,15 @@ impl<'s, 'a> Run<'s, 'a> {
             .and_then(|n| self.s.live.get(&n))
             .is_some_and(|l| ix < l.len() && !l[ix]);
         if dead_after {
+            let v = if Self::managed_ty(x.ty) {
+                x.v
+            } else {
+                self.const_val(ConstVal::Undefined)
+            };
             self.f.add_inst(
                 self.cur,
                 Opcode::FrameStore(u32::try_from(ix).unwrap()),
-                vec![x.v],
+                vec![v],
                 &[],
                 vec![],
             );
@@ -411,8 +422,9 @@ impl<'s, 'a> Run<'s, 'a> {
                 None,
             );
         }
+        let old = self.st[ix];
         self.st[ix] = x;
-        self.retain_dead_overwrite(ix);
+        self.retain_dead_overwrite(ix, old);
     }
 
     pub(super) fn arg_ix(&self, n: u32) -> usize {

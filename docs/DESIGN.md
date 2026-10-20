@@ -196,8 +196,10 @@ and preserve JavaScript exception behavior.
 Before a may-GC call, every live GC value must be visible in the traced AOT
 stack or another engine root. MIR roots a value in a home slot when it is live
 across a may-GC call, and writes each managed local to its frame slot so the GC
-sees it (`docs/MIR.md`, rooting). A local overwritten with a constant is
-released when its frame slot is overwritten, as in baseline. Compiled direct
+sees it (`docs/MIR.md`, rooting). A dead local overwritten by any value
+is released when its frame slot is overwritten, as in baseline: the overwrite
+writes the new value (or `undefined` for a scalar) to the slot, and the passes
+that delete a non-escaping allocation keep that store as `undefined`. Compiled direct
 calls return an error result and effect bits; effect bits kill heap, stamp, and
 binding facts but do not replace rooting.
 
