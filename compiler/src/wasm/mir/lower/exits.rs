@@ -84,13 +84,6 @@ impl<'a> Lower<'a> {
         Ok(())
     }
 
-    /// `exit.inline` (§5.5): finish the inlined callee in its baseline
-    /// body from `pc`. Write the operands (the frame holds only those
-    /// written through, the formals of a mapped `arguments`), the resume
-    /// word, then call the callee's entry with `ARGC_RESUME_BIT` on its
-    /// frame. The caller continues on `ok` with the callee's result, or on
-    /// `err`.
-    #[allow(clippy::too_many_arguments)]
     /// Count this exit (`--mir-exit-census`), with its static record.
     pub(super) fn census_exit(&mut self, script: ScriptId, pc: Pc, what: &str) {
         let Some(census) = self.exit_census else {
@@ -106,6 +99,13 @@ impl<'a> Lower<'a> {
         self.call1(census, &[k, i], Type::I32);
     }
 
+    /// `exit.inline` (§5.5): finish the inlined callee in its baseline
+    /// body from `pc`. Write the operands (the frame holds only those
+    /// written through, the formals of a mapped `arguments`), the resume
+    /// word, then call the callee's entry with `ARGC_RESUME_BIT` on its
+    /// frame. The caller continues on `ok` with the callee's result, or on
+    /// `err`.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn exit_inline(
         &mut self,
         inst: mir::Inst,

@@ -64,11 +64,13 @@ static bool InprocStrict() {
 }
 
 static bool InprocFail(JSContext* cx, const char* what) {
-  fprintf(stderr, "night: inprocess: %s; staying interpreted\n", what);
+  const bool strict = InprocStrict();
+  fprintf(stderr, "night: inprocess: %s%s\n", what,
+          strict ? "" : "; staying interpreted");
 #ifdef NIGHTMONKEY_DEBUG
   MOZ_CRASH("in-process AOT compilation failed");
 #endif
-  if (InprocStrict()) {
+  if (strict) {
     JS_ReportErrorASCII(cx, "night: inprocess: %s", what);
     return false;
   }
@@ -255,7 +257,9 @@ bool js::CompileInProcess(JSContext* cx, JS::Handle<JSScript*> script,
   // install and the environment install have succeeded.
   if (!night_runtime_install_env(cx, env)) {
     night_snapshot_walk_delete(walk);
-    night_inproc_delete(out);
+    // `out` is deliberately not freed: the install may already have published
+    // pointers into its descriptor (the environment, regex patterns) before it
+    // failed, and the module is mounted. The run reports the error.
     return false;
   }
   night_inproc_release_code(out);
@@ -270,8 +274,12 @@ bool js::CompileInProcess(JSContext* cx, JS::Handle<JSScript*> script,
     uint32_t sid = night_inproc_script_source_id(out, i);
     uint32_t addr = night_snapshot_walk_script_addr(walk, sid);
     if (!addr) {
-      fprintf(stderr,
-              "night: inprocess: script source#%u has no heap address\n", sid);
+      char what[64];
+      snprintf(what, sizeof what, "script source#%u has no heap address", sid);
+      if (InprocStrict()) {
+        return InprocFail(cx, what);
+      }
+      fprintf(stderr, "night: inprocess: %s\n", what);
       continue;
     }
     auto* base =

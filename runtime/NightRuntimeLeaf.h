@@ -39,15 +39,6 @@ int32_t night_runtime_slots_covered(uint32_t obj, uint32_t n);
 NIGHT_RUNTIME_EXPORT(night_runtime_get_prop_pure)
 uint64_t night_runtime_get_prop_pure(JSContext* cx, uint64_t recv,
                                      uint32_t atomId, uint32_t cacheIdx);
-// MIR's `setprop.data` miss: `recv.atomId = val` where the set runs no
-// code (an own writable data property of a native object, or an add with
-// no setter, read-only property or hook on the chain; never the global or
-// a Watchtower-watched object), through the IC miss path (filling the
-// site's way). `flags` bit 1 (2): the compiled vouch, as
-// `night_runtime_set_prop_ic_miss`'s. 1 once stored, 2 once stored where
-// it demoted a claim of the object's published class MIR reads (TYPES,
-// SLOTS, the class), 0 where it would not be such a set (nothing done), 3
-// on an engine error. May GC.
 // Whether ToPrimitive of `v` (boxed) runs no user code: a primitive, or
 // an object whose conversion is Object.prototype's own (no @@toPrimitive,
 // the builtin valueOf and toString, a data @@toStringTag or none), found

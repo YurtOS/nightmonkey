@@ -4792,8 +4792,7 @@ namespace {
 constexpr uint32_t kNightNoDepart = 0xffffffffu;
 constexpr size_t kNightDepartMaxDepth = 1u << 16;
 
-void NightCensusDump() {
-  JSContext* cx = CurrentNightContext();
+void NightCensusDump(JSContext* cx) {
   if (!RtCensus(cx).counts) {
     return;
   }
@@ -4816,6 +4815,11 @@ void NightCensusDump() {
 
 }  // namespace
 
+// Printed from the context's destroy hook (runtime/NightHooks.cpp), while its
+// state still holds the counts.
+extern "C" void NightCensusDumpContext(JSContext* cx) {
+  NightCensusDump(cx);
+}
 
 static js::night::NightRuntimeData& RtRegex(JSContext* cx);
 
@@ -4939,7 +4943,6 @@ int32_t night_runtime_census(uint32_t kind, uint32_t id) {
     RtCensus(cx).counts = new std::map<uint64_t, uint64_t>();
     RtCensus(cx).depart = new std::vector<NightDepartCells>{
         {kNightNoDepart, kNightNoDepart, false, RtState(cx).stampEpoch}};
-    atexit(NightCensusDump);
   }
   if (mode == js::night::CensusMode::FlatBlock) {
     if (!RtCensus(cx).block) {

@@ -48,7 +48,7 @@ impl<'a> Lower<'a> {
     }
 
     /// The first free byte above everything a may-GC call's frame chain
-    /// holds, as an offset from `sp`: where its helper's out-slot and GC
+    /// holds, as an offset from `vp`: where its helper's out-slot and GC
     /// scan limit, and a real call's frame, go -- as a native stack pointer
     /// would be. Set by the call's `root`: in the function's own frame,
     /// past the rooting slots its live values occupy (`root_top`); in an
