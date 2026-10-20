@@ -28,11 +28,14 @@ failed=0
 for lane in "${lanes[@]}"; do
   off=0
   strict=0
-  if [ "$lane" = interpreter ]; then off=1; else strict=1; fi
+  opts=
+  # The compiled lane also fails a script a tier declined for any reason but a
+  # designed-out op (a MIR bug falls back to baseline, which would hide it).
+  if [ "$lane" = interpreter ]; then off=1; else strict=1; opts=--strict-coverage; fi
   # A compiled lane runs strict: a failed batch must fail the run, not leave
   # the scripts interpreted and every test green.
   if timeout --kill-after=30s "${seconds}s" \
-      env NIGHT_INPROCESS_OFF="$off" NIGHT_INPROC_STRICT="$strict" \
+      env NIGHT_INPROCESS_OFF="$off" NIGHT_INPROC_STRICT="$strict" NIGHT_OPTIONS="$opts" \
       "${harness[@]}" 2>&1 | tee "$logs/$suite-$lane.log"; then
     echo "$suite ($lane): passed"
   else
