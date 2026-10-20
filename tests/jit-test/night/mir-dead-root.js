@@ -39,6 +39,31 @@ function overwriteParam(x) {
   collect();
   return finalizeCount() - c0;
 }
+// Overwritten by a scalar: the local's old object must go too.
+function overwriteInt() {
+  gc();
+  var o = makeFinalizeObserver();
+  var c0 = finalizeCount();
+  o = 5;
+  collect();
+  return finalizeCount() - c0;
+}
+function overwriteBool() {
+  gc();
+  var o = makeFinalizeObserver();
+  var c0 = finalizeCount();
+  o = true;
+  collect();
+  return finalizeCount() - c0;
+}
+function overwriteDouble() {
+  gc();
+  var o = makeFinalizeObserver();
+  var c0 = finalizeCount();
+  o = 1.5;
+  collect();
+  return finalizeCount() - c0;
+}
 // Dead through a branch rather than an overwrite: the last use is before the
 // second call.
 function lastUseThenCall(flag) {
@@ -66,6 +91,9 @@ for (var n = 0; n < 40; n++) {
   assertEq(overwriteObject(), 1);
   assertEq(overwriteFresh(n), 1);
   assertEq(overwriteParam({}), 1);
+  assertEq(overwriteInt(), 1);
+  assertEq(overwriteBool(), 1);
+  assertEq(overwriteDouble(), 1);
   assertEq(lastUseThenCall(n & 1), 1);
   assertEq(stillHeld(), 0);
 }
