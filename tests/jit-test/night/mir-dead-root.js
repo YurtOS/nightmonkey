@@ -77,6 +77,24 @@ function overwriteLiveScalar() {
   collect();
   return finalizeCount() - c0;
 }
+// The overwrite is in a block the slot enters dead (a branch or a loop body):
+// the old object may still be in the frame from a predecessor's retaining store.
+function overwriteInBranch(b) {
+  gc();
+  var o = makeFinalizeObserver();
+  var c0 = finalizeCount();
+  if (b) o = 5; else o = 6;
+  collect();
+  return finalizeCount() - c0;
+}
+function overwriteInLoop(n) {
+  gc();
+  var o = makeFinalizeObserver();
+  var c0 = finalizeCount();
+  for (var i = 0; i < n; i++) o = i;
+  collect();
+  return finalizeCount() - c0;
+}
 // Dead through a branch rather than an overwrite: the last use is before the
 // second call.
 function lastUseThenCall(flag) {
@@ -108,6 +126,8 @@ for (var n = 0; n < 40; n++) {
   assertEq(overwriteBool(), 1);
   assertEq(overwriteDouble(), 1);
   assertEq(overwriteLiveScalar(), 1);
+  assertEq(overwriteInBranch(n & 1), 1);
+  assertEq(overwriteInLoop(3), 1);
   assertEq(lastUseThenCall(n & 1), 1);
   assertEq(stillHeld(), 0);
 }
