@@ -95,6 +95,11 @@ impl<'s, 'a> Run<'s, 'a> {
             // Inlined callees make the loops around it bigger than their
             // bytecode says, and the duplication with them.
             Some(_) if !self.f.inline_frames.is_empty() => false,
+            // Every exit of a function holding the elided `arguments`
+            // placeholder materialises the object (`exit_operands`), which
+            // is most of its code; copying that for a side entry made one
+            // such constructor 53x larger (13.7 MB).
+            Some(_) if !self.f.frame.elided_args.is_empty() => false,
             Some(len) => len <= self.s.ctx.opts.inner_onramp_bytes(),
         }
     }

@@ -420,7 +420,10 @@ exhaustive `match` with no wildcard.
   - Which headers get onramp roots is policy. Every outermost loop gets
     one, since no duplication is needed there. Inner loops get one
     subject to a code-size limit, informed by the measurements in
-    step W (§8).
+    step W (§8), and none in a function holding the elided `arguments`
+    placeholder (every exit of such a function materialises the object, and
+    copying that for a side entry made one constructor 53x larger: 13.7 MB,
+    past the wasm body-size limit).
 
 ## 8. Plan
 

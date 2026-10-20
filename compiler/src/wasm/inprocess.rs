@@ -565,6 +565,21 @@ pub fn build_inprocess_batch(
         .to_wasm_bytes()
         .map_err(|e| format!("serialize in-process batch: {e}"))?;
     let blobs = carve_blobs(&bytes, n_imports)?;
+    if opts.diagnostics.stats {
+        let mut sizes: Vec<(usize, usize)> = blobs
+            .iter()
+            .map(Vec::len)
+            .enumerate()
+            .map(|(i, n)| (n, i))
+            .collect();
+        sizes.sort_unstable_by(|a, b| b.cmp(a));
+        crate::diag_line!(
+            "night: batch module {} bytes, {} blobs, largest {:?}",
+            bytes.len(),
+            blobs.len(),
+            &sizes[..sizes.len().min(5)]
+        );
+    }
 
     let mut scripts: Vec<(u32, u32)> = Vec::new();
     for (&sid, &f) in &source_id_to_table_func {
