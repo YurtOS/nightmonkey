@@ -198,7 +198,7 @@ impl<'s, 'a> Run<'s, 'a> {
             let v = if Self::managed_ty(x.ty) {
                 self.retained_once.insert(ix);
                 x.v
-            } else if self.overwritten.contains(&ix) && !self.is_formal(ix) {
+            } else if self.overwritten.contains(&ix) && !self.no_release(ix) {
                 self.release_undef()
             } else {
                 continue;
@@ -265,7 +265,7 @@ impl<'s, 'a> Run<'s, 'a> {
         let x = self.st[ix];
         if ix == 0
             || ix >= self.frame_len()
-            || self.is_formal(ix)
+            || self.no_release(ix)
             || self.write_through(ix)
             || !(Self::managed_ty(x.ty) || Self::managed_ty(old.ty) || old.ty == Ty::Dead)
         {
@@ -449,6 +449,13 @@ impl<'s, 'a> Run<'s, 'a> {
     /// rooted for the call; baseline shares the slot.)
     pub(super) fn is_formal(&self, ix: usize) -> bool {
         ix >= 1 && ix <= self.s.nargs as usize
+    }
+
+    /// Whether slot `ix` takes no release store: a formal (see `is_formal`),
+    /// or the return value, which a generator's forced return and every exit
+    /// read from the frame after the code that set it.
+    pub(super) fn no_release(&self, ix: usize) -> bool {
+        self.is_formal(ix) || ix == self.rval_ix()
     }
 
     /// Whether frame slot `ix` is written through: only the formals of a
