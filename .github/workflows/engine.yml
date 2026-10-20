@@ -21,8 +21,8 @@ defaults:
 # Resolve the supported engine branch once and record its exact SHA.
 # Every engine cache includes that revision; no neighboring build is reused.
 env:
-  FIREFOX_REPO: bytecodealliance/firefox
-  FIREFOX_REF: wasi-ff147
+  FIREFOX_REPO: YurtOS/firefox
+  FIREFOX_REF: issue3/external-slots
   SM_OBJDIR: obj-nightmonkey-sm
 
 jobs:
