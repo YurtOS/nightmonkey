@@ -90,6 +90,17 @@ def main():
     assert re.search(r"too large for the MIR tier", result.stderr), result.stderr[-2000:]
     print("PASS a very large function is declined, not compiled")
 
+    # The compile resolves a list of builtins by path; a user accessor or
+    # Proxy on one of those paths must not run during the compile.
+    fx = fixture.parent.parent.parent / "fixtures" / "accessor-prologue"
+    result = subprocess.run(
+        [str(wrapper), "-f", str(fx / "prologue.js"), "-f", str(fx / "main.js")],
+        env=env, capture_output=True, text=True, timeout=600,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip().endswith("ok"), result.stdout + result.stderr
+    print("PASS compile runs no user accessor")
+
 
 if __name__ == "__main__":
     main()
