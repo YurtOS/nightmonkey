@@ -5,8 +5,9 @@ var getCount = 0;
 Object.defineProperty(String.prototype, "split", { configurable: true, get() { getCount++; return function(){ return ["x"]; }; } });
 Object.defineProperty(Array.prototype, "map", { configurable: true, get() { getCount++; return undefined; } });
 // The pristine builtins the install step reads for its fast paths.
+var defineProperty = Object.defineProperty;
 function counting(obj, key) {
-  Object.defineProperty(obj, key, { configurable: true, get() { getCount++; return function () {}; } });
+  defineProperty(obj, key, { configurable: true, get() { getCount++; return function () {}; } });
 }
 counting(Array.prototype, "push");
 counting(Array.prototype, "pop");

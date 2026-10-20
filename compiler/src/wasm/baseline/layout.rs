@@ -534,7 +534,7 @@ pub fn local_count(script: &Script) -> u32 {
 /// (a Rust allocation failure does not return) instead of staying
 /// interpreted. A script over the bound has no liveness: the analysis treats
 /// every slot as live, and the MIR tier declines it.
-pub const MAX_LIVENESS_CELLS: usize = 1 << 26;
+pub const MAX_LIVENESS_CELLS: usize = 1 << 24;
 
 /// Whether `frame_liveness` of `script` is within [`MAX_LIVENESS_CELLS`].
 pub fn liveness_fits(script: &Script, nargs: u32, nlocals: u32) -> bool {

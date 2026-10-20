@@ -332,8 +332,9 @@ various heuristics; cleanup is ongoing.
 
 Size limits keep the guest compile within the guest's memory (a Rust
 allocation failure aborts the guest; it does not return): the MIR tier declines
-a script whose (bytecode bytes x frame slots) exceeds `MAX_LIVENESS_CELLS`, a
-script of over 1 MiB of bytecode is declined, and one assembled batch holds at
+a script whose (bytecode bytes x frame slots) exceeds `MAX_LIVENESS_CELLS`
+(16M; MIR value and parameter counts scale with the same product) or whose
+bytecode is over 32 KiB, a script of over 1 MiB of bytecode is declined, and one assembled batch holds at
 most about 100,000 blobs (wasmparser's 1,000,000 effective-type-size limit; a
 larger program installs nothing and stays interpreted). A function's lowered
 body may not exceed wasmparser's 7,654,321 bytes either; inner-loop onramps,
