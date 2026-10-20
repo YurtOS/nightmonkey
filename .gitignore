@@ -2,3 +2,7 @@
 target/
 __pycache__/
 *.pyc
+
+# jit_test.py writes its raw results here, wherever it is run
+/main_raw.log
+/main_*.log
