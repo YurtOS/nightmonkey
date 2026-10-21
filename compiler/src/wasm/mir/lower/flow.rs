@@ -168,50 +168,6 @@ impl<'a> Lower<'a> {
                 if matches!(f.insts[inst].op, Opcode::InlineEnter) {
                     self.block_enters = Some(f.inst_frame[inst]);
                 }
-                // Retaining stores still pending at a terminator that
-                // cannot GC (an inlined call's entry): the GC points are
-                // past the block, so they are written here.
-                if !self.pending_retain.is_empty()
-                    && !self.f.insts[inst].succs.is_empty()
-                    && !self.may_gc(inst)
-                {
-                    // An inlined callee that cannot GC needs none: the
-                    // caller's next GC point retains its locals itself.
-                    let callee_gc = self.block_enters.is_none_or(|fid| self.frame_may_gc(fid));
-                    // Into a successor this block alone reaches, and before
-                    // it is entered: still pending there, written only where
-                    // a GC point actually runs (a slow path, a call).
-                    let succs = &self.f.insts[inst].succs;
-                    let sole = match succs.as_slice() {
-                        [e] => Some(e.block),
-                        _ => None,
-                    }
-                    .filter(|s| {
-                        self.preds.get(s).is_some_and(|p| p.len() == 1)
-                            && !self.plans.contains_key(s)
-                    });
-                    if !callee_gc {
-                        // An inlined callee that cannot GC needs none: the
-                        // caller's next GC point retains its locals itself.
-                    } else if let Some(s) = sole {
-                        // What the successor has a value for (its live-ins);
-                        // the rest is written here.
-                        let live_in = &self.live_in[&s];
-                        let (carry, write): (Vec<_>, Vec<_>) = self
-                            .pending_retain
-                            .iter()
-                            .copied()
-                            .partition(|(_, v)| live_in.contains(v));
-                        self.pending_retain = write;
-                        let n = self.flush_retain(None)?;
-                        self.root_tick("retain", n);
-                        self.carried_retain.insert(s, carry);
-                    } else {
-                        let n = self.flush_retain(None)?;
-                        self.root_tick("retain", n);
-                    }
-                    self.pending_retain.clear();
-                }
                 let before = self.body.values.len();
                 if self.viz_marks.is_some() && self.value_census.is_none() {
                     self.value_tag("inst");
@@ -232,9 +188,6 @@ impl<'a> Lower<'a> {
                     self.value_tag(&tag);
                 }
                 self.inst(inst)?;
-                if self.may_gc(inst) {
-                    self.pending_retain.clear();
-                }
                 let e = self
                     .opsize
                     .entry(mir::print::mnemonic(&f.insts[inst].op))
@@ -368,77 +321,6 @@ impl<'a> Lower<'a> {
         }
         body.iter()
             .any(|&b| f.blocks[b].insts.iter().any(|&i| self.may_gc(i)))
-    }
-
-    /// The frame stores in the loop through header `h` (the blocks between
-    /// it and its back-edge sources `later`), per (frame, slot), and the
-    /// inline frames the loop enters.
-    pub(super) fn loop_frame_writes(
-        &self,
-        h: mir::Block,
-        later: &[mir::Block],
-    ) -> (BTreeMap<(u32, u32), BTreeSet<mir::Value>>, BTreeSet<u32>) {
-        let f = self.f;
-        let mut fwd: BTreeSet<mir::Block> = BTreeSet::new();
-        let mut work = vec![h];
-        while let Some(b) = work.pop() {
-            if fwd.insert(b) {
-                work.extend(f.succs(b));
-            }
-        }
-        let mut body: BTreeSet<mir::Block> = BTreeSet::new();
-        let mut work: Vec<mir::Block> = later.to_vec();
-        while let Some(b) = work.pop() {
-            if fwd.contains(&b) && body.insert(b) && b != h {
-                work.extend(self.preds.get(&b).cloned().unwrap_or_default());
-            }
-        }
-        let mut stores: BTreeMap<(u32, u32), BTreeSet<mir::Value>> = BTreeMap::new();
-        let mut entered = BTreeSet::new();
-        for b in body {
-            for &i in &f.blocks[b].insts {
-                match f.insts[i].op {
-                    Opcode::FrameStore(k) | Opcode::FrameSet(k) => {
-                        stores
-                            .entry((f.inst_frame[i], k))
-                            .or_default()
-                            .insert(f.insts[i].args[0]);
-                    }
-                    Opcode::InlineEnter => {
-                        entered.insert(f.inst_frame[i]);
-                    }
-                    _ => {}
-                }
-            }
-        }
-        (stores, entered)
-    }
-
-    /// Whether frame `fid`, or a frame inlined into it, has an instruction
-    /// that may GC.
-    pub(super) fn frame_may_gc(&mut self, fid: u32) -> bool {
-        if self.frame_gc.is_none() {
-            let f = self.f;
-            let mut gc = vec![false; f.inline_frames.len() + 1];
-            for i in f.blocks.values().flat_map(|b| b.insts.iter().copied()) {
-                if !self.may_gc(i) {
-                    continue;
-                }
-                let mut fr = f.inst_frame[i];
-                loop {
-                    if gc[fr as usize] {
-                        break;
-                    }
-                    gc[fr as usize] = true;
-                    if fr == 0 {
-                        break;
-                    }
-                    fr = f.inline_frames[fr as usize - 1].parent;
-                }
-            }
-            self.frame_gc = Some(gc);
-        }
-        self.frame_gc.as_ref().unwrap()[fid as usize]
     }
 
     /// Whether `inst` may call something that GCs (a superset of where the
@@ -646,20 +528,6 @@ impl<'a> Lower<'a> {
                 .min(self.block_slots(b));
             dirty.retain(|&s| kept.contains(&s) || s >= scanned);
         }
-        // What the frame holds on every edge. Where back edges are still
-        // to come, only slots the loop never stores a different value into
-        // (nor enters their inline frame), which the back edges then agree
-        // on.
-        let mut framed = pend.first().map(|p| p.framed.clone()).unwrap_or_default();
-        for p in pend.iter().skip(1) {
-            framed.retain(|k, v| p.framed.get(k) == Some(v));
-        }
-        if !later.is_empty() {
-            let (stores, entered) = self.loop_frame_writes(b, &later);
-            framed.retain(|k, v| {
-                !entered.contains(&k.0) && stores.get(k).is_none_or(|s| s.iter().all(|w| w == v))
-            });
-        }
         self.entry_dirty.insert(b, dirty.clone());
         for p in pend {
             self.conform(b, p)?;
@@ -680,8 +548,6 @@ impl<'a> Lower<'a> {
         }
         self.slotted.clear();
         self.dirty = dirty;
-        self.framed = framed;
-        self.pending_retain = self.carried_retain.remove(&b).unwrap_or_default();
         for (v, loc, es) in plan {
             match loc {
                 Loc::Param => {
@@ -796,7 +662,6 @@ impl<'a> Lower<'a> {
             args,
             snap,
             dirty: self.dirty.clone(),
-            framed: self.framed.clone(),
             cold: self.cold,
         };
         if self.plans.contains_key(&b) {

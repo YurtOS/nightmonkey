@@ -29,19 +29,14 @@ impl<'a> Lower<'a> {
                     self.cur = arr;
                     // The helper's reload rebinds the live values on its
                     // path only.
-                    let saved = (
-                        self.vmap.clone(),
-                        self.slotted.clone(),
-                        self.dirty.clone(),
-                        self.framed.clone(),
-                    );
+                    let saved = (self.vmap.clone(), self.slotted.clone(), self.dirty.clone());
                     let cell = self.alloc_inline(inst, Some(0))?;
                     let lv = self.i32c(0);
                     let live = self.live_across(inst);
                     let (ok, r) = self.gc_call(self.h.new_array, &[lv, cell], &live)?;
                     let same = self.epoch_same.take().expect("gc_call sampled the epoch");
                     self.clean_or_dirty(inst, ok, same, &[r])?;
-                    (self.vmap, self.slotted, self.dirty, self.framed) = saved;
+                    (self.vmap, self.slotted, self.dirty) = saved;
                     self.cur = other;
                 }
                 // The frame `[callee, this, args…, new.target]` above the

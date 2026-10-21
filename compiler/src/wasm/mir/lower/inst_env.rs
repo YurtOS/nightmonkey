@@ -97,13 +97,10 @@ impl<'a> Lower<'a> {
                 } else {
                     self.vp
                 };
-                self.store_i64(base, off, v);
-                if matches!(d.op, Opcode::FrameSet(_)) {
-                    // The frame holds this value now, and no older retaining
-                    // store may be written over it.
-                    let key = (self.cur_frame, k);
-                    self.pending_retain.retain(|(q, _)| *q != key);
-                    self.framed.insert(key, d.args[0]);
+                // A slot past an inline frame's GC scan (a lean frame's rval)
+                // keeps nothing, and a nested inline frame may occupy it.
+                if fid == 0 || off < self.frame_top[fid] {
+                    self.store_i64(base, off, v);
                 }
             }
             Opcode::LitNew(n) => {

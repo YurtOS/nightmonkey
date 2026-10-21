@@ -35,7 +35,6 @@ impl<'a> Lower<'a> {
             self.vmap.clone(),
             self.slotted.clone(),
             self.dirty.clone(),
-            self.framed.clone(),
             self.cold,
         );
         let live = self.live_across(inst);
@@ -43,7 +42,7 @@ impl<'a> Lower<'a> {
         let t = self.edge(inst, 0, &[r])?;
         let e = self.edge(inst, 2, &[])?;
         self.cond_br(ok, t, e);
-        (self.vmap, self.slotted, self.dirty, self.framed, self.cold) = saved;
+        (self.vmap, self.slotted, self.dirty, self.cold) = saved;
         self.epoch_same = None;
         self.cur = other;
         Ok(())

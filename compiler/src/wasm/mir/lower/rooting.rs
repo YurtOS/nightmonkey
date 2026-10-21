@@ -335,58 +335,12 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// Write the pending retaining stores (the locals' values, into the
-    /// frame the GC sees: a value stays alive while its local holds it, as
-    /// in baseline), but not where both it and what the frame slot holds
-    /// are rooted anyway, in `live` (so in their home slots). Returns the
-    /// stores made.
-    pub(super) fn flush_retain(&mut self, live: Option<&[mir::Value]>) -> R<u32> {
-        let mut stores = 0;
-        for (key, v) in self.pending_retain.clone() {
-            if self.framed.get(&key) == Some(&v) {
-                continue;
-            }
-            if let Some(live) = live {
-                if live.contains(&v) && self.framed.get(&key).is_some_and(|o| live.contains(o)) {
-                    continue;
-                }
-            }
-            let (fid, k) = key;
-            let f = fid as usize;
-            let l = self.frame_layouts[f];
-            let (nargs, nlocals) = (l.nargs, l.nlocals);
-            let off = match k {
-                0 => self.frame_off[f] + FrameLayout::THIS,
-                k if k <= nargs => self.frame_off[f] + l.arg(k - 1),
-                k if k <= nargs + nlocals => self.frame_voff[f] + l.local(k - 1 - nargs),
-                _ => self.frame_voff[f] + l.rval(),
-            };
-            // A slot past the frame's GC scan (a lean inline frame's rval)
-            // retains nothing, and a nested inline frame may occupy it.
-            if f > 0 && off >= self.frame_top[f] {
-                continue;
-            }
-            let w = self.value_here(v)?;
-            let t = self.ty(v);
-            let b = self.boxed(&t, w)?;
-            let base = if fid == 0 && k <= nargs {
-                self.sp
-            } else {
-                self.vp
-            };
-            self.store_i64(base, off, b);
-            self.framed.insert(key, v);
-            stores += 1;
-        }
-        Ok(stores)
-    }
-
     /// Before a may-GC call: store each of `live` (managed values live
     /// across it) that its home slot does not hold yet. A stored value
     /// stays stored (SSA values do not change, and the GC updates the slot
     /// in place), so repeated calls store it once.
     pub(super) fn root(&mut self, live: &[mir::Value]) -> R<()> {
-        let mut stores = self.flush_retain(Some(live))?;
+        let mut stores = 0;
         for &v in live {
             if self.slotted.contains(&v) {
                 continue;

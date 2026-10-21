@@ -410,10 +410,6 @@ struct Lower<'a> {
     gc_top: u32,
     /// Per (frame, slot): the value a `frame.store` put there, along the
     /// emission path; a store of the same value again is dropped.
-    framed: BTreeMap<(u32, u32), mir::Value>,
-    /// The builder's retaining frame stores before the next instruction:
-    /// emitted where that instruction can GC (`root`), not before it.
-    pending_retain: Vec<((u32, u32), mir::Value)>,
     /// `const.str`s whose only uses are `switch.str` cases: not emitted
     /// where they stand; the switch loads each atom where it compares it
     /// (a switch's cases would otherwise all load before its first).
@@ -509,16 +505,9 @@ struct Lower<'a> {
     viz_marks: Option<Vec<(usize, u32)>>,
     /// The instruction being lowered, for the root census's labels.
     cur_inst: Option<mir::Inst>,
-    /// Per frame (0 the function's own, then the inline frames): whether
-    /// any instruction in it or in a frame inlined into it may GC
-    /// (`may_gc`; an `exit.inline` does). Computed on first use.
-    frame_gc: Option<Vec<bool>>,
     /// The inline frame the current block's `inline.enter` entered, if any:
     /// the retaining stores pending at its terminator are for that callee.
     block_enters: Option<u32>,
-    /// Retaining stores handed to a block's sole predecessor's successor:
-    /// still pending on entry, written at its first GC point (`root`).
-    carried_retain: BTreeMap<mir::Block, Vec<((u32, u32), mir::Value)>>,
     /// One exit hub per frame shape (`exit_hub`).
     exit_hubs: BTreeMap<Vec<Option<BoxKind>>, Block>,
     /// One `exit.inline` hub per inline frame: its entry and last blocks,
@@ -530,7 +519,6 @@ struct Lower<'a> {
     own_env: bool,
     forward_resume: bool,
     is_gen: bool,
-    mapped_formals: bool,
     inline_layouts: Vec<FrameLayout>,
     /// The syntactic global binding (`TranslateCtx::syn_gnames`) each
     /// global name read names, for its inline arms.
@@ -552,7 +540,6 @@ struct PendingEdge {
     args: Vec<Value>,
     snap: BTreeMap<mir::Value, (Option<Value>, bool)>,
     dirty: BTreeSet<u32>,
-    framed: BTreeMap<(u32, u32), mir::Value>,
     cold: bool,
 }
 
@@ -597,9 +584,6 @@ pub struct LowerOpts {
     /// A generator or async body: its entry also takes a generator's
     /// resume (`EnterNightResume`) to the yield's `Resume` root.
     pub is_gen: bool,
-    /// The script's formals are a mapped `arguments`'s, which may write
-    /// them behind MIR's back: their frame stores are never dropped.
-    pub mapped_formals: bool,
     /// Each inline frame's callee layout (`FrameLayout::of`); empty for
     /// hand-written MIR, whose inline frames take the full layout.
     pub inline_layouts: Vec<FrameLayout>,
@@ -696,8 +680,6 @@ pub fn lower<'a>(
         inline_k: vec![],
         gc_top: root_base,
         dirty: BTreeSet::new(),
-        framed: BTreeMap::new(),
-        pending_retain: vec![],
         lazy_strs: lazy_switch_strs(f),
         cur_mblock: mir::Block::from_u32(0),
         cold: false,
@@ -743,9 +725,7 @@ pub fn lower<'a>(
         value_tags: vec![],
         viz_marks: o.viz.then(Vec::new),
         cur_inst: None,
-        frame_gc: None,
         block_enters: None,
-        carried_retain: BTreeMap::new(),
         exit_hubs: BTreeMap::new(),
         inline_hubs: BTreeMap::new(),
         strict: o.strict,
@@ -753,7 +733,6 @@ pub fn lower<'a>(
         own_env: o.own_env,
         forward_resume: o.forward_resume,
         is_gen: o.is_gen,
-        mapped_formals: o.mapped_formals,
         inline_layouts: o.inline_layouts.clone(),
         gname_bids,
         gname_fused,
@@ -793,19 +772,6 @@ impl<'a> Lower<'a> {
         self.cur_frame = self.f.inst_frame[inst];
         let d = self.f.insts[inst].clone();
         self.epoch_same = None;
-        if let Opcode::FrameStore(k) = d.op {
-            let key = (self.cur_frame, k);
-            let aliased =
-                self.mapped_formals && self.cur_frame == 0 && k >= 1 && k <= self.layout.nargs;
-            if !aliased {
-                // A retaining store (the builder's `retain_locals`): held
-                // for the next instruction's GC points.
-                if self.framed.get(&key) != Some(&d.args[0]) {
-                    self.pending_retain.push((key, d.args[0]));
-                }
-                return Ok(());
-            }
-        }
         let a = self.args(inst)?;
         if self.inst_values(inst, &d, &a)? {
             return Ok(());

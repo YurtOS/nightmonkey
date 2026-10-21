@@ -9,7 +9,6 @@ impl<'a> Lower<'a> {
     /// is the frame's top (`frame_top`), past them.
     pub(super) fn inline_enter(&mut self, d: &mir::func::InstData, a: &[Value]) -> R<()> {
         let fid = self.cur_frame as usize;
-        self.framed.retain(|&(f, _), _| f as usize != fid);
         if self.f.inline_frames[fid - 1].parent == 0 {
             // The frame overlays the rooting slots from `inline_k` up,
             // which no value live in its region has: what they hold is
@@ -325,10 +324,6 @@ impl<'a> Lower<'a> {
                 b
             }
         };
-        // The retaining stores still pending belong to this frame: write them
-        // before the baseline body runs on it.
-        self.flush_retain(None)?;
-        self.pending_retain.clear();
         let mut args = vec![self.i32c(w.encode() as u32)];
         args.extend(ops.iter().zip(dead).filter(|(_, &d)| !d).map(|(&v, _)| v));
         self.terminate(Terminator::Br {
