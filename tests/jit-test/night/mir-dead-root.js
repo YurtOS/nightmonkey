@@ -229,6 +229,21 @@ function copiedThenBoth() {
   collect();
   return finalizeCount() - c0;
 }
+// An assignment of a loop-invariant value is still an assignment: it must not
+// move to the loop's preheader, before the first collection in the loop.
+function invariantAssignInLoop(n) {
+  gc();
+  var x = makeFinalizeObserver();
+  var c = finalizeCount();
+  var y = {};
+  var first = -1;
+  for (var i = 0; i < n; i++) {
+    gc();
+    if (i == 0) first = finalizeCount() - c;
+    x = y;
+  }
+  return first;
+}
 // Dead through a branch rather than an overwrite: the last use is before the
 // second call.
 function lastUseThenCall(flag) {
@@ -272,6 +287,7 @@ for (var n = 0; n < 40; n++) {
   assertEq(loopKeepsUntilAssigned(3), 0);
   assertEq(formalAssigned(42), 1);
   assertEq(copiedThenBoth(), 1);
+  assertEq(invariantAssignInLoop(3), 0);
   assertEq(overwriteLiveObject(n & 1), 1);
   assertEq(overwriteLiveUndefinedThenScalar(n & 1), 1);
   assertEq(overwritePolymorphic(n & 1 ? 5 : 'str'), 1);
