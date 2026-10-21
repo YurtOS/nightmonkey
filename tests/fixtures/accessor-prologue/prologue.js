@@ -23,3 +23,11 @@ counting(Map.prototype, "get");
 counting(Object, "defineProperty");
 counting(Reflect, "defineProperty");
 counting(globalThis, "parseInt");
+for (var name of ["charAt", "indexOf", "lastIndexOf", "substring", "slice", "split", "toLowerCase", "toUpperCase", "trim", "codePointAt"]) counting(String.prototype, name);
+for (var name of ["sqrt", "abs", "min", "max", "sin", "cos", "pow", "clz32", "round", "ceil"]) counting(Math, name);
+counting(Object, "defineProperties");
+counting(Array.prototype, "constructor");
+// A Proxy stands where a builtin namespace was: its traps are user code.
+var realReflect = Reflect;
+globalThis.Reflect = new Proxy(realReflect, { get(t, k) { getCount++; return t[k]; },
+                                              getOwnPropertyDescriptor(t, k) { getCount++; return Object.getOwnPropertyDescriptor(t, k); } });

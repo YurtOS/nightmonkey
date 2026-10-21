@@ -88,6 +88,13 @@ def main():
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert re.search(r"too large for the MIR tier", result.stderr), result.stderr[-2000:]
+    mid = fixture.with_name("mir-large-function-mid.js")
+    result = subprocess.run(
+        [str(wrapper), "--night-options", "--pipeline mir --dump-tiers", str(mid)],
+        env=env, capture_output=True, text=True, timeout=600,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert re.search(r"too large for the MIR tier", result.stderr), result.stderr[-2000:]
     print("PASS a very large function is declined, not compiled")
 
     # The compile resolves a list of builtins by path; a user accessor or
