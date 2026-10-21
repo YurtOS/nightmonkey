@@ -224,7 +224,7 @@ fn pea_one(m: &Module, f: &mut Func, cfg: &Cfg, t: Inst, tried: &mut BTreeSet<In
                     UseKind::Store
                 }
                 Opcode::LoadSlot(_) => UseKind::Load,
-                Opcode::FrameStore(k) | Opcode::FrameSet(k) if k > formals => UseKind::FrameStore,
+                Opcode::FrameStore(k) if k > formals => UseKind::FrameStore,
                 Opcode::Exit { .. } | Opcode::ExitThrow { .. } => UseKind::Exit,
                 Opcode::InlineEnter => UseKind::Enter,
                 _ => UseKind::Escape,

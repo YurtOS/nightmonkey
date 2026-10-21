@@ -505,9 +505,6 @@ struct Lower<'a> {
     viz_marks: Option<Vec<(usize, u32)>>,
     /// The instruction being lowered, for the root census's labels.
     cur_inst: Option<mir::Inst>,
-    /// The inline frame the current block's `inline.enter` entered, if any:
-    /// the retaining stores pending at its terminator are for that callee.
-    block_enters: Option<u32>,
     /// One exit hub per frame shape (`exit_hub`).
     exit_hubs: BTreeMap<Vec<Option<BoxKind>>, Block>,
     /// One `exit.inline` hub per inline frame: its entry and last blocks,
@@ -725,7 +722,6 @@ pub fn lower<'a>(
         value_tags: vec![],
         viz_marks: o.viz.then(Vec::new),
         cur_inst: None,
-        block_enters: None,
         exit_hubs: BTreeMap::new(),
         inline_hubs: BTreeMap::new(),
         strict: o.strict,

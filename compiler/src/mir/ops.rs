@@ -794,16 +794,13 @@ pub enum Opcode {
     JsThrow,
     /// Write `args[0]` (a `Val`, or an i32, f64 or bool, stored as the
     /// Value it is) to baseline frame slot `k` (0 `this`, then the
-    /// formals, the locals, the rval): the write-through that keeps the
-    /// frame's copy of every formal, local and rval equal to the slot's
-    /// value, so exits need not carry them (§5.1).
+    /// formals, the locals, the rval), where it stands. Baseline writes every
+    /// assignment to a local there, so the slot holds the local's latest
+    /// value (a dead local keeps its object until it is assigned again, and
+    /// the object an assignment replaces is released); the builder writes it
+    /// at an assignment where that matters (`frame_set`), and a mapped
+    /// `arguments` object's formals are written through.
     FrameStore(u32),
-    /// As `FrameStore`, but written where it stands, and the frame slot's new
-    /// value replaces whatever the slot held: the builder's write at an
-    /// assignment of a local, so the frame keeps the local's latest value as
-    /// baseline's does. (`FrameStore` is held by the lowering for the next
-    /// instruction that can GC.)
-    FrameSet(u32),
     /// A closure of the script's inner function `index` (a gcthing index)
     /// over environment `args[0]` (`Lambda`).
     JsLambda(u32),
@@ -2090,14 +2087,14 @@ pub fn signature(op: &Opcode, args: &[Type], m: &Module) -> SigResult {
             arity(args, 0)?;
             Sig::output(Type::val(TagSet::OBJECT))
         }
-        FrameStore(_) | FrameSet(_) => {
+        FrameStore(_) => {
             arity(args, 1)?;
             want(
                 matches!(
                     args[0],
                     Type::Val(_) | Type::I32(_) | Type::F64(_) | Type::Bool | Type::Obj(_)
                 ),
-                || "frame.store/frame.set: expected a val, i32, f64, bool or obj".into(),
+                || "frame.store: expected a val, i32, f64, bool or obj".into(),
             )?;
             Sig::none()
         }

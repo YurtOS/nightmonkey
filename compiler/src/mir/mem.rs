@@ -488,12 +488,13 @@ fn meet_fields(a: &[FieldState], b: &[FieldState]) -> Vec<FieldState> {
 /// Scalar replacement of literal objects that do not escape
 /// (MIR-MEMORY.md §5). An object `lit.new` made, all of whose uses are its
 /// inits and stamp, slot loads and slotted stores through it, guards its
-/// allocation proves, conversions, retaining frame stores and the operands
+/// allocation proves, conversions, frame stores and the operands
 /// of exits (in any frame), and block params that only
 /// it reaches, does not exist at run time: each field is the value last
 /// stored, each load that value, and each exit that has it as an operand
-/// rebuilds it first from the fields added so far. (A `frame.store` only
-/// retains a local for the GC; an exit carries the frame's live locals.)
+/// rebuilds it first from the fields added so far. (A `frame.store` is
+/// the local's assignment, for the GC and baseline's frame; an exit carries
+/// the frame's live locals.)
 /// Returns how many objects it replaced.
 pub fn sroa(m: &Module, f: &mut Func) -> usize {
     let mut n = 0;
@@ -719,9 +720,7 @@ fn plan_one(m: &Module, f: &Func, snap: &Snapshot, t: Inst) -> Option<Plan> {
                         Opcode::LoadSlot(_) => loads.push(i),
                         // A retaining store (in its frame; a mapped formal's
                         // is the `arguments` object's slot, which is real).
-                        Opcode::FrameStore(k) | Opcode::FrameSet(k) if k > formals => {
-                            fstores.push(i)
-                        }
+                        Opcode::FrameStore(k) if k > formals => fstores.push(i),
                         // Exits of any frame: an inlined callee's writes its
                         // frame, and finishes it in baseline.
                         Opcode::Exit { .. }
@@ -1092,8 +1091,8 @@ fn apply_plan(f: &mut Func, p: &Plan, inst_block: &mut BTreeMap<Inst, Block>, un
         let (j, _) = f.add_inst(b, Opcode::Jump, vec![], &[], vec![e]);
         f.inst_frame[j] = frame;
     }
-    // A retaining store still overwrites its slot: with `undefined`, so the
-    // object the local held before is released as in baseline.
+    // The assignment still writes its slot: `undefined`, so the object the
+    // local held before is released as in baseline.
     for &i in fstores.iter() {
         let b = inst_block[&i];
         let undef = crate::mir::pea::insert_undef_before(f, b, i);

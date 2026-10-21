@@ -161,13 +161,9 @@ impl<'a> Lower<'a> {
                 self.call1(census, &[k, i], Type::I32);
                 self.value_tag("(edges)");
             }
-            self.block_enters = None;
             for &inst in &f.blocks[b].insts {
                 self.cold = false;
                 self.cur_inst = Some(inst);
-                if matches!(f.insts[inst].op, Opcode::InlineEnter) {
-                    self.block_enters = Some(f.inst_frame[inst]);
-                }
                 let before = self.body.values.len();
                 if self.viz_marks.is_some() && self.value_census.is_none() {
                     self.value_tag("inst");

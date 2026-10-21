@@ -68,7 +68,7 @@ impl<'a> Lower<'a> {
                 let s = self.i32c(slot.get());
                 self.post_barrier(self.h.post_write_barrier, a[0], s, a[1]);
             }
-            Opcode::FrameStore(k) | Opcode::FrameSet(k) => {
+            Opcode::FrameStore(k) => {
                 let fid = self.cur_frame as usize;
                 let l = self.frame_layouts[fid];
                 let (nargs, nlocals) = (l.nargs, l.nlocals);

@@ -1,4 +1,4 @@
-> Imported from bytecodealliance/nightmonkey `docs/BASELINE.md` at `8f5360d` (upstream PR #2), because the compiler sources cite its sections; edited only where this fork differs (direct eval is declined, inner onramps are not given to functions that hold the elided `arguments` placeholder). It describes the compiler's internals; where it differs from this repository's deployment (compilation happens in the guest, `docs/DESIGN.md` section 2), `DESIGN.md` is authoritative. Stale here, from upstream: the status line below ("draft, nothing implemented"), references to the basic-block-versioning (BBV) backend and `--pipeline legacy` (removed), `tests/jit-test-excludes-baseline.txt` (does not exist), and the `night_compile` hostcall (not adopted).
+> Imported from bytecodealliance/nightmonkey `docs/BASELINE.md` at `8f5360d` (upstream PR #2), because the compiler sources cite its sections; edited only where this fork differs (direct eval is declined, inner onramps are not given to functions with more than 32 `args.object` materialisations). It describes the compiler's internals; where it differs from this repository's deployment (compilation happens in the guest, `docs/DESIGN.md` section 2), `DESIGN.md` is authoritative. Stale here, from upstream: the status line below ("draft, nothing implemented"), references to the basic-block-versioning (BBV) backend and `--pipeline legacy` (removed), `tests/jit-test-excludes-baseline.txt` (does not exist), and the `night_compile` hostcall (not adopted).
 
 # NightMonkey baseline tier: design and plan (draft)
 
@@ -420,10 +420,11 @@ exhaustive `match` with no wildcard.
   - Which headers get onramp roots is policy. Every outermost loop gets
     one, since no duplication is needed there. Inner loops get one
     subject to a code-size limit, informed by the measurements in
-    step W (§8), and none in a function holding the elided `arguments`
-    placeholder (every exit of such a function materialises the object, and
-    copying that for a side entry made one constructor 53x larger: 13.7 MB,
-    past the wasm body-size limit).
+    step W (§8), and none in a function with more than 32 `args.object`
+    materialisations (an exit that holds the elided `arguments` placeholder
+    materialises the object, and copying that code for a side entry made one
+    constructor with 290 of them 53x larger: 13.7 MB, past the wasm
+    body-size limit; `INNER_ONRAMP_MAX_ARGS_OBJECTS`).
 
 ## 8. Plan
 

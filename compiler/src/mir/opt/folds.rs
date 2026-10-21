@@ -28,9 +28,8 @@ pub fn canon_loads(m: &Module, f: &mut Func) -> usize {
         };
         let frame = f.inst_frame[t];
         f.blocks[b].insts.pop();
-        // The frame stores before it stay: they include the release of a dead
-        // local's old object, and the lowering writes the retaining ones only
-        // where a GC point runs.
+        // The frame stores before it stay: each is a local's own assignment
+        // (`frame_set`), which a slot access does not make dead.
         let (l, rs) = f.add_inst(
             b,
             Opcode::LoadSlot(name),
@@ -83,9 +82,8 @@ pub fn canon_stores(m: &Module, f: &mut Func) -> usize {
         }
         let frame = f.inst_frame[t];
         f.blocks[b].insts.pop();
-        // The frame stores before it stay: they include the release of a dead
-        // local's old object, and the lowering writes the retaining ones only
-        // where a GC point runs.
+        // The frame stores before it stay: each is a local's own assignment
+        // (`frame_set`), which a slot access does not make dead.
         let (s, _) = f.add_inst(b, Opcode::StoreSlot(name), d.args.clone(), &[], vec![]);
         let (j, _) = f.add_inst(b, Opcode::Jump, vec![], &[], vec![d.succs[0].clone()]);
         f.inst_frame[s] = frame;

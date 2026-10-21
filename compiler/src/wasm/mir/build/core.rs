@@ -226,7 +226,7 @@ impl<'s, 'a> Run<'s, 'a> {
         };
         self.f.add_inst(
             self.cur,
-            Opcode::FrameSet(u32::try_from(ix).unwrap()),
+            Opcode::FrameStore(u32::try_from(ix).unwrap()),
             vec![v],
             &[],
             vec![],

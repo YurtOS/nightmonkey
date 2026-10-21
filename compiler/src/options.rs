@@ -111,7 +111,7 @@ pub struct Instrumentation {
     pub blocks: bool,
     /// Emit `night_runtime_census(MIR_ROOT_CENSUS_KIND, id)` at every MIR
     /// rooting site that stores (a GC call's `root`, an edge's slot
-    /// conform, a terminator's retain flush), and print the static
+    /// conform), and print the static
     /// `night: mir root <id> sid#<s> <where> <op> stores <n> cold <c>` map
     /// while compiling: the executed rooting stores, by site.
     pub roots: bool,

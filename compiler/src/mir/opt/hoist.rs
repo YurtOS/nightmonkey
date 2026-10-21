@@ -607,7 +607,7 @@ pub fn hoist_reads(m: &Module, f: &mut Func) -> usize {
                     if hoistable_guard(op)
                         && !matches!(op, Opcode::CheckFuse(_) | Opcode::CheckBinding(..)) => {}
                 ref op if !op.is_terminator() => {
-                    if matches!(op, Opcode::FrameStore(_) | Opcode::FrameSet(_)) {
+                    if matches!(op, Opcode::FrameStore(_)) {
                         return false;
                     }
                 }
