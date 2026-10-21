@@ -30,7 +30,7 @@ namespace night {
 
 // Bump on any change to the registration block, the layout descriptor, or
 // the NIGHT_ENV_REGIONS wire.
-static constexpr uint32_t NightAotAbiVersion = 8;
+static constexpr uint32_t NightAotAbiVersion = 11;
 
 // Every field-offset / size / flag-bit constant the external reader
 // dereferences. Order is the wire order of `NightLayoutDescriptor::fields`;
@@ -251,10 +251,31 @@ extern JS_PUBLIC_API bool NightRegisterRoot(JSContext* cx,
                                             JS::Handle<JSScript*> script,
                                             bool executedAtInit);
 
-// One-time arming after wizer resume; a successful no-op when the module was
-// not transformed (everything then stays interpreted). Returns false only if
-// arming a transformed module fails. Idempotent.
+// One-time arming after wizer resume; a no-op (returning false) when the
+// module was not transformed. Idempotent.
 extern JS_PUBLIC_API bool NightActivate(JSContext* cx);
+
+// Empty every cache and cell NightMonkey keeps about `cx`'s heap: the
+// property ICs and the megamorphic, append, accessor, add-transition and
+// guarded-chain tables, the callee, construct, alloc, intrinsic, method and
+// identity cells, the global binding cells and fuses. All of them live in
+// the module's linear memory, shared by every context that runs it, and
+// most are keyed by raw addresses (shapes, holders, functions) that only
+// this context's GC zeroes before it reuses them.
+//
+// So call it when a context's heap goes away by any path other than this
+// context's own garbage collection, before another context runs compiled
+// code in the same module: the addresses that heap freed may come back as
+// other cells, and a stale row would match them. Destroying the context
+// (JS_DestroyContext) does it already, through the tier's destroyContext
+// hook; call it yourself if you drop or replace a heap without that (for
+// example, recycling a context for an unrelated program, or restoring a
+// memory snapshot under a context that kept running).
+//
+// Every cleared entry is refilled on its next miss; the cost is a round of
+// slower calls and property accesses, never a wrong answer. Must not be
+// called while compiled code is running on the context.
+extern JS_PUBLIC_API void NightClearCaches(JSContext* cx);
 
 }  // namespace JS
 

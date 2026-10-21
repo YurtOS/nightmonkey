@@ -46,6 +46,9 @@ using js::cli::OptionParser;
 static bool enableNightSnapshot = false;
 #ifdef ENABLE_JS_NIGHTMONKEY_INPROCESS
 static bool enableNightInprocess = false;
+// Compiler options for the in-process batch (--night-options); owned by the
+// option parser, which outlives every script compile.
+static const char* nightInprocOptions = nullptr;
 #endif
 
 static bool AddOptions(OptionParser& op) {
@@ -62,6 +65,12 @@ static bool AddOptions(OptionParser& op) {
                         "bodies (requires the wasm-jit-runner hostcalls)")) {
     return false;
   }
+  if (!op.addStringOption('\0', "night-options", "OPTIONS",
+                          "Compiler options for --night-inprocess, "
+                          "space-separated as the nightmonkey CLI takes them "
+                          "(e.g. \"--pipeline baseline --dump-tiers\")")) {
+    return false;
+  }
 #endif
   return true;
 }
@@ -71,21 +80,20 @@ static bool OptionsParsed(OptionParser& op) {
   night::NightSetWizening(enableNightSnapshot);
 #ifdef ENABLE_JS_NIGHTMONKEY_INPROCESS
   enableNightInprocess = op.getBoolOption("night-inprocess");
+  nightInprocOptions = op.getStringOption("night-options");
 #endif
   return true;
 }
 
-// nightTierEnabled(): true iff the AOT tier is active in this shell
-// (--night-inprocess, or an activated AOT snapshot). Tests that cannot run
+// nightTierEnabled(): true iff compiled code is active in this shell (an
+// installed in-process batch, or an activated AOT snapshot): false when
+// --night-inprocess was asked for but the compile failed and the run stayed
+// interpreted. Tests that cannot run
 // under the tier are listed in tests/*-excludes.txt rather than consulting
 // this, so it is for ad-hoc scripts.
 static bool NightTierEnabled(JSContext* cx, unsigned argc, JS::Value* vp) {
   JS::CallArgs args = JS::CallArgsFromVp(argc, vp);
-  bool enabled = night::gNightActivated;
-#ifdef ENABLE_JS_NIGHTMONKEY_INPROCESS
-  enabled = enabled || enableNightInprocess;
-#endif
-  args.rval().setBoolean(enabled);
+  args.rval().setBoolean(night::gNightActivated);
   return true;
 }
 
@@ -118,7 +126,7 @@ static bool ScriptCompiled(JSContext* cx, JS::HandleScript script,
   }
 #ifdef ENABLE_JS_NIGHTMONKEY_INPROCESS
   if (enableNightInprocess && primary) {
-    if (!CompileInProcess(cx, script)) {
+    if (!CompileInProcess(cx, script, nightInprocOptions)) {
       return false;
     }
   }

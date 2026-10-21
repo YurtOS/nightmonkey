@@ -5,10 +5,10 @@
 
 use crate::facts::CallForm;
 use crate::ids::{FormalIndex, ScriptId, Site, VarId};
+
 pub mod builtins;
 pub mod calls;
 pub mod dump;
-pub mod effects;
 pub mod emit;
 pub mod engine;
 pub mod heap;
@@ -123,6 +123,17 @@ pub struct Solver<'a> {
     /// Diagnostic counters for this run (see [`stats::Stats`]).
     pub stats: stats::Stats,
     pub escaped: calls::Escaped,
+    /// Scripts whose arguments escaped (`Solver::escape_args`).
+    pub args_escaped: rustc_hash::FxHashSet<ScriptId>,
+    /// Formals some analyzed call leaves out (`facts::omitted_formals`).
+    pub omitted_formals: rustc_hash::FxHashSet<(ScriptId, u32)>,
+    /// The fewest actuals any analyzed call passes each script, per
+    /// context it enters.
+    pub min_actuals: HashMap<(ScriptId, types::CtxId), u32>,
+    /// `T.apply(this, arguments)` edges between contexts, (caller, T): T's
+    /// actuals there are the caller's, so a formal of T past the caller's
+    /// fewest is left out too (`Solver::forwarded_omissions`).
+    pub arg_forwards: rustc_hash::FxHashSet<((ScriptId, types::CtxId), (ScriptId, types::CtxId))>,
     /// Receiver-kind census per property-read site: the least precise
     /// receiver the site was ever evaluated with.
     pub site_recv: HashMap<Site, RecvKind>,
@@ -206,6 +217,19 @@ pub struct Solver<'a> {
     /// dispatch) but are emitted -- the set is flow-scoped, not a name
     /// guess.
     pub region_calls: rustc_hash::FxHashSet<(ScriptId, VarId)>,
+    /// Callee vars read by name off a receiver the analysis could not
+    /// resolve (`recv.name(...)` with `recv` unknown): the call still runs,
+    /// and its target is one of the functions some object holds under that
+    /// name. Where those are few (`named_fns`), the call binds its
+    /// arguments into them (`Solver::bind_by_name`), so a method reached
+    /// only through such calls does not read its formals as Empty.
+    pub name_calls: HashMap<(ScriptId, VarId), NameId>,
+    /// The snapshot's function-valued properties, by name: the candidates of
+    /// a by-name call. Built on first use.
+    pub named_fns: Option<HashMap<NameId, Vec<ScriptId>>>,
+    /// The scripted functions some analyzed write stored under a name:
+    /// with `named_fns`, a by-name call's candidates.
+    pub dyn_named_fns: HashMap<NameId, Vec<ScriptId>>,
     /// Per-call-site named-native resolution, while every evaluation
     /// agrees on one native callee. Anything else -- scripted, multi, a
     /// different native -- conflicts it. Source of the native call fact.
@@ -227,6 +251,17 @@ pub struct Solver<'a> {
     /// `[handler, scope]` pair sharing one literal-site class) still
     /// finds the member population.
     pub class_table_members: HashMap<types::ClassId, rustc_hash::FxHashSet<types::FnId>>,
+    /// The fn tables (abstractions with `table_members`) of each class:
+    /// a dispatch through a `ClassAny` table read pairs each table's
+    /// members with that table's own scope (`CellKey::TableScope`).
+    pub class_tables: HashMap<types::ClassId, Vec<types::AbsId>>,
+    /// Element-access sites whose key was only string constants: the one
+    /// name every evaluation agreed on (`Conflict` past one, or where the
+    /// key was anything else). Such a site's facts are its named access's.
+    pub keyed_site_names: HashMap<Site, types::Agreed<NameId>>,
+    /// The members written into each table's elements directly (beside
+    /// that table's scope), as opposed to those a degraded arg row added.
+    pub table_direct: HashMap<types::AbsId, rustc_hash::FxHashSet<types::FnId>>,
     /// Scripted fn ids observed flowing into a callee's arg row, keyed
     /// (callee sid, arg index), recorded at call binding from the site's
     /// value before the row join can saturate.
@@ -289,11 +324,18 @@ impl<'a> Solver<'a> {
             opts,
             engine,
             names,
-            tables: scan::ScanTables::default(),
+            tables: scan::ScanTables {
+                viz: opts.diagnostics.viz.is_some(),
+                ..Default::default()
+            },
             heap: heap::Heap::default(),
             ctxs: calls::Ctxs::new(),
             stats: stats::Stats::default(),
             escaped: calls::Escaped::default(),
+            args_escaped: rustc_hash::FxHashSet::default(),
+            omitted_formals: Default::default(),
+            min_actuals: HashMap::default(),
+            arg_forwards: Default::default(),
             site_recv: HashMap::default(),
             site_calls: HashMap::default(),
             site_likely_calls: HashMap::default(),
@@ -317,8 +359,14 @@ impl<'a> Solver<'a> {
             site_native: HashMap::default(),
             site_ctor_native: HashMap::default(),
             region_calls: rustc_hash::FxHashSet::default(),
+            name_calls: HashMap::default(),
+            named_fns: None,
+            dyn_named_fns: HashMap::default(),
             table_members: HashMap::default(),
             class_table_members: HashMap::default(),
+            class_tables: HashMap::default(),
+            keyed_site_names: HashMap::default(),
+            table_direct: HashMap::default(),
             arg_fn_members: HashMap::default(),
             arg_row_tables: HashMap::default(),
             elems_callee_vars: HashMap::default(),
@@ -419,6 +467,10 @@ impl<'a> Solver<'a> {
         for sid in sorted_keys(&self.engine.script_cons) {
             self.engine.instantiate(sid, CTX0);
         }
+        self.drain();
+    }
+
+    fn drain(&mut self) {
         while let Some((c, ctx)) = self.engine.pop() {
             if self.engine.eval_core(c, ctx) {
                 continue;
@@ -429,6 +481,44 @@ impl<'a> Solver<'a> {
             let handled = self.eval_call(c, ctx);
             debug_assert!(handled, "unhandled constraint kind");
         }
+    }
+
+    /// Check that the solve reached a fixpoint: re-evaluate every live
+    /// constraint once and count the cells that grow. A cell that grows
+    /// here was waiting on state its readers never subscribed to (region
+    /// membership, dispatch tables), so the answer depended on evaluation
+    /// order -- and a debug build said so only through the lattice-height
+    /// bound, much later and far from the cause. Returns the number of
+    /// cells that changed; zero at a true fixpoint.
+    fn verify_fixpoint(&mut self) -> usize {
+        let before: Vec<TypeSet> = self.engine.cells.iter().map(|c| c.ts.clone()).collect();
+        for sid in sorted_keys(&self.engine.script_cons) {
+            let ctxs = self.engine.live_ctxs.get(&sid).cloned().unwrap_or_default();
+            let cons = self
+                .engine
+                .script_cons
+                .get(&sid)
+                .cloned()
+                .unwrap_or_default();
+            for &ctx in &ctxs {
+                for &c in &cons {
+                    self.engine.enqueue(c, ctx);
+                }
+            }
+        }
+        self.drain();
+        let changed: Vec<usize> = (0..before.len())
+            .filter(|&i| self.engine.cells[i].ts != before[i])
+            .collect();
+        for &i in changed.iter().take(10) {
+            crate::diag_line!(
+                "likelier: not a fixpoint: {:?}: {:?} -> {:?}",
+                self.engine.cells[i].key,
+                before[i],
+                self.engine.cells[i].ts
+            );
+        }
+        changed.len()
     }
 
     /// Phase counts and timings, plus the escape / AnyObject-transition
@@ -509,6 +599,11 @@ impl<'a> Solver<'a> {
                 biggest
             );
         }
+        crate::diag_line!(
+            "likelier: {} escaped scripts, {} with arguments escaped by computed-name reads",
+            self.escaped.len(),
+            self.args_escaped.len()
+        );
         for &(f, c) in &self.escape_log {
             if c == engine::SEED {
                 crate::diag_line!("likelier: escape fn#{f} via SEED");
@@ -571,11 +666,21 @@ pub fn analyze(
     sv.seed();
     sv.resolve_shared_ctor_sites();
     sv.solve();
+    if cfg!(debug_assertions) || opts.diagnostics.verify_fixpoint {
+        let n = sv.verify_fixpoint();
+        if opts.diagnostics.verify_fixpoint {
+            crate::diag_line!("likelier: fixpoint check: {n} cells changed");
+        }
+        debug_assert_eq!(n, 0, "likelier: the solve did not reach a fixpoint");
+    }
     sv.settle_unresolved_recv_sites();
     sv.trace_site_dump();
     // The census runs last so it can report what the emission phase
     // refused at its caps, not just what the fixpoint did.
     let mut facts = sv.emit();
+    if opts.diagnostics.viz.is_some() {
+        viz::collect(&sv, &facts);
+    }
     if opts.diagnostics.stats {
         sv.census(t0);
     }

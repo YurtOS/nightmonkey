@@ -18,4 +18,4 @@ pub mod walker;
 pub use layout::{Field, Layout};
 pub use mem::{MemAccess, SliceMem};
 pub use registration::{Digest, Registration};
-pub use walker::{walk, WalkOutput};
+pub use walker::{walk, walk_compile_input, WalkOutput};

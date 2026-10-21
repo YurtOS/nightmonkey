@@ -291,6 +291,9 @@ pub struct DigestBinding {
 pub struct Digest {
     pub script_gcthing_kinds: FxHashMap<u32, Vec<u8>>,
     pub scope_bindings: FxHashMap<u32, Vec<DigestBinding>>,
+    /// Per script, its source position, where the engine recorded one
+    /// (diagnostics only: the visualizer).
+    pub script_pos: FxHashMap<u32, night_compiler::bytecode::ScriptPos>,
 }
 
 impl Digest {
@@ -298,34 +301,39 @@ impl Digest {
         let bytes = mem.read_bytes(addr, len)?;
         let b: &[u8] = &bytes;
         let mut pos = 0usize;
-        let u32_at = |pos: &mut usize| -> Result<u32> {
-            if *pos + 4 > b.len() {
-                bail!("digest truncated at {pos}");
+        let checked_end = |pos: usize, count: usize, width: usize| -> Result<usize> {
+            let end = count.checked_mul(width).and_then(|n| pos.checked_add(n));
+            match end {
+                Some(end) if end <= b.len() => Ok(end),
+                _ => bail!("digest truncated or count overflow at {pos}"),
             }
-            let v = u32::from_le_bytes(b[*pos..*pos + 4].try_into().unwrap());
-            *pos += 4;
+        };
+        let u32_at = |pos: &mut usize| -> Result<u32> {
+            let end = checked_end(*pos, 1, 4)?;
+            let v = u32::from_le_bytes(b[*pos..end].try_into().unwrap());
+            *pos = end;
             Ok(v)
         };
         let mut script_gcthing_kinds = FxHashMap::default();
         let num_scripts = u32_at(&mut pos)?;
+        checked_end(pos, num_scripts as usize, 8)?;
         for _ in 0..num_scripts {
             let script = u32_at(&mut pos)?;
             let n = u32_at(&mut pos)? as usize;
-            if pos + n > b.len() {
-                bail!("digest truncated in gcthing kinds");
-            }
-            let kinds = b[pos..pos + n].to_vec();
-            pos += n;
-            while pos & 3 != 0 {
-                pos += 1;
-            }
+            let end = checked_end(pos, n, 1)?;
+            let padding = (4 - (end & 3)) & 3;
+            let padded_end = checked_end(end, padding, 1)?;
+            let kinds = b[pos..end].to_vec();
+            pos = padded_end;
             script_gcthing_kinds.insert(script, kinds);
         }
         let mut scope_bindings = FxHashMap::default();
         let num_scopes = u32_at(&mut pos)?;
+        checked_end(pos, num_scopes as usize, 8)?;
         for _ in 0..num_scopes {
             let scope = u32_at(&mut pos)?;
             let n = u32_at(&mut pos)?;
+            checked_end(pos, n as usize, 16)?;
             let mut bindings = Vec::with_capacity(n as usize);
             for _ in 0..n {
                 let name_atom = u32_at(&mut pos)?;
@@ -340,9 +348,45 @@ impl Digest {
             }
             scope_bindings.insert(scope, bindings);
         }
+        // Source positions: an optional trailing section.
+        let mut script_pos = FxHashMap::default();
+        if pos < b.len() {
+            let n = u32_at(&mut pos)?;
+            checked_end(pos, n as usize, 24)?;
+            for _ in 0..n {
+                let script = u32_at(&mut pos)?;
+                let line = u32_at(&mut pos)?;
+                let column = u32_at(&mut pos)?;
+                let source_start = u32_at(&mut pos)?;
+                let source_end = u32_at(&mut pos)?;
+                let k = u32_at(&mut pos)?;
+                checked_end(pos, k as usize, 12)?;
+                let mut lines = Vec::with_capacity(k as usize);
+                for _ in 0..k {
+                    let pc = u32_at(&mut pos)?;
+                    let l = u32_at(&mut pos)?;
+                    let c = u32_at(&mut pos)?;
+                    lines.push((night_compiler::ids::Pc::new(pc), l, c));
+                }
+                script_pos.insert(
+                    script,
+                    night_compiler::bytecode::ScriptPos {
+                        line,
+                        column,
+                        source_start,
+                        source_end,
+                        lines,
+                    },
+                );
+            }
+        }
+        if pos != b.len() {
+            bail!("digest has trailing bytes at {pos}");
+        }
         Ok(Digest {
             script_gcthing_kinds,
             scope_bindings,
+            script_pos,
         })
     }
 }

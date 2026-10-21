@@ -190,6 +190,10 @@ void night_source_script_set_body_scope(night_source_t* source,
 // Examples: "i(iijj)" is int32_t f(int32_t, int32_t, uint64_t, uint64_t);
 // "v(i)" is void f(int32_t).
 //
+// `options` is null (default options) or a NUL-terminated, space-separated
+// compiler option string as the nightmonkey CLI takes ("--pipeline baseline
+// --dump-tiers"); an unparsable string fails the build.
+//
 // `alloc` is called exactly twice (fixed layout region, then the prop-IC/
 // cell region + string-literal blob) and must return zeroed (calloc-style),
 // 8-aligned, non-null memory; it may be called with size 0. The env
@@ -209,6 +213,7 @@ night_inproc_out_t* night_inproc_build(night_source_t* analysis_source,
                                        const char* const* helper_sigs,
                                        const uint32_t* helper_funcptrs,
                                        uint32_t n_helpers, night_reserve_fn reserve,
+                                       const char* options,
                                        night_alloc_fn alloc);
 uint32_t night_inproc_table_base(night_inproc_out_t* out);
 uint32_t night_inproc_num_blobs(night_inproc_out_t* out);

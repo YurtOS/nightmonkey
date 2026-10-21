@@ -12,16 +12,24 @@
 
 #include "runtime/NightInlineHeap.h"
 
+#include "runtime/NightContext.h"
+#include "builtin/MapObject.h"
+#include "vm/Iteration.h"
+#include "vm/StringType.h"
+
 #include "gc/Nursery.h"
 #include "gc/StoreBuffer.h"  // js::gc::StoreBuffer::putSlot (post-barrier)
+#include "gc/StoreBuffer-inl.h"  // js::gc::StoreBuffer::putWholeCell
 #include "js/Realm.h"        // JS::Realm::offsetOfActiveGlobal
 #include "runtime/NightRegionShape.h"  // Night_allocCellBytes, Night_constructCellBytes
 #include "vm/ArrayObject.h"
+#include "vm/EnvironmentObject.h"  // CallObject (the environment rows)
 #include "vm/JSContext.h"
 #include "vm/JSFunction.h"  // js::FunctionFlags::BASESCRIPT
 #include "vm/JSObject.h"
 #include "vm/JSScript.h"  // BaseScript::offsetOfExternalTierWord
 #include "vm/PlainObject.h"
+#include "vm/RegExpObject.h"
 #include "vm/Shape.h"
 #include "vm/StringType.h"
 
@@ -45,7 +53,7 @@ namespace night {
 // flag bits is a compile-time constant baked into the wasm, and its other
 // half is a constant in the compiler:
 //
-//   js/src/night/compiler/src/wasm/bbv/abi.rs   the object/shape/string/
+//   js/src/night/compiler/src/wasm/mir/abi.rs   the object/shape/string/
 //                                               context offsets and flag bits
 //   js/src/night/compiler/src/wasm/translate.rs FIXED_SLOTS_BASE and the
 //                                               reserved-region row layouts
@@ -67,6 +75,10 @@ namespace night {
 
 // --- JSObject / NativeObject header ---------------------------------------
 static_assert(offsetof(JS::shadow::Object, shape) == 0, "SHAPE_OFFSET");
+static_assert(JSContext::offsetOfExternalCompilerState() == 144,
+              "CX_EXT_STATE_OFFSET");
+static_assert(offsetof(js::nightrt::NightContextState, propIcBase) == 0,
+              "CTX_PROPIC_BASE_OFFSET");
 static_assert(offsetof(JS::shadow::Object, externalWord_) == 4,
               "OBJ_CLASS_IDX_OFFSET (the night stamp word)");
 static_assert(JSObject::offsetOfExternalWord() == 4,
@@ -96,6 +108,13 @@ static_assert((JS::shadow::Shape::FIXED_SLOTS_MASK >>
                JS::shadow::Shape::FIXED_SLOTS_SHIFT) == 0x1f,
               "SHAPE_FIXED_SLOTS_MASK_BITS");
 static_assert(Shape::isNativeBit() == (1u << 4), "SHAPE_IS_NATIVE_BIT");
+static_assert(NativeShape::smallSlotSpanShift() == 11,
+              "SHAPE_SMALL_SLOTSPAN_SHIFT");
+static_assert((NativeShape::smallSlotSpanMask() >>
+               NativeShape::smallSlotSpanShift()) == 0x3ff,
+              "SHAPE_SMALL_SLOTSPAN_MASK_BITS");
+static_assert(NativeShape::permutedSlotsBit() == (1u << 21),
+              "SHAPE_PERMUTED_SLOTS_BIT");
 static_assert(js::Shape::offsetOfBaseShape() == 0, "SHAPE_BASESHAPE_OFFSET");
 static_assert(js::BaseShape::offsetOfClasp() == 0, "BASESHAPE_CLASP_OFFSET");
 
@@ -120,6 +139,94 @@ static_assert(ObjectElements::FROZEN == 0x40, "ELEMENTS_FROZEN_FLAG");
 // storeBuffer pointer (ChunkBase's first field) is non-null. The compiled
 // store tests both inline and calls the barrier helpers below only on a hit.
 static_assert(Nursery::nurseryCellHeaderSize() == 8, "NURSERY_HEADER_BYTES");
+
+// --- JSClass: the inline typeof --------------------------------------------
+static_assert(offsetof(JSClass, flags) == 4, "JSCLASS_FLAGS_OFFSET");
+static_assert(offsetof(JSClass, cOps) == 8, "JSCLASS_COPS_OFFSET");
+static_assert(offsetof(JSClassOps, call) == 28, "JSCLASSOPS_CALL_OFFSET");
+static_assert(JSCLASS_EMULATES_UNDEFINED == 1u << 6, "JSCLASS_EMULATES_UNDEFINED");
+static_assert(JSCLASS_IS_PROXY == 1u << 19, "JSCLASS_IS_PROXY");
+static_assert(JSTYPE_UNDEFINED == 0 && JSTYPE_OBJECT == 1 &&
+                  JSTYPE_FUNCTION == 2 && JSTYPE_STRING == 3 &&
+                  JSTYPE_NUMBER == 4 && JSTYPE_BOOLEAN == 5 &&
+                  JSTYPE_SYMBOL == 6 && JSTYPE_BIGINT == 7,
+              "the JSType numbering typeof_eq decodes");
+
+// --- MapObject: the inline Map.prototype.get ------------------------------
+//
+// The compiled get hashes an atom or int32 key as the table does
+// (`OrderedHashTableImpl::prepareHash`), finds the bucket by the hash shift
+// and walks the chain comparing key bits.
+static_assert(MapObject::offsetOfHashTable() == 16, "MAP_HASH_TABLE_OFFSET");
+static_assert(MapObject::offsetOfLiveCount() == 48, "MAP_LIVE_COUNT_OFFSET");
+static_assert(MapObject::offsetOfHashShift() == 56, "MAP_HASH_SHIFT_OFFSET");
+static_assert(MapObject::Table::offsetOfEntryKey() == 0, "MAP_ENTRY_KEY_OFFSET");
+static_assert(MapObject::Table::Entry::offsetOfValue() == 8, "MAP_ENTRY_VALUE_OFFSET");
+static_assert(MapObject::Table::offsetOfImplDataChain() == 16, "MAP_ENTRY_CHAIN_OFFSET");
+static_assert(NormalAtom::offsetOfHash() == 20, "ATOM_HASH_OFFSET");
+static_assert(FatInlineAtom::offsetOfHash() == 28, "FAT_ATOM_HASH_OFFSET");
+static_assert(JSString::FAT_INLINE_MASK == 0xC0, "STRING_FAT_INLINE_MASK");
+static_assert(mozilla::kGoldenRatioU32 == 0x9E3779B9U, "GOLDEN_RATIO");
+
+// --- NativeIterator: the inline for-in steps ------------------------------
+//
+// A for-in's `more` and `end` run in compiled code as the JIT's
+// iteratorMore / iteratorClose do. (The iterator object's slot offset is
+// not constexpr: NightCheckIteratorLayout checks it.)
+static_assert(NativeIterator::offsetOfObjectBeingIterated() == 8, "NI_OBJECT_OFFSET");
+static_assert(NativeIterator::offsetOfPropertyCursor() == 24, "NI_CURSOR_OFFSET");
+static_assert(NativeIterator::offsetOfPropertyCount() == 20, "NI_COUNT_OFFSET");
+static_assert(NativeIterator::offsetOfFlags() == 38, "NI_FLAGS_OFFSET (a byte)");
+static_assert(NativeIterator::offsetOfFirstProperty() == 40, "NI_FIRST_PROPERTY_OFFSET");
+static_assert(NativeIterator::offsetOfNext() == 4, "NI_NEXT_OFFSET");
+static_assert(NativeIterator::offsetOfPrev() == 0, "NI_PREV_OFFSET");
+static_assert(sizeof(IteratorProperty) == 4, "NI_PROPERTY_BYTES");
+static_assert(IteratorProperty::DeletedBit == 1, "NI_DELETED_BIT");
+static_assert(NativeIterator::Flags::Active == 2, "NI_FLAG_ACTIVE");
+static_assert(NativeIterator::Flags::HasUnvisitedPropertyDeletion == 4,
+              "NI_FLAG_UNVISITED_DELETION");
+static_assert(NativeIterator::Flags::IsEmptyIteratorSingleton == 8,
+              "NI_FLAG_EMPTY_SINGLETON");
+
+// The for-in's start runs in compiled code as the JIT's
+// maybeLoadIteratorFromShape and registerIterator do: the iterator the
+// receiver's shape caches, checked against the prototypes' shapes it
+// recorded (after its properties, and their indices if allocated).
+static_assert(NativeIterator::Flags::Initialized == 1, "NI_FLAG_INITIALIZED");
+static_assert(NativeIterator::Flags::IndicesAllocated == 0x20,
+              "NI_FLAG_INDICES_ALLOCATED");
+static_assert(sizeof(PropertyIndex) == 4, "NI_INDEX_BYTES");
+static_assert(sizeof(GCPtr<Shape*>) == 4, "NI_PROTO_SHAPE_BYTES");
+static_assert(Shape::offsetOfCachePtr() == 12, "SHAPE_CACHE_OFFSET");
+static_assert(RegExpObject::offsetOfLastIndex() == 16, "REGEXP_LAST_INDEX_OFFSET");
+static_assert(RegExpObject::offsetOfShared() == 40, "REGEXP_SHARED_OFFSET");
+static_assert(sizeof(ShapeCachePtr) == sizeof(uintptr_t), "SHAPE_CACHE_OFFSET");
+
+bool NightCheckIteratorLayout() {
+  // ShapeCachePtr's tags are private: an iterator's is the low bits of a
+  // word that holds one (SHAPE_CACHE_ITERATOR, under SHAPE_CACHE_TAG_MASK).
+  ShapeCachePtr p;
+  p.setIterator(reinterpret_cast<PropertyIteratorObject*>(uintptr_t(0x1000)));
+  uintptr_t bits;
+  memcpy(&bits, &p, sizeof(bits));
+  return PropertyIteratorObject::offsetOfIteratorSlot() == 16 && bits == 0x1003;
+}
+
+// --- JSString and the inline rope -----------------------------------------
+//
+// A compiled concat allocates a JSRope in the nursery as the JIT's concat
+// stub does: flags (Latin1 iff both halves are), length, then the children.
+static_assert(JSString::offsetOfFlags() == 0, "STRING_FLAGS_OFFSET");
+static_assert(JSString::offsetOfLength() == 4, "STRING_LENGTH_OFFSET");
+static_assert(sizeof(JSString) == 16, "ROPE_BYTES");
+// (The children's offsets, ROPE_LEFT_OFFSET 8 and ROPE_RIGHT_OFFSET 12, are
+// private to JSRope: NightCheckRopeLayout checks them on a real rope.)
+static_assert(JSString::INIT_ROPE_FLAGS == 0, "a rope's flags are its Latin1 bit");
+static_assert(JSString::LATIN1_CHARS_BIT == 1u << 10, "STRING_LATIN1_CHARS_BIT");
+static_assert(JSString::MAX_LENGTH == (1u << 30) - 2, "STRING_MAX_LENGTH");
+static_assert(JSFatInlineString::MAX_LENGTH_LATIN1 == 24 &&
+                  JSFatInlineString::MAX_LENGTH_TWO_BYTE == 12,
+              "FAT_INLINE_MAX_LATIN1 / FAT_INLINE_MAX_TWO_BYTE");
 static_assert(uint32_t(JS::detail::ValueLowerInclGCThingTag) == 0xFFFFFF86u,
               "VAL_GCTHING_TAG_MIN");
 static_assert(js::gc::ChunkStoreBufferOffset == 0, "CHUNK_STORE_BUFFER_OFFSET");
@@ -140,8 +247,7 @@ static_assert(JS::Realm::offsetOfActiveGlobal() == 72, "REALM_GLOBAL_OFFSET");
 //
 // An interpreted JSFunction keeps its BaseScript* as a PrivateValue in fixed
 // slot 2, and a compiled body's funcref index lives in the script. The
-// specialized call path loads both inline instead of calling
-// night_runtime_callee_night_target.
+// call classify (the inline probe and night_call_classify) loads both.
 static_assert(uint16_t(js::FunctionFlags::BASESCRIPT) == (1u << 5),
               "FUNCTION_FLAGS_BASESCRIPT");
 static_assert(NativeObject::getFixedSlotOffset(2) == 32,
@@ -191,11 +297,31 @@ static_assert(offsetof(NightArrayAllocCell, length) == 28,
               "array cell length@28");
 static_assert(offsetof(NightConstructCell, ctorShape) == 20,
               "construct cell ctorShape@20");
+static_assert(sizeof(NightLambdaCell) <= js::night::Night_constructCellBytes,
+              "a Lambda row fits a construct row");
+static_assert(offsetof(NightLambdaCell, templateFun) == 20,
+              "lambda cell templateFun@20");
+static_assert(offsetof(NightLambdaCell, gen) == 24, "lambda cell gen@24");
+static_assert(sizeof(NightEnvCell) <= js::night::Night_constructCellBytes,
+              "an environment row fits a construct row");
+static_assert(offsetof(NightEnvCell, armed) == 20, "env cell armed@20");
+static_assert(offsetof(NightEnvCell, gen) == 24, "env cell gen@24");
+static_assert(offsetof(NightEnvCell, classWord) == 28,
+              "env cell classWord@28");
+
 static_assert(offsetof(NightConstructCell, gen) == 24, "construct cell gen@24");
 static_assert(offsetof(NightConstructCell, protoPtr) == 28,
               "construct cell protoPtr@28");
 static_assert(offsetof(NightConstructCell, protoSlotEnc) == 32,
               "construct cell protoSlotEnc@32");
+static_assert(offsetof(NightConstructCell, finalShape) == 36,
+              "construct cell finalShape@36");
+static_assert(offsetof(NightConstructCell, protoShape) == 40,
+              "construct cell protoShape@40");
+static_assert(offsetof(NightConstructCell, proto2Ptr) == 44,
+              "construct cell proto2Ptr@44");
+static_assert(offsetof(NightConstructCell, proto2Shape) == 48,
+              "construct cell proto2Shape@48");
 
 // ==========================================================================
 // Inline nursery allocation
@@ -210,6 +336,31 @@ bool NightNurseryAddresses(JSContext* cx, uint32_t* posAddr,
   uintptr_t pos = reinterpret_cast<uintptr_t>(nursery.addressOfPosition());
   *posAddr = uint32_t(pos);
   *endAddr = uint32_t(pos + Nursery::offsetOfCurrentEndFromPosition());
+  return true;
+}
+
+bool NightCheckRopeLayout(JSContext* cx) {
+  static const char kHalf[] = "night-rope-layout-check-half";
+  JS::RootedString l(cx, JS_NewStringCopyZ(cx, kHalf));
+  JS::RootedString r(cx, l ? JS_NewStringCopyZ(cx, kHalf) : nullptr);
+  JSString* rope = r ? JS_ConcatStrings(cx, l, r) : nullptr;
+  if (!rope || !rope->isRope()) {
+    return false;
+  }
+  const uint32_t* w = reinterpret_cast<const uint32_t*>(rope);
+  return w[2] == uint32_t(reinterpret_cast<uintptr_t>(rope->asRope().leftChild())) &&
+         w[3] == uint32_t(reinterpret_cast<uintptr_t>(rope->asRope().rightChild()));
+}
+
+bool NightNurseryStringAlloc(JSContext* cx, uint32_t* header,
+                             uint32_t* countAddr) {
+  Zone* zone = cx->zone();
+  if (!cx->nursery().isEnabled() || !zone->allocNurseryStrings()) {
+    return false;
+  }
+  gc::AllocSite* site = zone->unknownAllocSite(JS::TraceKind::String);
+  *header = uint32_t(gc::NurseryCellHeader::MakeValue(site, JS::TraceKind::String));
+  *countAddr = uint32_t(reinterpret_cast<uintptr_t>(site->nurseryAllocCountAddress()));
   return true;
 }
 
@@ -256,6 +407,56 @@ bool NightFillAllocCellObject(NightAllocCell* cell, JSObject* obj) {
   // The shape word arms the row, so it is written last: a compiled body can
   // read the row between any two of these stores.
   cell->shape = uint32_t(reinterpret_cast<uintptr_t>(nobj->shape()));
+  return true;
+}
+
+// Only a nursery clone of a tenured canonical function with only fixed slots
+// qualifies: the inline path copies the canonical function's words.
+bool NightFillLambdaCell(NightLambdaCell* cell, JSObject* clone) {
+  if (!cell || !gc::IsInsideNursery(clone) || !clone->is<JSFunction>()) {
+    return false;
+  }
+  NativeObject* nobj = &clone->as<NativeObject>();
+  if (nobj->hasDynamicSlots()) {
+    return false;
+  }
+  gc::AllocKind kind = clone->as<JSFunction>().getAllocKind();
+  RawObjectWords words(clone);
+  cell->alloc.shape = uint32_t(reinterpret_cast<uintptr_t>(nobj->shape()));
+  cell->alloc.totalSize =
+      uint32_t(gc::Arena::thingSize(kind) + Nursery::nurseryCellHeaderSize());
+  cell->alloc.slotsWord = words.slots;
+  cell->alloc.elementsWord = words.elements;
+  cell->alloc.headerWord = words.header;
+  return true;
+}
+
+// Only a nursery CallObject with only fixed slots qualifies.
+bool NightFillEnvCell(NightEnvCell* cell, JSObject* callobj) {
+  if (!cell || !gc::IsInsideNursery(callobj) || !callobj->is<CallObject>()) {
+    return false;
+  }
+  // The replay writes the enclosing environment to fixed slot 0 and the
+  // callee to fixed slot 1 (CALLOBJ_ENCLOSING_OFFSET, CALLOBJ_CALLEE_OFFSET).
+  if (EnvironmentObject::enclosingEnvironmentSlot() != 0 ||
+      CallObject::calleeSlot() != 1) {
+    return false;
+  }
+  NativeObject* nobj = &callobj->as<NativeObject>();
+  if (nobj->hasDynamicSlots() ||
+      nobj->slotSpan() > nobj->numFixedSlots()) {
+    return false;
+  }
+  gc::AllocKind kind = gc::GetGCObjectKind(nobj->numFixedSlots());
+  RawObjectWords words(callobj);
+  cell->classWord = *reinterpret_cast<const uint32_t*>(
+      reinterpret_cast<uintptr_t>(callobj) + sizeof(uint32_t));
+  cell->alloc.shape = uint32_t(reinterpret_cast<uintptr_t>(nobj->shape()));
+  cell->alloc.totalSize =
+      uint32_t(gc::Arena::thingSize(kind) + Nursery::nurseryCellHeaderSize());
+  cell->alloc.slotsWord = words.slots;
+  cell->alloc.elementsWord = words.elements;
+  cell->alloc.headerWord = words.header;
   return true;
 }
 
@@ -328,6 +529,16 @@ void NightPostWriteBarrierElem(uint64_t ownerBits, uint32_t index,
       &JS::Value::fromRawBits(ownerBits).toObject().as<NativeObject>();
   cell->storeBuffer()->putSlot(owner, HeapSlot::Element,
                                owner->unshiftedIndex(index), 1);
+}
+
+// The JIT's whole-cell post barrier (jit::PostWriteBarrier): tenured `cell`
+// now holds a nursery pointer outside its slots (an iterator's
+// objectBeingIterated_, stored raw), so the next minor GC traces all of it.
+// One bit per cell until then, where the field's own barrier would add and
+// remove a hashed edge at every for-in's start and close.
+void NightPostWholeCell(JSContext* cx, uint32_t cell) {
+  cx->runtime()->gc.storeBuffer().putWholeCell(
+      reinterpret_cast<gc::Cell*>(uintptr_t(cell)));
 }
 
 // Idempotent (marking an already-black cell is a no-op) and non-moving, so

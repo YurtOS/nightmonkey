@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run NightMonkey's own regression tests (tests/jit-test/**/*.js, plain
 # scripts in the jit-test style) through the shell, in the AOT lane and,
-# with NIGHT_INPROCESS_OFF=1, the baseline lane. A test passes when the shell
+# with NIGHT_INPROCESS_OFF=1, the interpreter lane. A test passes when the shell
 # exits 0.
 #
 #   scripts/run-night-tests.sh [build-dir]

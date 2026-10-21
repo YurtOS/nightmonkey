@@ -9,6 +9,8 @@
 #
 # Env: NIGHT_RUNNER, NIGHT_WASM_SHELL, NIGHT_CACHE_DIR override the defaults;
 #      NIGHT_INPROCESS_OFF=1 omits --night-inprocess (the AOT-off lane).
+#      NIGHT_OPTIONS="--pipeline baseline ..." is passed as --night-options
+#      (an explicit --night-options argument takes precedence).
 set -u
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -47,6 +49,13 @@ fi
 aot=()
 if [ "${NIGHT_INPROCESS_OFF:-0}" != 1 ]; then
   aot=(--night-inprocess)
+  explicit=0
+  for a in "${argv[@]+"${argv[@]}"}"; do
+    case $a in --night-options | --night-options=*) explicit=1 ;; esac
+  done
+  if [ -n "${NIGHT_OPTIONS:-}" ] && [ "$explicit" = 0 ]; then
+    aot+=(--night-options "$NIGHT_OPTIONS")
+  fi
 fi
 
 exec "$RUNNER" --dir / --cache-dir "$CACHE" "$SHELL_WASM" -- \

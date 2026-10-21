@@ -79,6 +79,31 @@ pub fn walk(mem: &impl MemAccess, reg: &Registration) -> Result<WalkOutput> {
     })
 }
 
+/// The compiler's input, as both drivers build it (`nightmonkey` over a
+/// snapshot image, `wasm-jit-runner` over a live instance): walk the
+/// registered roots plus the engine-recorded self-hosted roots, then attach
+/// the self-hosted names and the regex programs (taken out of `reg`) to the
+/// `Source`. `root_ids[0]` is the user root.
+pub fn walk_compile_input(mem: &impl MemAccess, reg: &mut Registration) -> Result<WalkOutput> {
+    let n_reg_roots = reg.roots.len();
+    let selfhosted = std::mem::take(&mut reg.selfhosted);
+    reg.roots.extend(selfhosted.iter().map(|&(addr, _)| addr));
+    let walked = walk(mem, reg);
+    reg.roots.truncate(n_reg_roots);
+    reg.selfhosted = selfhosted;
+    let mut out = walked?;
+    // The walker dedups by address, so two self-hosted paths naming one
+    // script share an id; the first name wins.
+    for (i, (_, name)) in reg.selfhosted.iter().enumerate() {
+        let id = out.root_ids[n_reg_roots + i];
+        if !out.source.selfhosted.iter().any(|(sid, _)| *sid == id) {
+            out.source.selfhosted.push((id, name.clone()));
+        }
+    }
+    out.source.regex_programs = std::mem::take(&mut reg.regex_programs);
+    Ok(out)
+}
+
 impl<'a, M: MemAccess> Walker<'a, M> {
     fn push(&mut self, obj: SourceObject) -> u32 {
         self.source.push(obj).id()
@@ -391,6 +416,7 @@ impl<'a, M: MemAccess> Walker<'a, M> {
             is_class_ctor,
             strict,
             has_mapped_args,
+            pos: self.reg.digest.script_pos.get(&addr).cloned(),
         })))
     }
 
@@ -536,7 +562,7 @@ impl<'a, M: MemAccess> Walker<'a, M> {
         .any(|&f| lay.get(f) as u8 == kind);
         // The template shape's fixed-slot count: `Shape::immutableFlags`
         // (word 1 of the shape, the offset every emitted shape read in
-        // `bbv/abi.rs` already bakes in) bits 6..11 (`FIXED_SLOTS_SHIFT` /
+        // `wasm/mir/abi.rs` already bakes in) bits 6..11 (`FIXED_SLOTS_SHIFT` /
         // `FIXED_SLOTS_MASK`). Read at the fixed offset rather than through
         // a new descriptor field: a descriptor change invalidates every
         // recorded fixture and every baseline binary's snapshots.

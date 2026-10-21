@@ -21,8 +21,8 @@ defaults:
 # Resolve the supported engine branch once and record its exact SHA.
 # Every engine cache includes that revision; no neighboring build is reused.
 env:
-  FIREFOX_REPO: bytecodealliance/firefox
-  FIREFOX_REF: wasi-ff147
+  FIREFOX_REPO: YurtOS/firefox
+  FIREFOX_REF: yurt
   SM_OBJDIR: obj-nightmonkey-sm
 
 jobs:
@@ -112,10 +112,29 @@ jobs:
           cmake --build build
           test -x build/bin/inproc-shell.sh
 
+      - name: Guest tier options contract
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: python3 scripts/test-guest-tier-options.py build
+
       - name: Local regressions
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         timeout-minutes: 65
         run: scripts/ci-suite.sh local "$CI_LANE"
+
+      # The default pipeline is MIR (the lanes above run it with strict
+      # coverage); the baseline tier and MIR under its stress option get the
+      # regression tests as tiers of their own.
+      - name: Tier regressions (baseline, MIR stress)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 65
+        run: |
+          set -euo pipefail
+          for opts in "--pipeline baseline --strict-coverage" \
+                      "--pipeline mir --mir-stress 3 --strict-coverage"; do
+            echo "::group::night tests: $opts"
+            NIGHT_INPROC_STRICT=1 NIGHT_OPTIONS="$opts" scripts/run-night-tests.sh build
+            echo "::endgroup::"
+          done
 
       - name: jit-tests
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}

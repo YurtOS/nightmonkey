@@ -102,6 +102,11 @@ bool NightArgumentsEnv(JSContext* cx, uint64_t calleeBits,
 // non-zero), else 0. Leaf.
 uint64_t NightCalleeNightTarget(uint64_t calleeBits);
 
+// Whether `bits` is a JSFunction whose script is the BaseScript at
+// `scriptAddr` and has a compiled AOT body: what compiled code's callee
+// guard on that script tests (`guard.script`). Leaf.
+bool NightIsCompiledFunctionOf(uint64_t bits, uint32_t scriptAddr);
+
 // Build the `new` from the compiled-body frame at `spPtr`. A sized construct
 // site (`nSlots != UINT32_MAX`) creates an empty fixed-slot-sized `this` and
 // constructs on it (no CreateThis hook); else an ordinary `js::Construct`.
@@ -111,6 +116,11 @@ bool NightConstruct(JSContext* cx, void* spPtr, uint32_t argc, uint32_t nSlots,
 // predicted layout, else an ordinary `CreateThis`.
 bool NightCreateThis(JSContext* cx, uint64_t calleeBits, uint64_t newTargetBits,
                      uint32_t nSlots, uint64_t* out, uint32_t stampWord);
+// `NightCreateThis` for a scripted (non-derived) constructor that is its own
+// new.target, its `prototype` already read (`protoBits`; a non-object
+// means the realm's Object.prototype): runs no code.
+bool NightNewThis(JSContext* cx, uint64_t calleeBits, uint64_t protoBits,
+                  uint32_t nSlots, uint64_t* out, uint32_t stampWord);
 
 bool NightException(JSContext* cx, uint64_t* out);
 void NightThrow(JSContext* cx, uint64_t valBits);

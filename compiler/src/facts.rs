@@ -168,6 +168,11 @@ pub struct ClassFieldFacts {
     /// value's magnitude and `prims` is its tag, and no consumer wants one
     /// without the other.
     pub range: Option<ValueRange>,
+    /// The field's predicted type in full (every primitive class it may
+    /// hold, and whether objects: `Claim::OBJECT`'s bit beside the prims),
+    /// or none where an unknown value may flow in. What MIR's TYPES bit
+    /// asserts: under it every field holds a value of this type.
+    pub types: Claim,
     /// The effective claim in fullword/dims mode: `prims` where the write
     /// tier claimed one, otherwise the name-keyed claim filled in from the
     /// typed tier. Equal to `prims` when the typed tier adds nothing.
@@ -208,75 +213,6 @@ pub enum CallResolution {
     Scripted(Vec<ScriptId>),
 }
 
-/// Post-fixpoint per-script effect summary: what a call to this script,
-/// its resolved callees folded in transitively, may write to pre-existing
-/// heap. Produced from the solved state only, never fed into the solve.
-/// `top` means the walk met an op or a call edge it could not classify;
-/// the other fields are meaningless then. Call resolution is likely, not
-/// proven, so the summary shares the facts contract: a consumer keeps
-/// only guarded/recoverable state on its strength.
-#[derive(Clone, Debug, Default)]
-pub struct EffectSummary {
-    pub top: bool,
-    /// What saturated the summary (an op name, "cap", a call-edge reason).
-    /// Diagnostic only: excluded from equality, so the summary fixpoint
-    /// cannot churn on why-strings propagating around a recursive cycle.
-    pub top_why: Option<String>,
-    /// Property writes: the write-site receiver's layout-key range when
-    /// its receivers agreed on a planned class, else None = unknown
-    /// receiver.
-    pub field_writes: Vec<(Option<(LayoutKey, LayoutKey)>, NameId)>,
-    pub gname_writes: Vec<NameId>,
-    pub elems_write: bool,
-    pub env_write: bool,
-}
-
-impl PartialEq for EffectSummary {
-    fn eq(&self, other: &EffectSummary) -> bool {
-        self.top == other.top
-            && self.field_writes == other.field_writes
-            && self.gname_writes == other.gname_writes
-            && self.elems_write == other.elems_write
-            && self.env_write == other.env_write
-    }
-}
-impl Eq for EffectSummary {}
-
-impl EffectSummary {
-    pub fn saturate(&mut self, why: impl Into<String>) {
-        if !self.top {
-            self.top = true;
-            self.top_why = Some(why.into());
-        }
-    }
-
-    pub fn is_write_free(&self) -> bool {
-        !self.top
-            && self.field_writes.is_empty()
-            && self.gname_writes.is_empty()
-            && !self.elems_write
-            && !self.env_write
-    }
-
-    /// One-token diagnostic label: `wf`, `w:<fields>f/<gnames>g/<e>/<v>`,
-    /// or `top:<why>`.
-    pub fn label(&self) -> String {
-        if self.top {
-            format!("top:{}", self.top_why.as_deref().unwrap_or("?"))
-        } else if self.is_write_free() {
-            "wf".to_string()
-        } else {
-            format!(
-                "w:{}f/{}g/{}/{}",
-                self.field_writes.len(),
-                self.gname_writes.len(),
-                u8::from(self.elems_write),
-                u8::from(self.env_write),
-            )
-        }
-    }
-}
-
 /// Everything the analysis tells the translator: the whole contract
 /// between `likelier` and `wasm`, and the only channel between them.
 ///
@@ -311,6 +247,13 @@ pub struct LikelyFacts {
     /// these names whose receivers did not classify still emit the
     /// (fully dynamically guarded) accessor arm, without a static target.
     pub accessor_names: HashSet<NameId>,
+    /// Names a property read may reach a getter by: every modeled
+    /// accessor's, every literal or class accessor's, every name a
+    /// `defineProperty`-shaped call passes, and the builtins' accessor
+    /// properties. A read of any other name runs no code where it finds a
+    /// property (MIR's `getprop.data` exits on the rare miss; these keep
+    /// the generic read).
+    pub getter_names: HashSet<NameId>,
     /// How each call site resolved (see [`CallResolution`]). Absent = the
     /// site did not resolve and takes the generic dispatch.
     pub call_sites: HashMap<Site, CallResolution>,
@@ -343,9 +286,6 @@ pub struct LikelyFacts {
     /// Guarded by callee identity at runtime, so a wrong resolution is a
     /// missed fast path.
     pub apply_natives: HashMap<Site, ApplyNative>,
-    /// Per-script transitive effect summaries (see [`EffectSummary`]).
-    /// Every script the source carries has an entry.
-    pub script_effects: HashMap<ScriptId, EffectSummary>,
     /// Method script -> (lo key, hi key) of the predicted `this` class:
     /// lo == hi = an exact ctor-class home (the narrowed subclass view);
     /// lo < hi = a predictor-class home consumed with a range guard and
@@ -397,6 +337,10 @@ pub struct LikelyFacts {
     /// side continues with the fact; a def whose type already implies
     /// the claim takes no guard and keeps the tighter type.
     pub arg_types: HashMap<(ScriptId, ArgIndex), Claim>,
+    /// (script, formal index from 0) pairs some analyzed call leaves out,
+    /// so the formal may read `undefined` whatever its `arg_types` claim:
+    /// that claim is then good at its uses, not at entry.
+    pub omitted_formals: HashSet<(ScriptId, u32)>,
     /// Per-formal VALUE class range (emitted layout-key space), the
     /// advisory sibling of `arg_types`: the entry ctx carries it as a
     /// `likely_cls` hint, unguarded; the first use that needs the identity
@@ -426,20 +370,27 @@ pub struct LikelyFacts {
     /// the consumer's per-read tag guard miss, never a miscompile -- so
     /// unlike the fused-literal machinery this table needs no fuses.
     pub gname_types: HashMap<NameId, Claim>,
-    /// Arith sites whose RESULT cell is fractional-reachable (double
-    /// evidence at range Top -- the i53 law's contrapositive): a real
-    /// runtime double population flows through the op, so its
-    /// both-number f64 arm keeps the Opt track (the numeric-category
-    /// policy). Sites absent here keep the track step: their f64 arm is
-    /// cold, and letting its numeric result join the successor would
-    /// degrade a pure-int32 chain's facts.
-    pub fractional_arith_sites: HashSet<Site>,
-    /// Arith (`+`) sites whose result cell carries string evidence: a real
-    /// string population flows through the op, so the both-string concat
-    /// arm keeps the Opt track (the string analog of the numeric-category
-    /// policy). Sites absent here keep the track step for the same
-    /// join-degradation reason as `fractional_arith_sites`.
-    pub string_arith_sites: HashSet<Site>,
+    /// Per-global-name predicted function: the names whose GName cell
+    /// (the snapshot global's value joined with every statically-seen
+    /// write) holds exactly one scripted function and nothing else. A
+    /// prediction: the runtime arms the binding's value fuse to its
+    /// "predicted" state only while the binding holds a function of that
+    /// script, and a read compiled against it tests that state.
+    pub gname_fns: HashMap<NameId, ScriptId>,
+    /// Per property-read site, a predicted method: the receiver's layouts
+    /// (the key range `lo..=hi`) all lack the name, and the read's value is
+    /// exactly one scripted function, which the receivers' prototype chain
+    /// holds. A prediction: a `method.load` reads it from a cell the
+    /// runtime arms only while the chain resolves the name to a compiled
+    /// function of that script, held by a constant (ObjectFuse) property.
+    pub method_sites: HashMap<Site, (LayoutKey, LayoutKey, NameId, ScriptId)>,
+    /// The layouts whose class the analysis never sees hold a property
+    /// outside the layout's row: a stamp of one may say CLOSED (no own
+    /// property outside the row), and adding one to it is a surprise, not a
+    /// stage of its construction (a prefix layout's object, or one given
+    /// fields later, would clear the bit, and bump the stamp epoch, once
+    /// per object).
+    pub closed_layouts: HashSet<LayoutKey>,
     /// Per-element-site likely typed-array kind: at a GetElem/SetElem,
     /// the receiver class's element kind when it settled on a single one. Consumed as a guarded-monomorphic inline
     /// read/store arm (clasp guard + kind-specific access); a wrong prediction
@@ -473,6 +424,14 @@ pub struct LikelyFacts {
     /// Ctor-return stamp sites: constructor script -> its own ctor-class
     /// key (contiguous within the predictor group).
     pub ctor_stamps: HashMap<ScriptId, LayoutKey>,
+    /// Early publication (MIR.md §2.3 `publish_layout`): every script that
+    /// runs as part of a layout constructor's construction of `this` (the
+    /// ctor itself and the `.call`/`.apply`/`this.m(...)` delegates its
+    /// `this` events reach) -> the ctors whose objects it may be building.
+    /// Before a call there, `this` is stamped with the ctor's key as soon
+    /// as it carries that ctor's early key and all of its fields, so
+    /// methods it calls on itself find a published object.
+    pub ctor_publish: HashMap<ScriptId, Vec<ScriptId>>,
     /// Object-literal stamp sites: the `NewInit`/`NewObject` site -> its
     /// lit-row layout key. The rows always existed in the key space (and
     /// so in the runtime layout tables and the per-site claims); this is

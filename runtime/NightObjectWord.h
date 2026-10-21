@@ -29,8 +29,10 @@ namespace js {
 // full clears). Fresh-object stamping does not advance it. An unchanged
 // epoch across a call proves every stamp-guarded fact the caller held still
 // holds; compiled census builds advance it through the census helper for
-// the inline demote arms.
-extern uint64_t gNightStampEpoch;
+// the inline demote arms. Per context (NightRuntime.cpp's state; compiled
+// code reads it through the address published at install): this advances
+// the current context's, and reports the bump (NightNoteEpochBump).
+void NightBumpStampEpoch(uint32_t site, uint32_t oldWord);
 
 // Bump-site census hook: called on every ACTUAL epoch bump with the path
 // that performed it and the class word being demoted. Records into the
@@ -59,22 +61,35 @@ static constexpr uint32_t SlotsAddMismatch3 = 12;
 static constexpr uint32_t SlotsAddMismatch4 = 13;
 // JSObject::setFlag (object-flag shape change, e.g. a Watchtower watch).
 static constexpr uint32_t ObjectFlagChange = 14;
+// NightClearClosedBit (an add to a CLOSED object).
+static constexpr uint32_t ClosedAdd = 15;
 }  // namespace NightBumpSite
 
 static constexpr uint32_t kWordTypes = 0x00010000u;
 static constexpr uint32_t kWordSlots = 0x00020000u;
 static constexpr uint32_t kWordAdvIneligible = 0x00040000u;
+// CLOSED (bit 19, a stamped word's only: under the sentinel it is an early
+// key bit): the object has no own property outside its layout's row. The
+// stamp gates set it where the object holds exactly its row (SLOTS, and a
+// span of the row's length); since it then has every row field, any add
+// is outside the row and clears it.
+static constexpr uint32_t kWordClosed = 0x00080000u;
 static constexpr uint32_t kWordRanges = 0x40000000u;
 static constexpr uint32_t kWordConstructing = 0x80000000u;
+// Under the sentinel, the low half (a stamped word's identity) is the set
+// of the layout's fields added so far (bit i: field i), for the first
+// kCtorSetBits of them (MIR.md §2.3; FieldSet::WORD_BITS).
+static constexpr uint32_t kCtorSetBits = 16;
 
 // The engine-path store policy (JS::ExternalCompilerHooks store masks).
-// TYPES asserts per-field NUMBERNESS and nothing finer: a number store
-// through ANY path violates no class's claim and keeps the bit; the finer
-// per-field mask survives only because every consumer unboxes through the
-// number-tag dispatch, i.e. re-checks the mask at the load. RANGES is
-// consumed CHECKLESSLY, so every store through the engine drops it (owner
-// ruling 2026-08-16).
-static constexpr uint32_t kStoreClearMask = kWordRanges;
+// TYPES asserts that every field holds a value of its predicted type (any
+// type), and a read under a set bit on a valid stamp trusts it. The engine
+// cannot tell which field a store writes (and should not look it up), so
+// every store through it drops TYPES; compiled stores to a known field
+// keep it for a value of the field's predicted type (owner ruling
+// 2026-09-27). RANGES is consumed CHECKLESSLY, so every store through the
+// engine drops it (owner ruling 2026-08-16).
+static constexpr uint32_t kStoreClearMask = kWordRanges | kWordTypes;
 static constexpr uint32_t kStoreNonNumberClearMask = kWordTypes;
 
 // Epoch discipline: a demotion bumps the epoch only for a NON-sentinel word.
@@ -84,17 +99,28 @@ static constexpr uint32_t kStoreNonNumberClearMask = kWordTypes;
 // `demote_delta` exactly.
 inline void NightNoteDemotion(uint32_t oldWord, uint32_t site) {
   if (!(oldWord & kWordConstructing)) {
-    gNightStampEpoch++;
-    NightNoteEpochBump(site, oldWord);
+    NightBumpStampEpoch(site, oldWord);
   }
 }
 
 // SLOTS-only clear: an add deviated from the clump's slot predictions.
+// CLOSED goes with it (it is set only with SLOTS, and compiled add arms
+// test it only where SLOTS holds).
 inline void NightClearSlotsBit(JSObject* obj, uint32_t site = 0) {
   uint32_t w = obj->externalWord();
   if (w & kWordSlots) {
     NightNoteDemotion(w, site);
-    obj->setExternalWord(w & ~kWordSlots);
+    uint32_t clear = kWordSlots | (w & kWordConstructing ? 0 : kWordClosed);
+    obj->setExternalWord(w & ~clear);
+  }
+}
+
+// CLOSED-only clear: a property was added to a CLOSED object.
+inline void NightClearClosedBit(JSObject* obj) {
+  uint32_t w = obj->externalWord();
+  if ((w & (kWordConstructing | kWordClosed)) == kWordClosed) {
+    NightNoteDemotion(w, NightBumpSite::ClosedAdd);
+    obj->setExternalWord(w & ~kWordClosed);
   }
 }
 
@@ -123,8 +149,7 @@ inline void NightSetConstructingSentinel(JSObject* obj) {
 inline void NightSetClassWord(JSObject* obj, uint32_t w, uint32_t site = 0) {
   uint32_t old = obj->externalWord();
   if (old != 0 && !(old & kWordConstructing) && old != w) {
-    gNightStampEpoch++;
-    NightNoteEpochBump(site, old);
+    NightBumpStampEpoch(site, old);
   }
   obj->setExternalWord(w);
 }

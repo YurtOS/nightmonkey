@@ -7,8 +7,9 @@ JavaScript semantics follow ECMAScript and the supported SpiderMonkey engine.
 
 ## Purpose and layout
 
-Nightmonkey is an ahead-of-time JavaScript-to-WebAssembly compiler layered on
-SpiderMonkey. Read `README.md`, `docs/DESIGN.md` and `docs/INTEGRATION.md` before
+Nightmonkey is a JavaScript-to-WebAssembly compiler layered on SpiderMonkey,
+run ahead of time or, for YurtOS, inside the running instance as a JIT (the
+compiler runs in the guest). Read `README.md`, `docs/DESIGN.md` and `docs/INTEGRATION.md` before
 changing architecture or engine integration.
 
 - `compiler/`: `night-compiler`; bytecode, likely-types analysis, facts and Wasm emission.
@@ -44,7 +45,7 @@ cmake --build build
 
 Integrated builds need the patched SpiderMonkey tree, its private headers and
 libraries, the WASI sysroot, CMake and the `wasm32-wasip1` Rust target. Consult
-`.github/workflows/ci.yml` for bootstrap steps and the engine branch. That branch
+`.github/workflows/engine.yml` for bootstrap steps and the engine branch. That branch
 is resolved to a SHA per CI run; record the resolved revision when reproducing.
 Do not assume a neighboring repository's engine build is ABI-compatible.
 

@@ -27,9 +27,20 @@ mkdir -p "$logs"
 failed=0
 for lane in "${lanes[@]}"; do
   off=0
-  if [ "$lane" = interpreter ]; then off=1; fi
+  strict=0
+  opts=
+  if [ "$lane" = interpreter ]; then off=1; else strict=1; fi
+  # The compiled local and jit lanes also fail a script left interpreted for a
+  # reason that is not a designed-out op, or a tier that hit a compiler bug
+  # (`BUG:`): a MIR bug falls back to baseline, which passes any test that
+  # checks results only. Verified on the full jit-test suite; the jstests lane
+  # has not been run this way, so it does not get it.
+  if [ "$strict" = 1 ] && [ "$suite" != jstests ]; then opts=--strict-coverage; fi
+  # A compiled lane runs strict: a failed batch must fail the run, not leave
+  # the scripts interpreted and every test green.
   if timeout --kill-after=30s "${seconds}s" \
-      env NIGHT_INPROCESS_OFF="$off" "${harness[@]}" 2>&1 | tee "$logs/$suite-$lane.log"; then
+      env NIGHT_INPROCESS_OFF="$off" NIGHT_INPROC_STRICT="$strict" NIGHT_OPTIONS="$opts" \
+      "${harness[@]}" 2>&1 | tee "$logs/$suite-$lane.log"; then
     echo "$suite ($lane): passed"
   else
     status=$?

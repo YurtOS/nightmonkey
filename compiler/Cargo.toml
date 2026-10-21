@@ -11,12 +11,15 @@ license.workspace = true
 # the compiler is built for: exactly one.
 default = ["ff147"]
 ff147 = []
+parallel = ["dep:rayon"]
 
 [dependencies]
 # AOT Wasm emitter: builds the codegen core module and merges it into
 # the runtime reactor module (weval-style).
-waffle = "0.3.1"
+waffle = "0.3.3"
 log = "0.4"
+# Optional host-only MIR prebuilding; guest builds remain sequential.
+rayon = { version = "1", optional = true }
 # Fast non-SipHash maps: the translator/merge keys are small integers (pcs,
 # entity ids), and profile showed SipHash dominating large-input translation.
 rustc-hash = "2"

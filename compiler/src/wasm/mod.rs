@@ -4,43 +4,51 @@
 //! linear-memory region layout; `translate_all` compiles every compilable
 //! script (and regex program) into a Wasm function body (see `translate`);
 //! the rest run interpreted. Consumed by the in-process batch builder
-//! (`inprocess`, via the `night_inproc_build` FFI) and by the external
-//! snapshot compiler (`js/src/night/nightmonkey`).
+//! (`inprocess`, driven by `wasm-jit-runner`) and by the external snapshot
+//! compiler (`nightmonkey`).
 
 use crate::facts::{Claim, LikelyFacts};
-use crate::ids::{JsString, LayoutKey, NameId, Names, Pc, RegionRoot, ScriptId, Site, StampKey};
+use crate::ids::{JsString, LayoutKey, NameId, Names, RegionRoot, ScriptId, Site, StampKey};
 use crate::opsem::ValueRange;
 use waffle::{ExportKind, Func, FuncDecl, Module, Operator, SignatureData, Table, Type, ValueDef};
 
 use crate::options::Options;
 use crate::region_shape as shape;
 use crate::source::{ObjectData, ObjectKind, Source, SourceObject, SourceObjectId};
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-pub(crate) mod bbv;
-pub use bbv::EARLY_KEY_MAX;
+pub mod assemble;
+pub mod baseline;
+pub mod mir;
+pub mod tier;
+pub use mir::abi::EARLY_KEY_MAX;
 
 /// The image-patch constants for snapshot-object stamping (nightmonkey's
 /// main patches the class word straight into the snapshot bytes): the
 /// likely-class word's byte offset in a JSObject, and the SLOTS validity
-/// bit. Values mirror `bbv::abi` (OBJ_CLASS_IDX_OFFSET, CLASS_WORD_SLOTS).
+/// bit. Values mirror `mir::abi` (OBJ_CLASS_IDX_OFFSET, CLASS_WORD_SLOTS).
 pub mod stamp {
     pub const WORD_OFFSET: u32 = 4;
     pub const SLOTS: u32 = 0x0002_0000;
-    pub const SHAPE_OFFSET: u32 = super::bbv::abi::SHAPE_OFFSET;
-    pub const SHAPE_IMMUTABLE_FLAGS_OFFSET: u32 = super::bbv::abi::SHAPE_IMMUTABLE_FLAGS_OFFSET;
-    pub const SHAPE_FIXED_SLOTS_SHIFT: u32 = super::bbv::abi::SHAPE_FIXED_SLOTS_SHIFT;
-    pub const SHAPE_FIXED_SLOTS_MASK_BITS: u32 = super::bbv::abi::SHAPE_FIXED_SLOTS_MASK_BITS;
+    /// The TYPES (SHALLOW) validity bit.
+    pub const TYPES: u32 = super::mir::abi::CLASS_WORD_SHALLOW;
+    /// The CLOSED bit (no own property outside the row).
+    pub const CLOSED: u32 = super::mir::abi::CLASS_WORD_CLOSED;
+    pub const SHAPE_OFFSET: u32 = super::mir::abi::SHAPE_OFFSET;
+    pub const SHAPE_IMMUTABLE_FLAGS_OFFSET: u32 = super::mir::abi::SHAPE_IMMUTABLE_FLAGS_OFFSET;
+    pub const SHAPE_FIXED_SLOTS_SHIFT: u32 = super::mir::abi::SHAPE_FIXED_SLOTS_SHIFT;
+    pub const SHAPE_FIXED_SLOTS_MASK_BITS: u32 = super::mir::abi::SHAPE_FIXED_SLOTS_MASK_BITS;
 }
-pub use bbv::{
+pub use mir::helpers::{
     build_call_classify_helper, build_elem_append_helper, build_elem_mega_helpers,
     build_ic_set_cold_helper,
 };
-pub mod assemble;
-pub(crate) mod effects;
 pub mod inprocess;
 pub mod regex;
 pub mod translate;
+pub mod viz;
 
 pub fn find_export_func(m: &Module, name: &str) -> Result<Func, String> {
     m.exports
@@ -153,7 +161,8 @@ pub fn serialize_regex_table(entries: &[(JsString, u32, u32, u32, u32, u32)]) ->
 
 /// Likely this-layout table: `u32 flags`, `u32 count`, then per layout (in
 /// layout_id order) `u32 nfields` + nfields x `u32 atomId` (field index
-/// order == predicted slot) + `u32` add-check bound. Interned before the
+/// order == predicted slot) + `u32` add-check bound + nfields x `u32`
+/// field claim (`Claim` bits). Interned before the
 /// atom table serializes (the ids must be in it).
 ///
 /// The compiled code does not read this table -- it bakes each site's slot
@@ -202,9 +211,22 @@ pub fn serialize_layout_table(env: &EnvLayout, atoms: &mut translate::AtomTable)
             .unwrap_or(fields.len());
         let bound = translate::FIXED_SLOTS_BASE + 8 * u32::try_from(max_len).unwrap();
         out.extend_from_slice(&bound.to_le_bytes());
+        // Each field's predicted type (`Claim` bits, 0 = none): what the
+        // set helpers check a store against to keep TYPES (§4.6), as a
+        // compiled store to a known field does.
+        let claims = env.layout_field_types_tx.get(&ctor.stamp());
+        for name in fields {
+            let c = claims
+                .and_then(|m| m.get(name))
+                .map_or(0, |c| u32::from(c.bits()));
+            out.extend_from_slice(&c.to_le_bytes());
+        }
     }
     out
 }
+
+/// `serialize_layout_table`'s flags bit: TYPES has the any-type meaning.
+pub const LAYOUT_ANY_TYPES: u32 = 0x100;
 
 /// Gname fuse table: u32 count, then per fused binding u32 atomId + u64
 /// predicted literal bits (fuse cell index == position).
@@ -239,15 +261,15 @@ pub fn serialize_atom_table(atoms: &translate::AtomTable) -> Vec<u8> {
 /// order. The reactor pre-interns each to a `PropertyKey` at startup (mirroring
 /// `gAtomIds`) so the lazy `night_runtime_resolve_global_slot` `lookupPure` never
 /// re-atomizes. Little-endian throughout.
-// Per binding: the UTF-16 name, then a u32 expected-callee word (the
-// funcref-table index + 1 of the predicted callee for fuse-guarded direct
-// calls at this binding's gname-callee sites; 0 = no call prediction). The
-// reactor's arm-time validation compares the armed value's AOT target
-// against it.
+// Per binding: the UTF-16 name, then a u32 predicted-script word (the
+// address of the script whose function the analysis predicts the binding
+// holds, `EnvLayout::binding_preds`; 0 = no prediction). The runtime arms
+// the binding's value fuse to its predicted state (3) only while the
+// binding holds a compiled function of that script.
 pub fn serialize_global_binding_table(
     tbl: &Names,
     names: &[NameId],
-    expected_index: &HashMap<u32, u32>,
+    preds: &HashMap<u32, (ScriptId, u32)>,
 ) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&(names.len() as u32).to_le_bytes());
@@ -257,11 +279,10 @@ pub fn serialize_global_binding_table(
         for &u in name.chars() {
             out.extend_from_slice(&u.to_le_bytes());
         }
-        let exp = expected_index
+        let pred = preds
             .get(&u32::try_from(i).unwrap())
-            .map(|&idx| idx + 1)
-            .unwrap_or(0);
-        out.extend_from_slice(&exp.to_le_bytes());
+            .map_or(0, |&(_, addr)| addr);
+        out.extend_from_slice(&pred.to_le_bytes());
     }
     out
 }
@@ -357,110 +378,6 @@ fn collect_likely_gname_fns(
         .collect()
 }
 
-/// Whether the static program text can never produce a BigInt value: any
-/// BigInt literal, any referenced name equal to a BigInt-family global, any
-/// eval op, or any referenced `eval` name (an indirect-eval alias compiles
-/// as a plain call, not an Eval op) makes it return false.
-///
-/// # Why this is answered statically rather than by a guard
-///
-/// The natural objection is that a guard should do this: test for an
-/// Int32/Number tag on the path that needs one, or read a fuse word. Both
-/// are already how the surrounding code works, and neither can produce the
-/// thing this answer is used for.
-///
-/// The claim is not a *guard*, it is a *type*. Its consumer is
-/// `bbv::emit::bigint_result`: the generic arithmetic arm's helper returns
-/// a boxed value whose type, by the spec of `+`, is `Int32|Double|BigInt`.
-/// The tag tests the reviewer would reach for already ran -- they are the
-/// arms this value fell out of, and it is the residue they did not claim.
-/// Testing its tag again would not remove a cost, it would add one, because
-/// a type is what the *next* op consumes: the BigInt bit is what makes
-/// `is_numeric` false, and `is_numeric` is what routes the next arithmetic
-/// op onto the unboxed f64 track instead of the fully generic tag-guarded
-/// ladder. So the price of not having this answer is not one test here, it
-/// is the typed continuation of the whole downstream chain. And this tier
-/// has no deopt landing, so the only recovery from a failed type claim is a
-/// second version -- which is precisely what `bigint_result` emits. Doing
-/// that per value instead of per module would mean a version split at every
-/// arithmetic result in the program.
-///
-/// A fuse word is the right shape, and half of the answer already is one.
-/// A fuse needs a chokepoint: one place the engine can blow it from, cheap
-/// enough that every JS program pays for it. "Unscanned source text has been
-/// compiled" has such a place -- `ScriptSource::assignSource` -- which is
-/// why that half *is* a fuse (`Helpers::dyncode_fuse_word`, blown by
-/// `js::night::NightBlowDynamicCodeFuse`), and why this function does not
-/// try to answer for `new Function("...1n...")` or an indirect eval reached
-/// without naming `eval`. "A BigInt exists somewhere reachable" has no such
-/// place. A BigInt is an ordinary heap value: a literal, `BigInt(x)`, a
-/// `BigInt64Array` read, `JS::NumberToBigInt` from an embedder. Blowing a
-/// fuse at each would put a store on every BigInt creation in SpiderMonkey
-/// -- a cost paid by all of JS to serve this tier -- and would still have to
-/// cover values arriving across the embedder boundary. Reading the program
-/// text costs nothing at runtime and answers the same question for the
-/// bundles this tier compiles.
-///
-/// # What it assumes
-///
-/// That the registered scripts are the whole program. A BigInt already
-/// sitting in the wizened heap, or one handed back by an embedder native
-/// the text calls without naming any BigInt global, is covered by neither
-/// this scan nor the dyncode fuse. That holds for the deployment this tier
-/// targets -- a bundle registered at wizen time, with the shell as the only
-/// embedder -- but it is an assumption about the embedding, not a proof
-/// about the language, and an embedder that hands BigInts to unscanned code
-/// would need a third mechanism.
-fn module_is_bigint_free(source: &Source, script_ids: &[SourceObjectId]) -> bool {
-    const NAMES: [&[u16]; 4] = [
-        &[66, 105, 103, 73, 110, 116], // "BigInt"
-        &[66, 105, 103, 73, 110, 116, 54, 52, 65, 114, 114, 97, 121], // "BigInt64Array"
-        &[
-            66, 105, 103, 85, 105, 110, 116, 54, 52, 65, 114, 114, 97, 121,
-        ], // "BigUint64Array"
-        &[101, 118, 97, 108],          // "eval"
-    ];
-    struct Scan {
-        found: bool,
-    }
-    impl crate::bytecode::OpcodeVisitor for Scan {
-        fn bigint(&mut self, _bigint_index: u32) {
-            self.found = true;
-        }
-        fn before_op(&mut self, _pc: Pc, op: crate::bytecode::JSOp, _u: usize, _d: usize) {
-            use crate::bytecode::JSOp;
-            if matches!(
-                op,
-                JSOp::Eval | JSOp::StrictEval | JSOp::SpreadEval | JSOp::StrictSpreadEval
-            ) {
-                self.found = true;
-            }
-        }
-    }
-    for &id in script_ids {
-        let SourceObject::Script(script) = source.object(id) else {
-            continue;
-        };
-        // A referenced name (GetGName / GetProp / String literal for computed
-        // access) appears as a String gcthing of the script.
-        for &g in &script.gcthings {
-            if g.is_other() {
-                continue;
-            }
-            if let SourceObject::String(s) = source.object(g) {
-                if NAMES.iter().any(|n| *n == s.chars()) {
-                    return false;
-                }
-            }
-        }
-        let scan = script.parser().visit(Scan { found: false });
-        if scan.found {
-            return false;
-        }
-    }
-    true
-}
-
 /// GetGName fuse: global names the root script assigns a compile-time
 /// constant number/boolean/null/undefined, with the predicted boxed literal.
 /// A tolerant linear constant-propagation walk of the root bytecode: literals
@@ -491,8 +408,7 @@ fn module_is_bigint_free(source: &Source, script_ids: &[SourceObjectId]) -> bool
 /// hence its size and the base of everything laid out after it, have to be
 /// final before any body is translated. Collecting it while compiling the
 /// root script would need the answer before the walk that produces it, and
-/// the root script is not translated first in any case: bodies come off the
-/// BBV workqueue in reachability order.
+/// the root script is not translated first in any case.
 fn collect_fused_gnames(
     source: &Source,
     root_id: SourceObjectId,
@@ -757,6 +673,7 @@ pub struct HelperPrebuilt {
     pub direct_call_stub: Func,
     pub night_abi_sig2: waffle::Signature,
     pub direct_call_stub2: Func,
+    pub regex_matcher_sig: waffle::Signature,
 }
 
 /// The baked cell/region base addresses the translator embeds.
@@ -769,7 +686,6 @@ pub struct HelperBases {
     pub this_cells_base: u32,
     pub this_slots_base: u32,
     pub mega_get_base: u32,
-    pub night_stack_limit_base: u32,
     pub fn_class_slot: u32,
     pub static_strings_slot: u32,
     pub atom_table_slot: u32,
@@ -797,20 +713,7 @@ pub fn resolve_helpers(
     resolve: &mut dyn FnMut(&mut Module, &str) -> Result<Func, String>,
     pre: HelperPrebuilt,
     bases: HelperBases,
-    viz: bool,
 ) -> Result<translate::Helpers, String> {
-    // The function-index -> helper-name table, so the lowering view can name
-    // the calls an op emits instead of printing an index.
-    let mut resolve = |m: &mut Module, n: &str| -> Result<Func, String> {
-        let f = resolve(m, n)?;
-        if viz {
-            crate::diag_line!(
-                "night: viz helper {} {n}",
-                waffle::entity::EntityRef::index(f)
-            );
-        }
-        Ok(f)
-    };
     Ok(translate::Helpers {
         mem: pre.mem,
         ta_get_poly: pre.ta_get_poly,
@@ -825,9 +728,9 @@ pub fn resolve_helpers(
         indirect_table: pre.indirect_table,
         direct_call_stub: pre.direct_call_stub,
         night_abi_sig2: pre.night_abi_sig2,
+        regex_matcher_sig: pre.regex_matcher_sig,
         direct_call_stub2: pre.direct_call_stub2,
         census: resolve(m, "night_runtime_census").ok(),
-        callee_night_target: resolve(m, "night_runtime_callee_night_target")?,
         add: resolve(m, "night_runtime_add")?,
         concat: resolve(m, "night_runtime_concat")?,
         call: resolve(m, "night_runtime_call")?,
@@ -835,7 +738,6 @@ pub fn resolve_helpers(
         native_dispatch: resolve(m, "night_runtime_native_dispatch")?,
         apply_fwd: resolve(m, "night_runtime_apply_fwd")?,
         construct: resolve(m, "night_runtime_construct")?,
-        get_property: resolve(m, "night_runtime_get_property")?,
         set_property: resolve(m, "night_runtime_set_property")?,
         get_prop_ic_miss: resolve(m, "night_runtime_get_prop_ic_miss")?,
         set_prop_ic_miss: resolve(m, "night_runtime_set_prop_ic_miss")?,
@@ -847,7 +749,6 @@ pub fn resolve_helpers(
         string: resolve(m, "night_runtime_string")?,
         get_intrinsic: resolve(m, "night_runtime_get_intrinsic")?,
         get_intrinsic_cell: resolve(m, "night_runtime_get_intrinsic_cell")?,
-        strlit_verify: resolve(m, "night_runtime_strlit_verify")?,
         str_chars_eq: resolve(m, "night_runtime_str_chars_eq")?,
         tonumeric: resolve(m, "night_runtime_tonumeric")?,
         pos: resolve(m, "night_runtime_pos")?,
@@ -859,7 +760,6 @@ pub fn resolve_helpers(
         box_nonstrict_this: resolve(m, "night_runtime_box_nonstrict_this")?,
         get_mapped_arg: resolve(m, "night_runtime_get_mapped_arg")?,
         set_mapped_arg: resolve(m, "night_runtime_set_mapped_arg")?,
-        validate_this_layout: resolve(m, "night_runtime_validate_this_layout")?,
         in_: resolve(m, "night_runtime_in")?,
         has_own: resolve(m, "night_runtime_has_own")?,
         to_property_key: resolve(m, "night_runtime_to_property_key")?,
@@ -913,6 +813,7 @@ pub fn resolve_helpers(
         to_boolean: resolve(m, "night_runtime_to_boolean")?,
         typeof_: resolve(m, "night_runtime_typeof")?,
         typeof_eq: resolve(m, "night_runtime_typeof_eq")?,
+        regexp_leaf: resolve(m, "night_runtime_regexp_leaf")?,
         constant_strict_eq: resolve(m, "night_runtime_constant_strict_eq")?,
         bind_unqualified_gname: resolve(m, "night_runtime_bind_unqualified_gname")?,
         set_name: resolve(m, "night_runtime_set_name")?,
@@ -935,6 +836,7 @@ pub fn resolve_helpers(
         iter_: resolve(m, "night_runtime_iter")?,
         more_iter: resolve(m, "night_runtime_more_iter")?,
         end_iter: resolve(m, "night_runtime_end_iter")?,
+        post_whole_cell: resolve(m, "night_runtime_post_whole_cell")?,
         close_iter_for_exception: resolve(m, "night_runtime_close_iter_for_exception")?,
         symbol: resolve(m, "night_runtime_symbol")?,
         optimize_get_iterator: resolve(m, "night_runtime_optimize_get_iterator")?,
@@ -946,11 +848,8 @@ pub fn resolve_helpers(
         post_write_barrier: resolve(m, "night_runtime_post_write_barrier")?,
         post_write_barrier_elem: resolve(m, "night_runtime_post_write_barrier_elem")?,
         pre_write_barrier: resolve(m, "night_runtime_pre_write_barrier")?,
-        resolve_global_slot: resolve(m, "night_runtime_resolve_global_slot")?,
         resolve_global_slot_guarded: resolve(m, "night_runtime_resolve_global_slot_guarded")?,
-        set_global: resolve(m, "night_runtime_set_global")?,
         binding_written: resolve(m, "night_runtime_binding_written")?,
-        binding_value: resolve(m, "night_runtime_binding_value")?,
         global_slots_base: bases.global_slots_base,
         prop_ic_base: bases.prop_ic_base,
         mega_set_base: bases.mega_set_base,
@@ -958,7 +857,6 @@ pub fn resolve_helpers(
         this_cells_base: bases.this_cells_base,
         this_slots_base: bases.this_slots_base,
         mega_get_base: bases.mega_get_base,
-        night_stack_limit_base: bases.night_stack_limit_base,
         fn_class_slot: bases.fn_class_slot,
         static_strings_slot: bases.static_strings_slot,
         atom_table_slot: bases.atom_table_slot,
@@ -975,7 +873,6 @@ pub fn resolve_helpers(
         // The args-metadata block's tail pad (+12) holds the night-owned
         // dynamic-code fuse word; NightRuntime startup mirrors this offset.
         // (This pad is the free word here, so using it costs no ABI change.)
-        dyncode_fuse_word: bases.args_class_base + shape::ARGS_DYN_CODE_FUSE_OFF,
         array_class_slot: bases.array_class_slot,
         args_class_base: bases.args_class_base,
         strlit_slot: bases.strlit_slot,
@@ -996,8 +893,34 @@ pub fn resolve_helpers(
         obj_with_proto: resolve(m, "night_runtime_obj_with_proto")?,
         fun_with_proto: resolve(m, "night_runtime_fun_with_proto")?,
         set_fun_name: resolve(m, "night_runtime_set_fun_name")?,
-        no_extra_indexed: resolve(m, "night_runtime_no_extra_indexed")?,
+        bigint: resolve(m, "night_runtime_bigint")?,
+        non_syntactic_global_this: resolve(m, "night_runtime_non_syntactic_global_this")?,
+        set_intrinsic: resolve(m, "night_runtime_set_intrinsic")?,
+        env_callee: resolve(m, "night_runtime_env_callee")?,
+        eval: resolve(m, "night_runtime_eval")?,
+        spread_eval: resolve(m, "night_runtime_spread_eval")?,
+        dynamic_import: resolve(m, "night_runtime_dynamic_import")?,
+        import_meta: resolve(m, "night_runtime_import_meta")?,
+        get_import: resolve(m, "night_runtime_get_import")?,
+        add_disposable: resolve(m, "night_runtime_add_disposable")?,
+        take_dispose_capability: resolve(m, "night_runtime_take_dispose_capability")?,
+        create_suppressed_error: resolve(m, "night_runtime_create_suppressed_error")?,
+        resume: resolve(m, "night_runtime_resume")?,
         gen_is_closing: resolve(m, "night_runtime_gen_is_closing")?,
+        mir_stress: resolve(m, "night_runtime_mir_stress")?,
+        slots_covered: resolve(m, "night_runtime_slots_covered")?,
+        ctor_stamp: resolve(m, "night_runtime_ctor_stamp")?,
+        ctor_restamp: resolve(m, "night_runtime_ctor_restamp")?,
+        init_field: resolve(m, "night_runtime_init_field")?,
+        elem_grow: resolve(m, "night_runtime_elem_grow")?,
+        get_prop_pure: resolve(m, "night_runtime_get_prop_pure")?,
+        set_prop_pure: resolve(m, "night_runtime_set_prop_pure")?,
+        to_primitive_pure: resolve(m, "night_runtime_to_primitive_pure")?,
+        get_elem_pure: resolve(m, "night_runtime_get_elem_pure")?,
+        set_elem_pure: resolve(m, "night_runtime_set_elem_pure")?,
+        new_this: resolve(m, "night_runtime_new_this")?,
+        new_this_init: resolve(m, "night_runtime_new_this_init")?,
+        method_arm: resolve(m, "night_runtime_method_arm")?,
     })
 }
 
@@ -1007,25 +930,28 @@ pub fn resolve_helpers(
 pub struct EnvLayout {
     pub syn_gname_names: Vec<NameId>,
     pub syn_gnames: HashMap<NameId, u32>,
-    /// The bindings whose name is an own atom-keyed DATA property of the
-    /// snapshot's global object (the heap oracle records no other kind):
-    /// the population the per-binding value facts (`Ctx::gcells`) are
-    /// minted for. A global lexical, an accessor or an undeclared name is
-    /// never in it, so its reads keep the generic helper's Opt keep arm.
-    pub gcell_bids: HashSet<u32>,
-    pub likely_fns: HashMap<NameId, ScriptId>,
+    /// Per binding row, the script of the function the analysis predicts
+    /// it holds (`gname_fns`) and that script's address: the runtime arms
+    /// the binding's value fuse to its predicted state (3) only while the
+    /// binding holds a function of that script.
+    pub binding_preds: HashMap<u32, (ScriptId, u32)>,
+    /// Per property-read site with a predicted method (`method_sites`),
+    /// its cell; the cells' region.
+    pub method_sites_tx: HashMap<Site, translate::MethodSiteIn>,
+    pub method_cells_base: u32,
+    pub method_cells_len: u32,
+    pub closed_layouts_tx: HashSet<u32>,
     /// The analysis output, carried whole: every table the translator reads
     /// unchanged lives here rather than as a renamed copy below.
     pub facts: LikelyFacts,
     /// Field-name rows per layout key: the view most layout consumers want.
     pub likely_class_layouts: HashMap<LayoutKey, Vec<NameId>>,
-    /// `facts.elem_sites` and `facts.field_sites` merged (one op per pc);
-    /// consumed identically by the loop-version planner and value guards.
-    pub likely_elems: HashMap<Site, Claim>,
     pub fused_list: Vec<(NameId, u64)>,
     pub stamp_ctors_tx: HashMap<ScriptId, translate::StampCtorIn>,
     /// Object-literal stamp sites (site -> layout id), fixed-slot rows only.
     pub lit_stamps_tx: HashMap<Site, u32>,
+    /// Object-literal sites -> row length, capped at the 16 fixed slots.
+    pub lit_nslots_tx: HashMap<Site, u32>,
     /// Per atom: prefix-closed (layout k+1, predicted byte offset) pairs
     /// for the unknown-receiver add arms' runtime key check.
     pub layout_addpred_tx: HashMap<NameId, Vec<translate::AddPred>>,
@@ -1036,10 +962,7 @@ pub struct EnvLayout {
     pub construct_sites_tx: HashMap<Site, translate::StampCtorIn>,
     pub this_layouts_tx: HashMap<ScriptId, translate::ThisLayoutIn>,
     pub prop_sites_tx: HashMap<Site, translate::PropSiteIn>,
-    /// Stamped class idx (`layout_id + 1`) -> field name -> value mask.
-    pub layout_field_masks_tx: HashMap<StampKey, HashMap<NameId, Claim>>,
-    /// Same keying, the range claims (absent name = no claim).
-    pub layout_field_ranges_tx: HashMap<StampKey, HashMap<NameId, ValueRange>>,
+    pub layout_field_types_tx: HashMap<StampKey, HashMap<NameId, Claim>>,
     /// Array alloc site -> the stamp word to write at allocation.
     pub array_stamp_tx: HashMap<Site, u32>,
     /// Element site -> (stamp key, mask, lo, hi).
@@ -1055,7 +978,6 @@ pub struct EnvLayout {
     pub global_slots_base: u32,
     pub global_vals_base: u32,
     pub prop_ic_gen_base: u32,
-    pub night_stack_limit_base: u32,
     pub fn_class_slot: u32,
     pub static_strings_slot: u32,
     pub atom_table_slot: u32,
@@ -1091,7 +1013,6 @@ impl EnvLayout {
             this_cells_base: self.this_cells_base,
             this_slots_base: self.this_slots_base,
             mega_get_base: self.mega_get_base,
-            night_stack_limit_base: self.night_stack_limit_base,
             fn_class_slot: self.fn_class_slot,
             static_strings_slot: self.static_strings_slot,
             atom_table_slot: self.atom_table_slot,
@@ -1142,7 +1063,9 @@ pub fn layout_env(
         .enumerate()
         .map(|(i, &n)| (n, u32::try_from(i).unwrap()))
         .collect();
-    let mut gcell_bids: HashSet<u32> = HashSet::default();
+    // The live global's own property names join the string table here, ahead
+    // of the analysis: their ids (and so the table's numbering) are fixed
+    // before anything else interns.
     if let Some(g) = source.global_object {
         if let SourceObject::Object(ObjectData { properties, .. }) = source.object(g) {
             for (k, _) in properties {
@@ -1150,10 +1073,7 @@ pub fn layout_env(
                     continue;
                 }
                 if let SourceObject::String(s) = source.object(*k) {
-                    let id = names.intern(s);
-                    if let Some(&bid) = syn_gnames.get(&id) {
-                        gcell_bids.insert(bid);
-                    }
+                    names.intern(s);
                 }
             }
         }
@@ -1165,15 +1085,6 @@ pub fn layout_env(
     let fused_list: Vec<(NameId, u64)> = collect_fused_gnames(source, root_id, &mut names);
     if opts.diagnostics.stats {
         crate::diag_line!("night: {} fused constant global(s)", fused_list.len());
-    }
-    if opts.diagnostics.bbv {
-        for &(n, bits) in &fused_list {
-            crate::diag_line!(
-                "night: fused-gname {} = {:#x}",
-                String::from_utf16_lossy(names.get(n)),
-                bits
-            );
-        }
     }
     if opts.diagnostics.stats {
         crate::diag_line!(
@@ -1204,15 +1115,6 @@ pub fn layout_env(
             facts.ta_elem_sites.len()
         );
     }
-    // The one table the translator wants that the analysis does not emit
-    // directly: elem and field sites merged. Both are keyed by pc (one op
-    // per pc) and the loop-version planner and the value guards consume
-    // them identically.
-    let likely_elems: HashMap<Site, Claim> = {
-        let mut m = facts.elem_sites.clone();
-        m.extend(facts.field_sites.iter().map(|(&k, &v)| (k, v)));
-        m
-    };
     // Field-name rows: the view most layout consumers want.
     let likely_class_layouts: HashMap<LayoutKey, Vec<NameId>> = facts
         .classes
@@ -1241,13 +1143,6 @@ pub fn layout_env(
     // per-site ways follow. The region carries no data segment -> zero-init ==
     // every way empty, generation 0.
     let prop_ic_gen_base = global_slots_base + global_slots_size as u32;
-    // One more u32 right after the generation: the AOT stack limit (linear
-    // address one past the region), written once by `night_runtime_run_main`.
-    // The specialized-call
-    // specialized-call guard reads it so deep direct-dispatch chains fall back
-    // to `night_runtime_call` (whose `EnterNight` bounds-checks and can hand the frame
-    // to the interpreter) instead of running off the region.
-    let night_stack_limit_base = prop_ic_gen_base + shape::HOST_STACK_LIMIT_OFF;
     // Startup-written host-constant slots (filled by `night_runtime_run_main`, which
     // can take the addresses the AOT'd module cannot embed):
     //   +8:  &js::FunctionClass          (inline callee classify)
@@ -1321,7 +1216,10 @@ pub fn layout_env(
     // validator and the compiled arms in lockstep): 2 = Option-C dual stamp
     // (positional match -> plain stamp + immediates, order mismatch ->
     // observed row + NONPOS stamp + table sub-arm).
-    let layout_mode: u32 = 2;
+    // Bit 8: the TYPES bit means every field holds its predicted type, any
+    // type (MIR.md §4.6; the MIR and baseline tiers), so the runtime's set
+    // helpers may keep it by the field claims serialized with the table.
+    let layout_mode: u32 = 2 | LAYOUT_ANY_TYPES;
     let this_slots_base = this_cells_base + 8 * u32::try_from(layout_ctors.len()).unwrap();
     let masks_of = |ctor: LayoutKey| -> Vec<Claim> {
         facts.classes[&ctor]
@@ -1356,37 +1254,6 @@ pub fn layout_env(
             })
             .flatten()
     };
-    // Viz layout panel: one line per layout key, ids in the +1-biased
-    // stamped space (what cls facts show). Every column is something the
-    // codegen consumes -- the panel exists to show what the backend has, so
-    // an analysis detail with no emission consumer does not belong in it.
-    if opts.diagnostics.viz {
-        for &key in &layout_ctors {
-            let masks = masks_of(LayoutKey::new(key.get()));
-            let franges = ranges_of(LayoutKey::new(key.get()));
-            let fields: Vec<String> = likely_class_layouts[&key]
-                .iter()
-                .enumerate()
-                .map(|(i, f)| {
-                    format!(
-                        "{}=slot{}:{}:{}",
-                        bbv::viz_sanitize(&String::from_utf16_lossy(facts.names.get(*f))),
-                        i,
-                        bbv::viz_claim_str(masks.get(i).copied().unwrap_or(Claim::NONE)),
-                        match franges.get(i).copied().flatten() {
-                            Some(r) => format!("{}..{}", r.lo, r.hi),
-                            None => "-".to_string(),
-                        },
-                    )
-                })
-                .collect();
-            crate::diag_line!(
-                "night: viz layout id {} fields [{}]",
-                LayoutKey::new(ctor_layout_id[&key]).stamp(),
-                fields.join(" ")
-            );
-        }
-    }
     // Ctor-epilogue class-idx stamps: one per layout ctor; the stamped u16
     // index is `layout_id + 1` (0 = no likely class), so the id space must
     // fit a u16.
@@ -1450,6 +1317,7 @@ pub fn layout_env(
                     ranges: ranges_of(LayoutKey::new(key.get())),
                     prefix_keys,
                     ext_bound: ext_bound_of(LayoutKey::new(key.get())),
+                    closable: facts.closed_layouts.contains(&key),
                 },
             )
         })
@@ -1467,6 +1335,19 @@ pub fn layout_env(
         .iter()
         .filter(|(_, key)| likely_class_layouts[key].len() <= 16)
         .map(|(&site, key)| (site, ctor_layout_id[key]))
+        .collect();
+    // Their allocations' fixed slots: a literal of more fields than the
+    // engine's default object kind holds would put the rest in dynamic
+    // slots, and the add check clears SLOTS for a predicted field there.
+    let lit_nslots_tx: HashMap<Site, u32> = facts
+        .lit_stamps
+        .iter()
+        .map(|(&site, key)| {
+            (
+                site,
+                u32::try_from(likely_class_layouts[key].len().min(16)).unwrap(),
+            )
+        })
         .collect();
     // Per atom: every (layout k+1, predicted byte offset) pair across the
     // corpus, prefix-closed (a receiver keyed/stamped with a prefix layout
@@ -1503,43 +1384,15 @@ pub fn layout_env(
         }
         m
     };
-    // Per-layout field value masks, keyed by the stamped class idx
-    // (`layout_id + 1`, what a `cls` fact carries). The per-site
-    // `prop_sites` rows only exist where the analysis predicted a receiver
-    // for that pc; this table lets any receiver carrying a proven class
-    // fact answer "does field N of this layout hold a number claim?", which
-    // is what the store choke needs to know.
-    let layout_field_masks_tx: HashMap<StampKey, HashMap<NameId, Claim>> = layout_ctors
+    // The full-type parallel (MIR's TYPES): each field's predicted type,
+    // any type.
+    let layout_field_types_tx: HashMap<StampKey, HashMap<NameId, Claim>> = layout_ctors
         .iter()
         .map(|&key| {
-            let masks = masks_of(LayoutKey::new(key.get()));
-            let fields = &likely_class_layouts[&key];
+            let fields = &facts.classes[&LayoutKey::new(key.get())].fields;
             (
                 LayoutKey::new(ctor_layout_id[&key]).stamp(),
-                fields
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &n)| (n, masks.get(i).copied().unwrap_or(Claim::NONE)))
-                    .collect(),
-            )
-        })
-        .collect();
-    // The range parallel, same keying: "does field N of this layout carry
-    // a range claim, and which?" -- what the store choke needs to decide
-    // between proving a store, checking it, and dropping the claim.
-    // Absent name = no claim, so only claiming rows are stored.
-    let layout_field_ranges_tx: HashMap<StampKey, HashMap<NameId, ValueRange>> = layout_ctors
-        .iter()
-        .map(|&key| {
-            let ranges = ranges_of(LayoutKey::new(key.get()));
-            let fields = &likely_class_layouts[&key];
-            (
-                LayoutKey::new(ctor_layout_id[&key]).stamp(),
-                fields
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, &n)| Some((n, (*ranges.get(i)?)?)))
-                    .collect(),
+                fields.iter().map(|f| (f.name, f.types)).collect(),
             )
         })
         .collect();
@@ -1571,7 +1424,10 @@ pub fn layout_env(
         .iter()
         .filter_map(|(&site, root)| {
             let k = array_keys.get(root)?;
-            Some((site, k | bbv::CLASS_WORD_SHALLOW | bbv::CLASS_WORD_RANGES))
+            Some((
+                site,
+                k | mir::abi::CLASS_WORD_SHALLOW | mir::abi::CLASS_WORD_RANGES,
+            ))
         })
         .collect();
     // Element site -> (stamp key, mask, lo, hi): the read fold's target and
@@ -1597,34 +1453,6 @@ pub fn layout_env(
             Some(acc.map_or(r, |a| ValueRange::new(a.lo.max(r.lo), a.hi.min(r.hi))))
         })
         .filter(|r| r.lo <= r.hi);
-    // Viz array panel: one line per claiming population -- its stamp
-    // key, the R it claims, and where it is stamped and folded.
-    if opts.diagnostics.viz {
-        let mut roots: Vec<&RegionRoot> = facts.array_elem_claims.keys().collect();
-        roots.sort_unstable();
-        for r in roots {
-            let (m, range) = facts.array_elem_claims[r];
-            let (lo, hi) = (range.lo, range.hi);
-            let allocs: Vec<String> = {
-                let mut v: Vec<String> = facts
-                    .array_alloc_sites
-                    .iter()
-                    .filter(|(_, x)| *x == r)
-                    .map(|(site, _)| site.to_string())
-                    .collect();
-                v.sort();
-                v
-            };
-            let folds = facts.array_elem_recv.values().filter(|x| *x == r).count();
-            crate::diag_line!(
-                "night: viz arrclaim root {r} key {} mask {} lo {lo} hi {hi} \
-                 allocs [{}] elemsites {folds}",
-                array_keys.get(r).copied().unwrap_or(0),
-                bbv::viz_prims_str(m),
-                allocs.join(" ")
-            );
-        }
-    }
     if opts.diagnostics.stats && (!array_stamp_tx.is_empty() || !array_elem_tx.is_empty()) {
         crate::diag_line!(
             "night: array stamps: {} claiming populations, {} alloc sites, {} elem sites",
@@ -1801,19 +1629,87 @@ pub fn layout_env(
     // published through its own region-table slot, ABI v5).
     let accessor_cache_base =
         append_cache_base + translate::APPEND_CACHE_SIZE * translate::APPEND_CACHE_ENTRY_BYTES;
-    let prop_ic_base = accessor_cache_base
+    // Predicted-method cells, one per (receiver layouts, name, script) of
+    // the analysis's method sites (zero-init; GC-zeroed). A class
+    // constructor's call must throw, so none is predicted.
+    let method_cells_base = accessor_cache_base
         + translate::ACCESSOR_CACHE_SIZE * translate::ACCESSOR_CACHE_ENTRY_BYTES;
+    let mut method_cell_of: HashMap<(LayoutKey, LayoutKey, NameId, ScriptId), u32> =
+        HashMap::default();
+    let mut method_sites: Vec<_> = facts.method_sites.iter().map(|(&s, &v)| (s, v)).collect();
+    method_sites.sort_unstable_by_key(|&(s, _)| (s.script, s.pc));
+    let method_sites_tx: HashMap<Site, translate::MethodSiteIn> = method_sites
+        .into_iter()
+        .filter_map(|(site, (lo, hi, name, k))| {
+            let script_addr = match source.object(SourceObjectId::new(k.get())) {
+                SourceObject::Script(s) if s.addr != 0 && !s.is_class_ctor => s.addr,
+                _ => return None,
+            };
+            let n = u32::try_from(method_cell_of.len()).unwrap();
+            let i = *method_cell_of.entry((lo, hi, name, k)).or_insert(n);
+            Some((
+                site,
+                translate::MethodSiteIn {
+                    layout_id: *ctor_layout_id.get(&lo)?,
+                    hi_layout_id: *ctor_layout_id.get(&hi)?,
+                    cell_addr: method_cells_base + shape::METHOD_CELL_BYTES * i,
+                    script: k,
+                    script_addr,
+                },
+            ))
+        })
+        .collect();
+    // The layout ids a stamp may make CLOSED (`closed_layouts`).
+    let closed_layouts_tx: HashSet<u32> = facts
+        .closed_layouts
+        .iter()
+        .filter_map(|k| ctor_layout_id.get(k).copied())
+        .collect();
+    let method_cells_len = shape::METHOD_CELL_BYTES * u32::try_from(method_cell_of.len()).unwrap();
+    if opts.diagnostics.stats {
+        crate::diag_line!(
+            "night: {} predicted-method site(s), {} cell(s)",
+            method_sites_tx.len(),
+            method_cell_of.len()
+        );
+    }
+    let prop_ic_base = method_cells_base + method_cells_len;
+    // Bindings with a predicted function (`gname_fns`), by row, with the
+    // script's address for the runtime's arm-time test. Not a class
+    // constructor: a read typed with its script is called directly
+    // (`js_call_proven`), and a class constructor's call must throw.
+    let binding_preds: HashMap<u32, (ScriptId, u32)> = syn_gnames
+        .iter()
+        .filter_map(|(n, &bid)| {
+            let &k = facts.gname_fns.get(n)?;
+            match source.object(SourceObjectId::new(k.get())) {
+                SourceObject::Script(s) if s.addr != 0 && !s.is_class_ctor => {
+                    Some((bid, (k, s.addr)))
+                }
+                _ => None,
+            }
+        })
+        .collect();
+    if opts.diagnostics.stats {
+        crate::diag_line!(
+            "night: {} predicted-function global binding(s)",
+            binding_preds.len()
+        );
+    }
     Ok(EnvLayout {
         syn_gname_names,
         syn_gnames,
-        gcell_bids,
-        likely_fns,
+        binding_preds,
+        method_sites_tx,
+        method_cells_base,
+        method_cells_len,
+        closed_layouts_tx,
         facts,
         likely_class_layouts,
-        likely_elems,
         fused_list,
         stamp_ctors_tx,
         lit_stamps_tx,
+        lit_nslots_tx,
         layout_addpred_tx,
         ctor_nslots_tx,
         deleg_restamps_tx,
@@ -1822,8 +1718,7 @@ pub fn layout_env(
         construct_sites_tx,
         this_layouts_tx,
         prop_sites_tx,
-        layout_field_masks_tx,
-        layout_field_ranges_tx,
+        layout_field_types_tx,
         array_stamp_tx,
         array_elem_tx,
         array_any_claim,
@@ -1835,7 +1730,6 @@ pub fn layout_env(
         global_slots_base,
         global_vals_base,
         prop_ic_gen_base,
-        night_stack_limit_base,
         fn_class_slot,
         static_strings_slot,
         atom_table_slot,
@@ -1872,7 +1766,6 @@ pub struct TranslateOut {
     /// (widened-ABI bodies).
     pub source_id_to_table_func: HashMap<u32, Func>,
     pub sid_to_index: HashMap<u32, u32>,
-    pub fuse_binding_index: HashMap<u32, u32>,
     pub strlit_patches: Vec<(Func, waffle::Value, u32)>,
     pub regex_entries: Vec<(JsString, u32, u32, u32, u32, u32)>,
     pub prop_ic_base: usize,
@@ -1889,6 +1782,57 @@ pub struct TranslateOut {
     /// zero (sizing off, codegen identical).
     pub ctor_nslots_base: usize,
     pub ctor_nslots_size: usize,
+}
+
+/// Translate one script with the tiers `opts.pipeline` allows, in order,
+/// and report which one took it (`docs/BASELINE.md` §5).
+fn translate_for_pipeline(
+    ctx: &translate::TranslateCtx,
+    m: &mut Module,
+    atoms: &mut translate::AtomTable,
+    sid: ScriptId,
+    script: &crate::bytecode::Script,
+    is_global: bool,
+    mir_pre: Option<mir::Prebuilt>,
+) -> Result<(translate::Outcome, tier::TierStatus), String> {
+    use crate::options::Pipeline;
+    use tier::{Decline, Tier, TierStatus};
+    let mut declines = vec![];
+    let (first, outcome) = match ctx.opts.pipeline {
+        Pipeline::Mir => match mir::translate_script(
+            ctx,
+            m,
+            atoms,
+            sid,
+            script,
+            is_global,
+            mir_pre.expect("a MIR script is prebuilt"),
+        )? {
+            Ok(outcome) => (Tier::Mir, outcome),
+            Err(reason) => {
+                declines.push(Decline::new(Tier::Mir, reason));
+                (
+                    Tier::Baseline,
+                    baseline::translate_script(ctx, m, atoms, sid, script, is_global)?,
+                )
+            }
+        },
+        Pipeline::Baseline => (
+            Tier::Baseline,
+            baseline::translate_script(ctx, m, atoms, sid, script, is_global)?,
+        ),
+    };
+    let tier = match &outcome {
+        translate::Outcome::Compiled { .. } => first,
+        translate::Outcome::Skipped(reason) => {
+            declines.push(Decline {
+                allowed: tier::decline_is_allowed(first, reason),
+                ..Decline::new(first, reason.clone())
+            });
+            Tier::Interp
+        }
+    };
+    Ok((outcome, TierStatus { tier, declines }))
 }
 
 /// Translate every compilable script (and regex program) into an appended
@@ -1932,9 +1876,15 @@ pub fn translate_all(
     let mut sid_to_index: HashMap<u32, u32> = HashMap::default();
     let mut pending_adapters: Vec<(SourceObjectId, Func)> = Vec::new();
     let mut body_off_patch_sites: Vec<(Func, waffle::Value)> = Vec::new();
+    #[allow(clippy::type_complexity)]
+    let mut pending_extras: Vec<(
+        SourceObjectId,
+        Func,
+        Vec<translate::ExtraBody>,
+        Vec<(waffle::Value, usize)>,
+    )> = Vec::new();
     let mut ctor_nslots_patch_sites: Vec<(Func, waffle::Value, u32)> = Vec::new();
     let mut likely_patches: Vec<(Func, waffle::Value, waffle::Value, u32)> = Vec::new();
-    let mut fuse_call_patches: Vec<(Func, translate::FuseCallPatch)> = Vec::new();
     let mut call_cell_patches: Vec<(Func, waffle::Value, u32)> = Vec::new();
     let mut intrinsic_cell_patches: Vec<(Func, waffle::Value, u32)> = Vec::new();
     let mut alloc_cell_patches: Vec<(Func, waffle::Value, u32)> = Vec::new();
@@ -1948,22 +1898,13 @@ pub fn translate_all(
         .objects()
         .filter_map(|(id, obj)| matches!(obj, SourceObject::Script(_)).then_some(id))
         .collect();
-    // Whole-module BigInt-freedom (for the F64 arith fast track): a
-    // module that can never manufacture a BigInt lets Sub/Mul/Div carry their
-    // (then always-numeric) result on the unboxed f64 track soundly, even when
-    // the operand types are statically unknown.
-    let bigint_free = module_is_bigint_free(source, &script_ids);
-    let flag_demand = bbv::compute_flag_demand(source, &env.facts);
     let tx_ctx = translate::TranslateCtx {
         helpers,
         source,
         opts,
-        bigint_free,
         syn_gnames: &env.syn_gnames,
-        gcell_bids: &env.gcell_bids,
-        likely_fns: &env.likely_fns,
+        binding_preds: &env.binding_preds,
         facts: &env.facts,
-        flag_demand: &flag_demand,
         this_layouts_in: &env.this_layouts_tx,
         stamp_ctors_in: &env.stamp_ctors_tx,
         layout_addpred_in: &env.layout_addpred_tx,
@@ -1973,115 +1914,231 @@ pub fn translate_all(
         local_restamps_in: &env.local_restamps_tx,
         construct_sites_in: &env.construct_sites_tx,
         lit_stamps_in: &env.lit_stamps_tx,
+        lit_nslots_in: &env.lit_nslots_tx,
         prop_sites_in: &env.prop_sites_tx,
-        layout_field_masks_in: &env.layout_field_masks_tx,
-        layout_field_ranges_in: &env.layout_field_ranges_tx,
+        method_sites_in: &env.method_sites_tx,
+        closed_layouts_in: &env.closed_layouts_tx,
+        layout_field_types_in: &env.layout_field_types_tx,
         array_stamp_in: &env.array_stamp_tx,
         array_elem_in: &env.array_elem_tx,
         array_any_claim: env.array_any_claim,
-        likely_elems: &env.likely_elems,
         fused_gnames: &env.fused_gnames_tx,
     };
+    let mut tier_census = tier::TierCensus::default();
+    // `--dump-tiers`: each script's function name, for reading censuses.
+    let fn_names: HashMap<u32, String> = if opts.diagnostics.tiers || opts.diagnostics.viz.is_some()
+    {
+        let mut names: HashMap<u32, String> = source
+            .objects
+            .iter()
+            .filter_map(|o| match o {
+                SourceObject::Object(od) => {
+                    let s = od.script?;
+                    match source.object(od.name?) {
+                        SourceObject::String(n) => {
+                            Some((s.id(), String::from_utf16_lossy(n.chars())))
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .collect();
+        // Self-hosted scripts have no named function object in the tree;
+        // name them by their global path (marked, to tell them apart).
+        for (id, path) in &source.selfhosted {
+            names
+                .entry(id.id())
+                .or_insert_with(|| format!("[self-hosted] {path}"));
+        }
+        names
+    } else {
+        HashMap::default()
+    };
+    let script_of = |id: SourceObjectId| match source.object(id) {
+        SourceObject::Script(script) => script,
+        _ => unreachable!(),
+    };
+    let mut work = Vec::with_capacity(script_ids.len());
     for id in script_ids {
-        let SourceObject::Script(script) = source.object(id) else {
-            unreachable!()
-        };
         if skip(id) {
             n_skipped += 1;
-            continue;
+        } else {
+            work.push(id);
         }
-        match bbv::translate_script(
-            &tx_ctx,
-            m,
-            &mut atoms,
-            ScriptId::new(id.id()),
-            script,
-            id == root_id,
-        )? {
-            translate::Outcome::Compiled {
-                sig,
-                body,
-                likely_patches: lp,
-                fuse_call_patches: fcp,
-                call_cell_patches: ccp,
-                alloc_cell_patches: acp,
-                iof_cell_patches: icp,
-                construct_cell_patches: xcp,
-                strlit_patches: slp,
-                intrinsic_cell_patches: gicp,
-                prop_ic_patches: icp2,
-                body_off_patches: bop,
-                ctor_nslots_patches: cnp,
-            } => {
-                let f = m.funcs.push(FuncDecl::Body(
-                    sig,
-                    format!("night_script_{}", id.id()),
-                    body,
+    }
+    // MIR's front half (build, optimize, verify) reads only the analysis,
+    // so it runs in parallel a chunk at a time, ahead of the serial loop
+    // that lowers into the module and grows the atom table. It reads the
+    // analysis-time names, never the table codegen interns into. A chunk
+    // bounds how many built functions are held at once.
+    let mir_names = (opts.pipeline == crate::options::Pipeline::Mir).then(|| atoms.names.clone());
+    const MIR_CHUNK: usize = 256;
+    let mut viz_records: Vec<String> = vec![];
+    for chunk in work.chunks(MIR_CHUNK) {
+        let mut prebuilt: Vec<Option<mir::Prebuilt>> = match &mir_names {
+            Some(names) => {
+                #[cfg(feature = "parallel")]
+                let scripts = chunk.par_iter();
+                #[cfg(not(feature = "parallel"))]
+                let scripts = chunk.iter();
+                scripts
+                    .map(|&id| {
+                        let sid = ScriptId::new(id.id());
+                        Some(mir::prebuild(
+                            &tx_ctx,
+                            names,
+                            sid,
+                            script_of(id),
+                            id == root_id,
+                        ))
+                    })
+                    .collect()
+            }
+            None => chunk.iter().map(|_| None).collect(),
+        };
+        for (&id, pre) in chunk.iter().zip(prebuilt.drain(..)) {
+            let script = script_of(id);
+            let sid = ScriptId::new(id.id());
+            let (outcome, status) =
+                translate_for_pipeline(&tx_ctx, m, &mut atoms, sid, script, id == root_id, pre)?;
+            if let Some(n) = fn_names.get(&id.id()) {
+                if opts.diagnostics.tiers {
+                    crate::diag_line!("night: script sid#{sid} {n}");
+                }
+            }
+            if opts.diagnostics.viz.is_some() {
+                let texts = mir::VIZ_TEXTS.lock().unwrap().remove(&sid.get());
+                viz_records.push(viz::record(
+                    source,
+                    id.id(),
+                    script,
+                    fn_names.get(&id.id()).map(String::as_str),
+                    &format!("{status}"),
+                    texts.as_ref(),
                 ));
-                // Widened-ABI (BBV) bodies go in the table behind a
-                // `night_abi_sig` adapter; direct-call patches still
-                // target the body itself (source_id_to_func). The body
-                // takes its own table slot now (the module's table order
-                // must stay exactly the blob order -- the in-process
-                // runner appends every blob to the funcref table) and the
-                // adapters are emitted as one contiguous block after the
-                // loop, because interleaving them with bodies measurably
-                // worsens instruction-cache behaviour. `body slot ==
-                // adapter slot - count`
-                // holds because bodies and adapters keep the same order.
-                if sig == tx_ctx.helpers.night_abi_sig2 {
-                    place_in_table(m, f)?;
-                    pending_adapters.push((id, f));
-                } else {
-                    let index = place_in_table(m, f)?;
-                    on_compiled(id, index);
-                    source_id_to_table_func.insert(id.id(), f);
-                    sid_to_index.insert(id.id(), index);
-                }
-                source_id_to_func.insert(id.id(), f);
-                for (expected, call, callee_sid) in lp {
-                    likely_patches.push((f, expected, call, callee_sid));
-                }
-                for p in fcp {
-                    fuse_call_patches.push((f, p));
-                }
-                for (addr, idx) in ccp {
-                    call_cell_patches.push((f, addr, idx));
-                }
-                for (addr, idx) in acp {
-                    alloc_cell_patches.push((f, addr, idx));
-                }
-                for (addr, idx) in icp {
-                    iof_cell_patches.push((f, addr, idx));
-                }
-                for (addr, idx) in xcp {
-                    construct_cell_patches.push((f, addr, idx));
-                }
-                for (addr, off) in slp {
-                    strlit_patches.push((f, addr, off));
-                }
-                for (addr, row) in gicp {
-                    intrinsic_cell_patches.push((f, addr, row));
-                }
-                for (addr, off) in icp2 {
-                    prop_ic_patches.push((f, addr, off));
-                }
-                for v in bop {
-                    body_off_patch_sites.push((f, v));
-                }
-                for v in cnp {
-                    ctor_nslots_patch_sites.push((f, v, 0));
-                }
-                n_compiled += 1;
             }
-            translate::Outcome::Skipped(reason) => {
-                n_skipped += 1;
-                if opts.diagnostics.bbv {
-                    crate::diag_line!("night: skip script#{} ({reason})", id.id());
+            tier_census.record(sid, status, opts.diagnostics.tiers);
+            match outcome {
+                translate::Outcome::Compiled {
+                    sig,
+                    body,
+                    likely_patches: lp,
+                    call_cell_patches: ccp,
+                    alloc_cell_patches: acp,
+                    iof_cell_patches: icp,
+                    construct_cell_patches: xcp,
+                    strlit_patches: slp,
+                    intrinsic_cell_patches: gicp,
+                    prop_ic_patches: icp2,
+                    body_off_patches: bop,
+                    ctor_nslots_patches: cnp,
+                    extra_bodies,
+                    extra_call_patches,
+                } => {
+                    if opts.diagnostics.stats {
+                        let (mut calls, mut stores) = (0, 0);
+                        for (_, d) in body.values.entries() {
+                            match d {
+                                waffle::ValueDef::Operator(
+                                    waffle::Operator::Call { .. }
+                                    | waffle::Operator::CallIndirect { .. },
+                                    ..,
+                                ) => calls += 1,
+                                waffle::ValueDef::Operator(
+                                    waffle::Operator::I64Store { .. },
+                                    ..,
+                                ) => stores += 1,
+                                _ => {}
+                            }
+                        }
+                        crate::diag_line!(
+                            "night: body sid#{} blocks {} values {} calls {calls} i64stores {stores}",
+                            id.id(),
+                            body.blocks.len(),
+                            body.values.len()
+                        );
+                    }
+                    let f = m.funcs.push(FuncDecl::Body(
+                        sig,
+                        format!("night_script_{}", id.id()),
+                        body,
+                    ));
+                    // Widened-ABI bodies (MIR, baseline) go in the table behind a
+                    // `night_abi_sig` adapter; direct-call patches still
+                    // target the body itself (source_id_to_func). The body
+                    // takes its own table slot now (the module's table order
+                    // must stay exactly the blob order -- the in-process
+                    // runner appends every blob to the funcref table) and the
+                    // adapters are emitted as one contiguous block after the
+                    // loop, because interleaving them with bodies measurably
+                    // worsens instruction-cache behaviour. `body slot ==
+                    // adapter slot - count`
+                    // holds because bodies and adapters keep the same order.
+                    if sig == tx_ctx.helpers.night_abi_sig2 {
+                        place_in_table(m, f)?;
+                        pending_adapters.push((id, f));
+                    } else {
+                        let index = place_in_table(m, f)?;
+                        on_compiled(id, index);
+                        source_id_to_table_func.insert(id.id(), f);
+                        sid_to_index.insert(id.id(), index);
+                    }
+                    source_id_to_func.insert(id.id(), f);
+                    if opts.diagnostics.stats {
+                        crate::diag_line!(
+                            "night: body sid#{} func {}",
+                            id.id(),
+                            waffle::entity::EntityRef::index(f)
+                        );
+                    }
+                    for (expected, call, callee_sid) in lp {
+                        likely_patches.push((f, expected, call, callee_sid));
+                    }
+                    for (addr, idx) in ccp {
+                        call_cell_patches.push((f, addr, idx));
+                    }
+                    for (addr, idx) in acp {
+                        alloc_cell_patches.push((f, addr, idx));
+                    }
+                    for (addr, idx) in icp {
+                        iof_cell_patches.push((f, addr, idx));
+                    }
+                    for (addr, idx) in xcp {
+                        construct_cell_patches.push((f, addr, idx));
+                    }
+                    for (addr, off) in slp {
+                        strlit_patches.push((f, addr, off));
+                    }
+                    for (addr, row) in gicp {
+                        intrinsic_cell_patches.push((f, addr, row));
+                    }
+                    for (addr, off) in icp2 {
+                        prop_ic_patches.push((f, addr, off));
+                    }
+                    for v in bop {
+                        body_off_patch_sites.push((f, v));
+                    }
+                    for v in cnp {
+                        ctor_nslots_patch_sites.push((f, v, 0));
+                    }
+                    if !extra_bodies.is_empty() {
+                        pending_extras.push((id, f, extra_bodies, extra_call_patches));
+                    }
+                    n_compiled += 1;
                 }
-                log::trace!("night: skip script#{} ({reason})", id.id());
+                translate::Outcome::Skipped(reason) => {
+                    n_skipped += 1;
+                    log::trace!("night: skip script#{} ({reason})", id.id());
+                }
             }
         }
+    }
+    if let Some(path) = &opts.diagnostics.viz {
+        viz_records.extend(viz::layouts_record());
+        let mut text = viz_records.join("\n");
+        text.push('\n');
+        std::fs::write(path, text).map_err(|e| format!("writing {path}: {e}"))?;
     }
     // The contiguous adapter block (see the loop comment): one
     // `night_abi_sig` adapter per widened-ABI body, in body order, so every
@@ -2095,6 +2152,36 @@ pub fn translate_all(
         source_id_to_table_func.insert(id.id(), a);
         sid_to_index.insert(id.id(), index);
     }
+    // Extra bodies (a MIR script's baseline body) after the adapter block,
+    // so the body/adapter offset above still holds; then point the direct
+    // calls between a script's bodies at their functions.
+    for (id, main, extras, calls) in pending_extras {
+        let mut funcs = vec![];
+        for (i, x) in extras.into_iter().enumerate() {
+            let mut body = x.body;
+            for v in x.main_call_patches {
+                translate::patch_call(&mut body, v, main);
+            }
+            let f = m.funcs.push(FuncDecl::Body(
+                x.sig,
+                format!("night_script_{}_{i}", id.id()),
+                body,
+            ));
+            place_in_table(m, f)?;
+            for v in x.body_off_patches {
+                body_off_patch_sites.push((f, v));
+            }
+            for (addr, off) in x.prop_ic_patches {
+                prop_ic_patches.push((f, addr, off));
+            }
+            funcs.push(f);
+        }
+        if let FuncDecl::Body(_, _, body) = &mut m.funcs[main] {
+            for (v, i) in calls {
+                translate::patch_call(body, v, funcs[i]);
+            }
+        }
+    }
     for (f, v) in body_off_patch_sites {
         if let FuncDecl::Body(_, _, body) = &mut m.funcs[f] {
             if let ValueDef::Operator(Operator::I32Const { value }, _, _) = &mut body.values[v] {
@@ -2104,6 +2191,12 @@ pub fn translate_all(
     }
     if opts.diagnostics.stats {
         crate::diag_line!("night: {n_compiled} scripts compiled, {n_skipped} skipped");
+    }
+    if opts.diagnostics.tiers {
+        crate::diag_line!("{}", tier_census.summary());
+    }
+    if opts.strict_coverage {
+        tier_census.check_strict()?;
     }
 
     // ---- Regex AOT: compile each snapshotted irregexp bytecode program to a
@@ -2242,65 +2335,6 @@ pub fn translate_all(
     }
     if opts.diagnostics.stats {
         crate::diag_line!("night: {n_likely} likely-callee sites armed");
-    }
-
-    // Fuse-guarded direct calls: a binding gets one expected callee
-    // (the reactor validates the armed value's AOT target against it before
-    // arming). Bindings predicted with conflicting callees across sites, or
-    // whose callee did not compile, stay out of the table and their sites'
-    // arms stay dead (enabled const 0).
-    let mut fuse_binding_expected: HashMap<u32, u32> = HashMap::default();
-    let mut fuse_binding_conflict: HashSet<u32> = HashSet::default();
-    for (_, p) in &fuse_call_patches {
-        match fuse_binding_expected.entry(p.binding) {
-            std::collections::hash_map::Entry::Occupied(e) => {
-                if *e.get() != p.callee.get() {
-                    fuse_binding_conflict.insert(p.binding);
-                }
-            }
-            std::collections::hash_map::Entry::Vacant(v) => {
-                v.insert(p.callee.get());
-            }
-        }
-    }
-    for bid in &fuse_binding_conflict {
-        fuse_binding_expected.remove(bid);
-    }
-    let mut n_fuse_calls = 0usize;
-    for (f, p) in fuse_call_patches {
-        let (enabled, call, bid) = (p.enabled, p.call, p.binding);
-        if fuse_binding_conflict.contains(&bid) {
-            continue;
-        }
-        let Some(&callee) = source_id_to_func.get(&p.callee.get()) else {
-            fuse_binding_expected.remove(&bid);
-            continue;
-        };
-        if let FuncDecl::Body(_, _, body) = &mut m.funcs[f] {
-            if let waffle::ValueDef::Operator(waffle::Operator::I32Const { value: g }, _, _) =
-                &mut body.values[enabled]
-            {
-                *g = 1;
-            }
-            if let waffle::ValueDef::Operator(waffle::Operator::Call { function_index }, _, _) =
-                &mut body.values[call]
-            {
-                *function_index = callee;
-                n_fuse_calls += 1;
-            }
-        }
-    }
-    // bindingId -> callee funcref-table index (what the reactor's arm-time
-    // validation compares NightCalleeNightTarget's low word against).
-    let fuse_binding_index: HashMap<u32, u32> = fuse_binding_expected
-        .iter()
-        .filter_map(|(&bid, sid)| sid_to_index.get(sid).map(|&idx| (bid, idx)))
-        .collect();
-    if opts.diagnostics.stats {
-        crate::diag_line!(
-            "night: {n_fuse_calls} fuse-guarded call sites armed ({} bindings)",
-            fuse_binding_index.len()
-        );
     }
 
     let prop_ic_size = atoms.prop_cache_count() as usize * translate::INLINE_IC_STRIDE as usize;
@@ -2443,7 +2477,6 @@ pub fn translate_all(
         source_id_to_func,
         source_id_to_table_func,
         sid_to_index,
-        fuse_binding_index,
         strlit_patches,
         regex_entries,
         prop_ic_base,
@@ -2457,4 +2490,79 @@ pub fn translate_all(
         ctor_nslots_base,
         ctor_nslots_size,
     })
+}
+
+/// Measurement aid (`NIGHT_PAD_SEED=s`): give `body` a never-taken entry
+/// arm of a seed-dependent number of byte stores, so a build's functions
+/// land at different addresses (code placement moves Octane scores by up
+/// to 15% with byte-identical hot code). `argc` is param 2 of the shared
+/// signature; no call passes the value tested.
+pub(crate) fn pad_body(body: &mut waffle::FunctionBody, key: u64) {
+    use waffle::entity::EntityRef;
+    use waffle::{BlockTarget, MemoryArg, Terminator};
+    let Some(seed) = std::env::var("NIGHT_PAD_SEED")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    else {
+        return;
+    };
+    let mut h = seed ^ key.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    h ^= h >> 29;
+    h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h ^= h >> 32;
+    let n = h % 97;
+    let old = body.entry;
+    let params: Vec<Type> = body.blocks[old].params.iter().map(|&(t, _)| t).collect();
+    if n == 0 || params.len() < 3 || params[2] != Type::I32 {
+        return;
+    }
+    let entry = body.add_block();
+    let args: Vec<waffle::Value> = params
+        .iter()
+        .map(|&t| body.add_blockparam(entry, t))
+        .collect();
+    let magic = body.add_op(
+        entry,
+        Operator::I32Const { value: 0x7fff_fff3 },
+        &[],
+        &[Type::I32],
+    );
+    let cond = body.add_op(entry, Operator::I32Eq, &[args[2], magic], &[Type::I32]);
+    let pad = body.add_block();
+    for i in 0..n as u32 {
+        let a = body.add_op(
+            pad,
+            Operator::I32Const { value: 16 + 8 * i },
+            &[],
+            &[Type::I32],
+        );
+        let v = body.add_op(pad, Operator::I32Const { value: i }, &[], &[Type::I32]);
+        let memory = MemoryArg {
+            align: 0,
+            offset: 0,
+            memory: waffle::Memory::new(0),
+        };
+        body.add_op(pad, Operator::I32Store8 { memory }, &[a, v], &[]);
+    }
+    body.set_terminator(
+        pad,
+        Terminator::Br {
+            target: BlockTarget {
+                block: old,
+                args: args.clone(),
+            },
+        },
+    );
+    body.set_terminator(
+        entry,
+        Terminator::CondBr {
+            cond,
+            if_true: BlockTarget {
+                block: pad,
+                args: vec![],
+            },
+            if_false: BlockTarget { block: old, args },
+        },
+    );
+    body.entry = entry;
 }

@@ -41,9 +41,7 @@ pub struct HelperImportSpec {
 /// The built batch. `blobs[i]` is runner blob `i` (function index
 /// `nextern + i`, predicted table index `table_base + i`); `scripts` maps
 /// each compiled script's source id to its blob position; `env_desc` is the
-/// serialized environment descriptor (see `ENV_DESC_WORDS`). `module` is the
-/// batch assembled into one self-contained module, for hosts that mount one
-/// (filled on demand by `night_inproc_module`; see `assemble`).
+/// serialized environment descriptor (see `ENV_DESC_WORDS`).
 pub struct InprocOut {
     pub blobs: Vec<Vec<u8>>,
     pub table_base: u32,
@@ -215,7 +213,7 @@ fn carve_blobs(bytes: &[u8], n_imports: usize) -> Result<Vec<Vec<u8>>, String> {
 /// Defined functions pushed before `translate_all` runs; the funcref table is
 /// pre-padded past them so every table-placed function's index is exactly
 /// `table_base + blob position`.
-const PRE_BODIES: u32 = 10;
+const PRE_BODIES: u32 = 11;
 
 pub fn build_inprocess_batch(
     source: &Source,
@@ -309,7 +307,8 @@ pub fn build_inprocess_batch(
     };
     let (ta_get_poly, ta_set_poly) =
         translate::build_ta_poly_helpers(&mut m, mem, env.ta_class_base);
-    let ic_get_poly = translate::build_ic_get_helper(&mut m, mem, env.mega_get_base);
+    let ic_get_poly =
+        translate::build_ic_get_helper(&mut m, mem, env.mega_get_base, env.strlit_slot);
     let call_classify = super::build_call_classify_helper(&mut m, mem, env.fn_class_slot);
     let elem_append_check =
         super::build_elem_append_helper(&mut m, mem, env.append_cache_base, opts.instrument.guards);
@@ -363,7 +362,40 @@ pub fn build_inprocess_batch(
             body,
         ))
     };
-    if direct_call_stub2.index() != n_imports + PRE_BODIES as usize - 1 {
+    // The AOT regex matchers' functype, carried by an inert stub (the
+    // matchers themselves are blobs anywhere): MIR's regexp arm's
+    // `call_indirect` immediate.
+    let regex_matcher_sig = m.signatures.push(SignatureData {
+        params: vec![Type::I32; 6],
+        returns: vec![Type::I32],
+    });
+    let regex_stub = {
+        let mut body = FunctionBody::new(&m, regex_matcher_sig);
+        let entry = body.entry;
+        let i32_ty = body.single_type_list(Type::I32);
+        // Not a status the arm takes as "no match".
+        let retry = body.add_value(ValueDef::Operator(
+            Operator::I32Const { value: 2 },
+            Default::default(),
+            i32_ty,
+        ));
+        body.append_to_block(entry, retry);
+        body.set_terminator(
+            entry,
+            waffle::Terminator::Return {
+                values: vec![retry],
+            },
+        );
+        m.funcs.push(FuncDecl::Body(
+            regex_matcher_sig,
+            "night_regex_stub".to_string(),
+            body,
+        ))
+    };
+    if direct_call_stub2.index() != n_imports + PRE_BODIES as usize - 2
+        || regex_stub.index() != n_imports + PRE_BODIES as usize - 1
+        || regex_matcher_sig.index() != n_imports + PRE_BODIES as usize - 1
+    {
         return Err("pre-body function count misaligned".to_string());
     }
 
@@ -390,9 +422,9 @@ pub fn build_inprocess_batch(
             direct_call_stub,
             night_abi_sig2,
             direct_call_stub2,
+            regex_matcher_sig,
         },
         env.helper_bases(),
-        opts.diagnostics.viz,
     )?;
 
     let mut strlit_addr: u32 = 0;
@@ -439,7 +471,6 @@ pub fn build_inprocess_batch(
         source_id_to_func: _,
         source_id_to_table_func,
         sid_to_index,
-        fuse_binding_index,
         strlit_patches,
         regex_entries,
         prop_ic_base,
@@ -464,7 +495,7 @@ pub fn build_inprocess_batch(
     }
     let atom_bytes = serialize_atom_table(&atoms);
     let gbind_bytes =
-        serialize_global_binding_table(&atoms.names, &env.syn_gname_names, &fuse_binding_index);
+        serialize_global_binding_table(&atoms.names, &env.syn_gname_names, &env.binding_preds);
     let fuse_bytes = serialize_fuse_table(&env, &mut atoms);
     let regex_bytes = serialize_regex_table(&regex_entries);
 
@@ -513,6 +544,8 @@ pub fn build_inprocess_batch(
         mathNativesPtr: env.math_natives_base,
         appendCachePtr: env.append_cache_base,
         accessorCachePtr: env.accessor_cache_base,
+        methodCellsPtr: env.method_cells_base,
+        methodCellsLen: env.method_cells_len,
     };
 
     let mut header = [0u32; ENV_DESC_WORDS];
@@ -532,6 +565,21 @@ pub fn build_inprocess_batch(
         .to_wasm_bytes()
         .map_err(|e| format!("serialize in-process batch: {e}"))?;
     let blobs = carve_blobs(&bytes, n_imports)?;
+    if opts.diagnostics.stats {
+        let mut sizes: Vec<(usize, usize)> = blobs
+            .iter()
+            .map(Vec::len)
+            .enumerate()
+            .map(|(i, n)| (n, i))
+            .collect();
+        sizes.sort_unstable_by(|a, b| b.cmp(a));
+        crate::diag_line!(
+            "night: batch module {} bytes, {} blobs, largest {:?}",
+            bytes.len(),
+            blobs.len(),
+            &sizes[..sizes.len().min(5)]
+        );
+    }
 
     let mut scripts: Vec<(u32, u32)> = Vec::new();
     for (&sid, &f) in &source_id_to_table_func {
@@ -569,146 +617,17 @@ mod tests {
     use crate::bytecode::JSOp;
     use crate::source::SourceObject;
 
-    const HELPER_NAMES: &[&str] = &[
-        "night_runtime_callee_night_target",
-        "night_runtime_add",
-        "night_runtime_concat",
-        "night_runtime_call",
-        "night_runtime_call_iter",
-        "night_runtime_native_dispatch",
-        "night_runtime_apply_fwd",
-        "night_runtime_construct",
-        "night_runtime_get_property",
-        "night_runtime_set_property",
-        "night_runtime_get_prop_ic_miss",
-        "night_runtime_set_prop_ic_miss",
-        "night_runtime_get_gname",
-        "night_runtime_get_element",
-        "night_runtime_set_element",
-        "night_runtime_binop",
-        "night_runtime_compare",
-        "night_runtime_string",
-        "night_runtime_get_intrinsic",
-        "night_runtime_get_intrinsic_cell",
-        "night_runtime_strlit_verify",
-        "night_runtime_str_chars_eq",
-        "night_runtime_tonumeric",
-        "night_runtime_pos",
-        "night_runtime_neg",
-        "night_runtime_instanceof",
-        "night_runtime_del_prop",
-        "night_runtime_arguments",
-        "night_runtime_arguments_env",
-        "night_runtime_box_nonstrict_this",
-        "night_runtime_get_mapped_arg",
-        "night_runtime_set_mapped_arg",
-        "night_runtime_validate_this_layout",
-        "night_runtime_in",
-        "night_runtime_has_own",
-        "night_runtime_to_property_key",
-        "night_runtime_mutate_proto",
-        "night_runtime_init_home_object",
-        "night_runtime_super_base",
-        "night_runtime_super_fun",
-        "night_runtime_get_prop_super",
-        "night_runtime_get_elem_super",
-        "night_runtime_set_prop_super",
-        "night_runtime_set_elem_super",
-        "night_runtime_tostring",
-        "night_runtime_pow",
-        "night_runtime_check_obj_coercible",
-        "night_runtime_check_class_heritage",
-        "night_runtime_create_generator",
-        "night_runtime_gen_suspend",
-        "night_runtime_gen_restore",
-        "night_runtime_gen_check_resume",
-        "night_runtime_gen_closing",
-        "night_runtime_gen_final",
-        "night_runtime_async_await",
-        "night_runtime_async_resolve",
-        "night_runtime_async_reject",
-        "night_runtime_can_skip_await",
-        "night_runtime_maybe_extract_await",
-        "night_runtime_check_is_obj",
-        "night_runtime_check_this",
-        "night_runtime_check_lexical",
-        "night_runtime_throw_set_const",
-        "night_runtime_push_lexical_env",
-        "night_runtime_push_class_body_env",
-        "night_runtime_freshen_lexical_env",
-        "night_runtime_recreate_lexical_env",
-        "night_runtime_init_glexical",
-        "night_runtime_get_name",
-        "night_runtime_bind_name",
-        "night_runtime_get_bound_name",
-        "night_runtime_bind_unqualified_name",
-        "night_runtime_bind_var",
-        "night_runtime_del_name",
-        "night_runtime_push_var_env",
-        "night_runtime_enter_with",
-        "night_runtime_throw_msg",
-        "night_runtime_builtin_object",
-        "night_runtime_builtin_object_cell",
-        "night_runtime_del_elem",
-        "night_runtime_global_this",
-        "night_runtime_regexp",
-        "night_runtime_init_prop_getset",
-        "night_runtime_to_boolean",
-        "night_runtime_typeof",
-        "night_runtime_typeof_eq",
-        "night_runtime_constant_strict_eq",
-        "night_runtime_bind_unqualified_gname",
-        "night_runtime_set_name",
-        "night_runtime_new_object",
-        "night_runtime_new_array",
-        "night_runtime_init_prop",
-        "night_runtime_init_elem",
-        "night_runtime_init_elem_getset",
-        "night_runtime_check_private_field",
-        "night_runtime_new_private_name",
-        "night_runtime_env_setup",
-        "night_runtime_get_aliased",
-        "night_runtime_set_aliased",
-        "night_runtime_lambda",
-        "night_runtime_exception",
-        "night_runtime_throw",
-        "night_runtime_throw_with_stack",
-        "night_runtime_get_exception_for_finally",
-        "night_runtime_global_decl_instantiation",
-        "night_runtime_iter",
-        "night_runtime_more_iter",
-        "night_runtime_end_iter",
-        "night_runtime_close_iter_for_exception",
-        "night_runtime_symbol",
-        "night_runtime_optimize_get_iterator",
-        "night_runtime_close_iter",
-        "night_runtime_to_async_iter",
-        "night_runtime_spread_call",
-        "night_runtime_optimize_spread_call",
-        "night_runtime_object",
-        "night_runtime_post_write_barrier",
-        "night_runtime_post_write_barrier_elem",
-        "night_runtime_pre_write_barrier",
-        "night_runtime_resolve_global_slot",
-        "night_runtime_resolve_global_slot_guarded",
-        "night_runtime_set_global",
-        "night_runtime_binding_written",
-        "night_runtime_binding_value",
-        "night_runtime_math_unary",
-        "night_runtime_math_pow",
-        "night_runtime_fmod",
-        "night_runtime_create_this",
-        "night_runtime_rest",
-        "night_runtime_implicit_this",
-        "night_runtime_check_this_reinit",
-        "night_runtime_check_return",
-        "night_runtime_obj_with_proto",
-        "night_runtime_fun_with_proto",
-        "night_runtime_set_fun_name",
-        "night_runtime_no_extra_indexed",
-        "night_runtime_gen_is_closing",
-        "night_runtime_regex_ci_compare",
-    ];
+    /// The engine helpers, from the runtime's X-macro list (the one list the
+    /// shell hands the compiler); `helper_lists_agree` ties it to the resolver.
+    fn helper_names() -> Vec<&'static str> {
+        include_str!("../../../runtime/NightHelperList.h")
+            .match_indices("NIGHT_RUNTIME_HELPER(night_")
+            .map(|(i, m)| {
+                let rest = &include_str!("../../../runtime/NightHelperList.h")[i + m.len() - 6..];
+                &rest[..rest.find(')').unwrap()]
+            })
+            .collect()
+    }
 
     /// Signature strings for the helpers the toy batch's emitted code
     /// actually calls (validation checks call-site arg types against the
@@ -753,6 +672,7 @@ mod tests {
             is_class_ctor: false,
             strict: true,
             has_mapped_args: false,
+            pos: None,
         };
         Source {
             objects: vec![SourceObject::Script(script)],
@@ -804,15 +724,26 @@ mod tests {
         assert_eq!(out.table_base, 5000);
     }
 
-    fn build_toy() -> (InprocOut, usize, u32) {
-        build_toy_source(&toy_source())
+    /// The default pipeline emits the most blobs per script (MIR body,
+    /// baseline companion, adapter); the exact reservation must still match.
+    #[test]
+    fn reservation_matches_mir_blob_count() {
+        let (out, _, reserved) = build_toy_source(&toy_source(), crate::options::Pipeline::Mir);
+        assert_eq!(reserved as usize, out.blobs.len());
     }
 
-    fn build_toy_source(source: &Source) -> (InprocOut, usize, u32) {
-        let specs: Vec<HelperImportSpec> = HELPER_NAMES
-            .iter()
+    fn build_toy() -> (InprocOut, usize, u32) {
+        build_toy_source(&toy_source(), crate::options::Pipeline::Baseline)
+    }
+
+    fn build_toy_source(
+        source: &Source,
+        pipeline: crate::options::Pipeline,
+    ) -> (InprocOut, usize, u32) {
+        let specs: Vec<HelperImportSpec> = helper_names()
+            .into_iter()
             .enumerate()
-            .map(|(i, &name)| HelperImportSpec {
+            .map(|(i, name)| HelperImportSpec {
                 name: name.to_string(),
                 sig: parse_sig_str(sig_of(name)).unwrap(),
                 table_index: 100 + i as u32,
@@ -824,7 +755,10 @@ mod tests {
         let out = build_inprocess_batch(
             source,
             SourceObjectId::new(0),
-            &Options::default(),
+            &Options {
+                pipeline,
+                ..Options::default()
+            },
             &specs,
             &mut |count| {
                 assert_eq!(reserved, 0, "reserve called more than once");
@@ -853,7 +787,7 @@ mod tests {
             num_registers: 2,
             pair_count: 1,
         });
-        let (out, _, reserved) = build_toy_source(&source);
+        let (out, _, reserved) = build_toy_source(&source, crate::options::Pipeline::Baseline);
         assert_eq!(reserved as usize, out.blobs.len());
         let word = |i: usize| u32::from_le_bytes(out.env_desc[i..i + 4].try_into().unwrap());
         let field = crate::env_regions::REGION_NAMES
@@ -871,7 +805,7 @@ mod tests {
         let (out, n_allocs, _) = build_toy();
 
         assert_eq!(n_allocs, 2, "allocator called exactly twice");
-        assert_eq!(out.extern_table_indices.len(), HELPER_NAMES.len());
+        assert_eq!(out.extern_table_indices.len(), helper_names().len());
         assert_eq!(out.extern_table_indices[0], 100);
         // stub + 2 TA poly helpers + stub2 precede the compiled script's
         // widened-ABI body (slot PRE_BODIES); the script's dispatched table
@@ -920,5 +854,37 @@ mod tests {
 
         let reassembled = runner_wrap(&out.blobs, &out.extern_sigs);
         wasmparser::validate(&reassembled).expect("reassembled batch validates");
+    }
+
+    /// The runtime's X-macro (`NightHelperList.h`, which sizes the import
+    /// table the shell hands the compiler) mirrors `resolve_helpers` (which
+    /// pushes one import per helper, in order); the tests above read the
+    /// header rather than keeping a copy. Lookup is by name, so a drift would
+    /// not mis-bind, but the header documents that it mirrors the resolver.
+    #[test]
+    fn helper_lists_agree() {
+        fn names(text: &str, prefix: &str) -> Vec<String> {
+            text.match_indices(prefix)
+                .map(|(i, _)| {
+                    let rest = &text[i + prefix.len()..];
+                    rest[..rest.find(['"', ')']).unwrap()].to_string()
+                })
+                .collect()
+        }
+        let header = names(
+            include_str!("../../../runtime/NightHelperList.h"),
+            "NIGHT_RUNTIME_HELPER(",
+        );
+        let header: Vec<String> = header
+            .into_iter()
+            .filter(|n| n.starts_with("night_"))
+            .collect();
+        let src = include_str!("mod.rs");
+        let start = src.find("pub fn resolve_helpers(").unwrap();
+        let body = &src[start..start + src[start..].find("\n}\n").unwrap()];
+        let mut resolver = names(body, "resolve(m, \"");
+        // The one helper `translate_all` resolves on its own.
+        resolver.push("night_runtime_regex_ci_compare".to_string());
+        assert_eq!(header, resolver, "NightHelperList.h vs resolve_helpers");
     }
 }

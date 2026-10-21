@@ -33,12 +33,34 @@ bool NightSnapshotCaptureExtras(JSContext* cx, JS::Handle<JSScript*> root);
 // consults them and every consumer still guards at runtime.
 bool NightSnapshotCaptureHeap(JSContext* cx);
 
+class NativeObject;
+class ObjectFuse;
+class SharedShape;
+
 namespace night {
 // Two-bit-stamp per-add SLOTS maintenance: check a property add against the
 // receiver's predicted layout and clear the SLOTS bit on deviation. Call
 // after the slot is assigned. `nfixed` is the receiver's numFixedSlots().
 void NightAddPropCheck(JSObject* obj, JS::PropertyKey id, uint32_t slot,
                        uint32_t nfixed);
+
+// Analysis-chosen slot layouts: the engine's slot-placement hook
+// (JS::ExternalCompilerHooks::shapeForAdd), its memo's purge (at every major
+// GC), and the stamp gates' coverage test (every slot below n holds a
+// property, which with permuted slots the span alone does not say).
+bool NightShapeForAdd(JSContext* cx, JS::Handle<NativeObject*> obj,
+                      JS::HandleId id, uint8_t flags, SharedShape** result);
+void NightPurgeAddMemo();
+// Empty every cache and cell the compiled code and the helpers keep about
+// this context's heap (JS::NightClearCaches).
+void NightClearCaches(JSContext* cx);
+bool NightSlotsCovered(NativeObject* obj, uint32_t n);
+
+// The engine invalidated constant-property assumptions about `fuse`'s
+// object (JS::ExternalCompilerHooks::objectFuseInvalidated): unarm the
+// predicted-method cells resting on the property in `slot` (UINT32_MAX:
+// on any of them).
+void NightObjectFuseInvalidated(ObjectFuse* fuse, uint32_t slot);
 
 // Global-object write hooks, called from the engine's own property paths so
 // that an INTERPRETED global write (a declined script, a generator, eval)
@@ -84,7 +106,12 @@ static constexpr size_t kWizenThisSlots = 8;
 // `script`'s tree and arm dispatch into the injected bodies. One batch per
 // process; later calls are no-ops. Failures degrade to the interpreter
 // (returning true); false means a real error (pending exception).
-bool CompileInProcess(JSContext* cx, JS::Handle<JSScript*> script);
+//
+// `options` is the compiler option string for the batch (the nightmonkey
+// CLI's flags, space-separated, e.g. "--pipeline baseline --dump-tiers");
+// null means the defaults. It need only live for the call.
+bool CompileInProcess(JSContext* cx, JS::Handle<JSScript*> script,
+                      const char* options);
 #endif
 
 }  // namespace js
