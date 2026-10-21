@@ -186,6 +186,49 @@ function copyInLoop() {
   gc();
   return finalizeCount() - c0;
 }
+// Parity with baseline, whose frame slot keeps a local's latest value until the
+// local is overwritten: a path that does not assign must not release it.
+function oneArmKeeps(flag) {
+  gc();
+  var o = makeFinalizeObserver();
+  var c0 = finalizeCount();
+  if (flag) o = 5;
+  collect();
+  return finalizeCount() - c0;
+}
+// A collection that dominates the assignment sees the object still held.
+function loopKeepsUntilAssigned(n) {
+  gc();
+  var o = makeFinalizeObserver();
+  var c0 = finalizeCount();
+  var first = -1;
+  for (var i = 0; i < n; i++) {
+    collect();
+    if (i == 0) first = finalizeCount() - c0;
+    o = i;
+  }
+  return first;
+}
+// A formal assigned an object in the callee, then a scalar: released.
+function formalAssigned(x) {
+  gc();
+  x = makeFinalizeObserver();
+  var c0 = finalizeCount();
+  x = 5;
+  collect();
+  return finalizeCount() - c0;
+}
+// Two locals hold the object; both are overwritten in one block.
+function copiedThenBoth() {
+  gc();
+  var z = makeFinalizeObserver();
+  var c0 = finalizeCount();
+  var o = z;
+  z = 1;
+  o = 5;
+  collect();
+  return finalizeCount() - c0;
+}
 // Dead through a branch rather than an overwrite: the last use is before the
 // second call.
 function lastUseThenCall(flag) {
@@ -224,6 +267,11 @@ for (var n = 0; n < 40; n++) {
   assertEq(overwriteLoopThenCompare(3), 1);
   assertEq(overwriteInFinally(), 1);
   assertEq(copyInLoop(), 1);
+  assertEq(oneArmKeeps(false), 0);
+  assertEq(oneArmKeeps(true), 1);
+  assertEq(loopKeepsUntilAssigned(3), 0);
+  assertEq(formalAssigned(42), 1);
+  assertEq(copiedThenBoth(), 1);
   assertEq(overwriteLiveObject(n & 1), 1);
   assertEq(overwriteLiveUndefinedThenScalar(n & 1), 1);
   assertEq(overwritePolymorphic(n & 1 ? 5 : 'str'), 1);
