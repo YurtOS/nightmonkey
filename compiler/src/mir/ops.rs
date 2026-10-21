@@ -2881,6 +2881,8 @@ pub fn effects(op: &Opcode, args: &[Type], m: &Module) -> Effects {
         // replace.
         EnvCurrent | EnvCallee(_) => fx.reads = vec![Region::FrameEnv],
         EnvSet => fx.writes = vec![Region::FrameEnv],
+        // An assignment of a local: baseline's frame slot, in program order.
+        FrameStore(_) => fx.writes = vec![Region::FrameSlots],
         EnvPop => {
             fx.reads = vec![Region::FrameEnv];
             fx.writes = vec![Region::FrameEnv];

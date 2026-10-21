@@ -676,6 +676,25 @@ b10:\n  exit.throw pc=0 this=v1 args=[v2] locals=[] rval=v1 stack=[]\n}\n";
     );
 }
 
+#[test]
+fn a_frame_store_stays_in_its_loop() {
+    // `frame.store v1 2` writes an operand defined before the loop: invariant
+    // to a pass that only looks at operands, but it is the local's assignment,
+    // in program order with the collections in the loop. Code motion must
+    // leave it where it is (its effect writes the frame's slots).
+    let src = "module {\n  layout L3 = { x: val{int32} }\n}\n\
+func @s1 (formals=1, locals=0, depths={0:0}) {\n  root entry b0\n  loop b2 preheader=b1\n\
+b0(v0: obj{Function(s1)}, v1: val, v2: val):\n  v5 = const.i32 0\n  jump b1(v5)\n\
+b1(v6: i32):\n  jump b2(v6)\n\
+b2(v7: i32):\n  frame.store v1 2\n  v10 = const.i32 1\n  i32.add.ovf v7, v10 -> ok b7(v11: i32), fail b9\n\
+b7(v11: i32):\n  v12 = const.i32 100\n  v13 = i32.cmp.lt v11, v12\n  br v13 -> then b2(v11), else b8\n\
+b8:\n  return v1\n\
+b9:\n  exit pc=0 this=v1 args=[v2] locals=[] rval=v1 stack=[]\n}\n";
+    let text = optimized(src);
+    let at = block_of(&text, "frame.store");
+    assert_eq!(at, "b2", "frame.store left its loop:\n{text}");
+}
+
 /// Run `optimize` on the module's one function, check it still
 /// validates, and return its text.
 fn optimized(src: &str) -> String {

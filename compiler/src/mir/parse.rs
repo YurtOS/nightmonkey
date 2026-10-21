@@ -762,6 +762,7 @@ impl Parser {
             }
             "env" => Region::Env(EnvSlot::new(self.paren_u32()?)),
             "frame.env" => Region::FrameEnv,
+            "frame.slots" => Region::FrameSlots,
             "unknown" => Region::Unknown,
             _ => {
                 self.pos -= 1;

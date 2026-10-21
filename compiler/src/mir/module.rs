@@ -99,6 +99,12 @@ pub enum Region {
     /// scope ops (`env.set`, `env.pop`) write it: code the frame calls
     /// runs in frames of its own, so `Unknown` does not cover it.
     FrameEnv,
+    /// The frame's local slots, as baseline's frame holds them (`FrameStore`).
+    /// Only this frame's assignments write them, and the collector reads them
+    /// as roots wherever it can run: code the frame calls runs in frames of
+    /// its own, so `Unknown` does not cover them, and an assignment is never
+    /// code motion's to move, merge or drop.
+    FrameSlots,
     /// Every region.
     Unknown,
 }
@@ -108,7 +114,7 @@ impl Region {
     pub fn overlaps(&self, o: &Region) -> bool {
         use Region::*;
         match (self, o) {
-            (Unknown, FrameEnv) | (FrameEnv, Unknown) => false,
+            (Unknown, FrameEnv | FrameSlots) | (FrameEnv | FrameSlots, Unknown) => false,
             (Unknown, _) | (_, Unknown) => true,
             (Field { name: a, keys: ka }, Field { name: b, keys: kb }) => {
                 a == b
@@ -199,5 +205,8 @@ mod tests {
         // Only the frame's own scope ops write its env slot.
         assert!(!Region::Unknown.overlaps(&Region::FrameEnv));
         assert!(Region::FrameEnv.overlaps(&Region::FrameEnv));
+        assert!(!Region::Unknown.overlaps(&Region::FrameSlots));
+        assert!(Region::FrameSlots.overlaps(&Region::FrameSlots));
+        assert!(!Region::FrameSlots.overlaps(&Region::FrameEnv));
     }
 }

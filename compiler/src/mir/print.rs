@@ -697,6 +697,7 @@ fn region_str(m: &Module, r: &Region) -> String {
         Region::Global(b) => format!("global({b})"),
         Region::Env(s) => format!("env({s})"),
         Region::FrameEnv => "frame.env".into(),
+        Region::FrameSlots => "frame.slots".into(),
         Region::Unknown => "unknown".into(),
     }
 }

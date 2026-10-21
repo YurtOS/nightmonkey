@@ -363,6 +363,11 @@ interpreter lane (`tests/jit-test-excludes.txt`):
   compiled code, `f.caller` is `null`, and an uncaught exception's report loses
   its `file:line:col` and `Stack:` lines. The jstests that depend on these are
   listed in `tests/jstests-excludes.txt`.
+- A formal of a script that reads its actuals later (`Rest`, `arguments`,
+  spread forwarding) keeps the caller's value in its frame slot, which those
+  reads need, so the compiled tiers do not write an assignment to it there:
+  an object assigned to such a formal is released once nothing else holds it,
+  where baseline holds it until the formal is assigned again.
 - An `arguments` element that the interpreter keeps alive after `delete` or a
   strict `defineProperty` may be released earlier. The specification allows it.
 

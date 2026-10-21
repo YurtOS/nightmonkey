@@ -480,16 +480,8 @@ impl<'a> Lower<'a> {
         } else {
             boxed[boxed.len() - 2].ok_or("lowering: gen.suspend without its value")?
         };
-        // A dead local goes into the generator as undefined, not as the
-        // frame's stale copy: a binding out of scope must not keep its
-        // last value alive while the generator is suspended.
-        let undef = self.i64c(UNDEF);
-        let nlead = 1 + nargs as usize;
-        for (i, b) in boxed.iter_mut().enumerate() {
-            if b.is_none() && i >= nlead && i <= nlead + nlocals as usize {
-                *b = Some(undef);
-            }
-        }
+        // A dead local is not written: the frame holds its latest value
+        // (`frame_set`), which is what baseline's suspend saves too.
         self.write_frame(&boxed, nargs, nlocals)?;
         let l = self.layout;
         let env = if self.plain_env || self.own_env {
