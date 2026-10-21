@@ -46,6 +46,7 @@ use crate::wasm::translate::{StampCtorIn, TranslateCtx};
 mod calls;
 mod core;
 mod ctors;
+mod dispatch;
 mod elems;
 mod entry;
 mod exits;
@@ -1153,37 +1154,27 @@ impl<'s, 'a> Run<'s, 'a> {
         self.ta_poly_site = false;
         self.store_mask = None;
         let mut p = self.s.imms(pc);
-        if self.op_stack(op, pc, &mut p)? {
-            return Ok(());
+        let family = dispatch::op_family(op);
+        let built = match family {
+            dispatch::OpFamily::Stack => self.op_stack(op, pc, &mut p)?,
+            dispatch::OpFamily::Arith => self.op_arith(op, pc)?,
+            dispatch::OpFamily::Control => self.op_control(op, pc, &mut p)?,
+            dispatch::OpFamily::Names => self.op_names(op, pc, &mut p)?,
+            dispatch::OpFamily::Elems => self.op_elems(op, pc, &mut p)?,
+            dispatch::OpFamily::Objects => self.op_objects(op, pc, &mut p)?,
+            dispatch::OpFamily::Misc => self.op_misc(op, pc, &mut p)?,
+            dispatch::OpFamily::Super => self.op_super(op, pc, &mut p)?,
+            dispatch::OpFamily::Gen => self.op_gen(op, pc, &mut p)?,
+            dispatch::OpFamily::Calls => self.op_calls(op, pc, &mut p)?,
+            dispatch::OpFamily::Unsupported => return Err(format!("{op:?}")),
+        };
+        if built {
+            Ok(())
+        } else {
+            Err(format!(
+                "BUG: {op:?} is classified {family:?} but that family does not build it"
+            ))
         }
-        if self.op_arith(op, pc)? {
-            return Ok(());
-        }
-        if self.op_control(op, pc, &mut p)? {
-            return Ok(());
-        }
-        if self.op_names(op, pc, &mut p)? {
-            return Ok(());
-        }
-        if self.op_elems(op, pc, &mut p)? {
-            return Ok(());
-        }
-        if self.op_objects(op, pc, &mut p)? {
-            return Ok(());
-        }
-        if self.op_misc(op, pc, &mut p)? {
-            return Ok(());
-        }
-        if self.op_super(op, pc, &mut p)? {
-            return Ok(());
-        }
-        if self.op_gen(op, pc, &mut p)? {
-            return Ok(());
-        }
-        if self.op_calls(op, pc, &mut p)? {
-            return Ok(());
-        }
-        Err(format!("{op:?}"))
     }
 
     fn js_binop(&mut self, k: JsBinop, a: Slot, b: Slot) {

@@ -100,6 +100,7 @@ use crate::wasm::translate::{
 mod boxing;
 mod calls;
 mod construct;
+mod dispatch;
 mod elements;
 mod emit;
 mod exits;
@@ -769,33 +770,26 @@ impl<'a> Lower<'a> {
         let d = self.f.insts[inst].clone();
         self.epoch_same = None;
         let a = self.args(inst)?;
-        if self.inst_values(inst, &d, &a)? {
-            return Ok(());
+        let family = dispatch::inst_family(&d.op);
+        let lowered = match family {
+            dispatch::InstFamily::Values => self.inst_values(inst, &d, &a)?,
+            dispatch::InstFamily::Control => self.inst_control(inst, &d, &a)?,
+            dispatch::InstFamily::Guards => self.inst_guards(inst, &d, &a)?,
+            dispatch::InstFamily::Env => self.inst_env(inst, &d, &a)?,
+            dispatch::InstFamily::Access => self.inst_access(inst, &d, &a)?,
+            dispatch::InstFamily::Calls => self.inst_calls(inst, &d, &a)?,
+            dispatch::InstFamily::Runtime => self.inst_runtime(inst, &d, &a)?,
+            dispatch::InstFamily::Construct => self.inst_construct(inst, &d, &a)?,
+            dispatch::InstFamily::Fields => self.inst_fields(inst, &d, &a)?,
+            dispatch::InstFamily::Unsupported => false,
+        };
+        if lowered {
+            Ok(())
+        } else {
+            Err(format!(
+                "lowering: no arm lowers {} ({family:?})",
+                mir::print::mnemonic(&d.op)
+            ))
         }
-        if self.inst_control(inst, &d, &a)? {
-            return Ok(());
-        }
-        if self.inst_guards(inst, &d, &a)? {
-            return Ok(());
-        }
-        if self.inst_env(inst, &d, &a)? {
-            return Ok(());
-        }
-        if self.inst_access(inst, &d, &a)? {
-            return Ok(());
-        }
-        if self.inst_calls(inst, &d, &a)? {
-            return Ok(());
-        }
-        if self.inst_runtime(inst, &d, &a)? {
-            return Ok(());
-        }
-        if self.inst_construct(inst, &d, &a)? {
-            return Ok(());
-        }
-        if self.inst_fields(inst, &d, &a)? {
-            return Ok(());
-        }
-        Err("lowering: no arm lowers the op".into())
     }
 }
