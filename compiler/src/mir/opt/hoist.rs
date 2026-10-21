@@ -572,6 +572,7 @@ pub fn hoist_reads(m: &Module, f: &mut Func) -> usize {
                             | Opcode::Unbox(_)
                             | Opcode::ConstBool(_)
                             | Opcode::ConstI32(_)
+                            | Opcode::ConstF64(_)
                             | Opcode::ConstVal(_)
                     )
                 {

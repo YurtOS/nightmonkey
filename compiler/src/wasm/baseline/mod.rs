@@ -113,6 +113,11 @@ pub fn build_body(
     {
         return Ok(Err(FORCE_INTERPRETER.into()));
     }
+    // Direct eval reads the caller's interpreter frame (`is_direct_eval`): a
+    // script containing one is interpreted, before any of it is lowered.
+    if let Some(op) = script.parser().opcodes().find(|&op| is_direct_eval(op)) {
+        return Ok(Err(format!("{UNSUPPORTED_OP} ({op:?})")));
+    }
     // Code size is linear in bytecode size, but a multi-megabyte script
     // (an Emscripten-style giant function) becomes a function of millions
     // of blocks: waffle's backend validation walks the dominator tree per

@@ -2,6 +2,10 @@
 
 use super::*;
 
+/// Most `args.object` materialisations a function may hold and still get
+/// inner-loop onramps (see `wants_onramp`).
+const INNER_ONRAMP_MAX_ARGS_OBJECTS: usize = 32;
+
 impl<'s, 'a> Run<'s, 'a> {
     pub(super) fn build(&mut self) -> R<()> {
         self.entry();
@@ -98,13 +102,23 @@ impl<'s, 'a> Run<'s, 'a> {
             // Inlined callees make the loops around it bigger than their
             // bytecode says, and the duplication with them.
             Some(_) if !self.f.inline_frames.is_empty() => false,
-            // Every exit of a function holding the elided `arguments`
-            // placeholder materialises the object (`exit_operands`), which
-            // is most of its code; copying that for a side entry made one
-            // such constructor 53x larger (13.7 MB).
-            Some(_) if !self.f.frame.elided_args.is_empty() => false,
+            // An exit that holds the elided `arguments` placeholder
+            // materialises the object (`exit_operands`): a call, a branch and
+            // the roots around it. A function with many such exits is mostly
+            // that code, and copying it for a side entry made one
+            // constructor 53x larger (13.7 MB).
+            Some(_) if self.args_object_count() > INNER_ONRAMP_MAX_ARGS_OBJECTS => false,
             Some(len) => len <= self.s.ctx.opts.inner_onramp_bytes(),
         }
+    }
+
+    /// The `args.object` instructions in the function's own frame.
+    fn args_object_count(&self) -> usize {
+        self.f
+            .insts
+            .iter()
+            .filter(|&(i, d)| d.op == Opcode::ArgsObject && self.f.inst_frame[i] == 0)
+            .count()
     }
 
     /// The onramp root `O` for loop header `h` (§5.2): the frame at `h`,

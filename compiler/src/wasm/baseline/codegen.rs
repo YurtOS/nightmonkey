@@ -698,18 +698,15 @@ pub(crate) fn env_is_plain(source: &crate::source::Source, script: &Script) -> b
 pub(crate) fn needs_env(script: &Script) -> bool {
     crate::wasm::translate::uses_env_ops(script)
         || script.parser().opcodes().any(|op| {
-            matches!(
-                op,
-                JSOp::Eval
-                    | JSOp::StrictEval
-                    | JSOp::SpreadEval
-                    | JSOp::StrictSpreadEval
-                    | JSOp::NonSyntacticGlobalThis
-                    | JSOp::EnvCallee
-                    | JSOp::GetImport
-                    | JSOp::AddDisposable
-                    | JSOp::TakeDisposeCapability
-            )
+            super::is_direct_eval(op)
+                || matches!(
+                    op,
+                    JSOp::NonSyntacticGlobalThis
+                        | JSOp::EnvCallee
+                        | JSOp::GetImport
+                        | JSOp::AddDisposable
+                        | JSOp::TakeDisposeCapability
+                )
         })
 }
 

@@ -108,6 +108,19 @@ def main():
     assert result.stdout.strip().endswith("ok"), result.stdout + result.stderr
     print("PASS compile runs no user accessor")
 
+    # Inner-loop onramps are not given to a function with many `arguments`
+    # materialisations: waffle copied that code until the body was 13.7 MB.
+    onramp = fixture.with_name("mir-onramp-args-size.js")
+    result = subprocess.run(
+        [str(wrapper), "--night-options", "--pipeline mir --stats", str(onramp)],
+        env=env, capture_output=True, text=True, timeout=600,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    largest = re.search(r"night: batch module \d+ bytes, \d+ blobs, largest \[\((\d+),", result.stderr)
+    assert largest, result.stderr[-2000:]
+    assert int(largest.group(1)) < 2_000_000, f"largest blob {largest.group(1)} bytes"
+    print(f"PASS the onramp fixture's largest body is {largest.group(1)} bytes")
+
 
 if __name__ == "__main__":
     main()

@@ -40,7 +40,8 @@ impl<'a> Gen<'a> {
                     .unwrap();
                 self.set_slot(d, r);
             }
-            // Direct eval (`is_direct_eval`): the script is interpreted.
+            // Direct eval (`is_direct_eval`): `build_body` declines the script before
+            // lowering, so this is not reached.
             Eval | StrictEval | SpreadEval | StrictSpreadEval => {
                 return Err(format!("{} ({op:?})", super::super::UNSUPPORTED_OP));
             }

@@ -586,6 +586,18 @@ fn build_at<'a>(
     if is_global {
         return Err("global script".into());
     }
+    // Direct eval reads the caller's interpreter frame: the script is
+    // interpreted, and no tier lowers its op (`baseline::is_direct_eval`).
+    if let Some(op) = script
+        .parser()
+        .opcodes()
+        .find(|&op| crate::wasm::baseline::is_direct_eval(op))
+    {
+        return Err(format!(
+            "{} ({op:?})",
+            crate::wasm::baseline::UNSUPPORTED_OP
+        ));
+    }
     // A MIR script carries two bodies (MIR and baseline). An
     // Emscripten-sized function would dominate the batch's memory and
     // compile time for little gain, so it stays in baseline.
