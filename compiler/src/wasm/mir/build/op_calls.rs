@@ -191,7 +191,7 @@ impl<'s, 'a> Run<'s, 'a> {
                 self.guard_result(claim.unwrap_or_default(), pc + op.len(), false);
             }
 
-            op => return Err(format!("{op:?}")),
+            _ => return Ok(false),
         }
         Ok(true)
     }

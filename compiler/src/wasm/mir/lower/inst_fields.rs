@@ -78,12 +78,7 @@ impl<'a> Lower<'a> {
                 let v = self.load_i32(tbl, 4 * id);
                 self.def(inst, v);
             }
-            op => {
-                return Err(format!(
-                    "lowering: {} is not lowered yet",
-                    mir::print::mnemonic(&op)
-                ))
-            }
+            _ => return Ok(false),
         }
         Ok(true)
     }
