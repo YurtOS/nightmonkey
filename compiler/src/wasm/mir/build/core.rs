@@ -7,7 +7,6 @@ impl<'s, 'a> Run<'s, 'a> {
         s: &'s Shape<'a>,
         table: &'s BTreeMap<Pc, Vec<Ty>>,
         hoist: &'s BTreeMap<(Pc, usize), Ty>,
-        released: &Released,
     ) -> Run<'s, 'a> {
         let frame = FrameShape {
             formals: s.nargs,
@@ -46,9 +45,6 @@ impl<'s, 'a> Run<'s, 'a> {
             renames: vec![],
             next_pc: None,
             bug: None,
-            overwritten: released.overwritten.clone(),
-            retained_once: released.retained_once.clone(),
-            block_undef: None,
             likely_targets: vec![],
             gname_vals: BTreeMap::new(),
             math_fns: BTreeMap::new(),
@@ -90,7 +86,6 @@ impl<'s, 'a> Run<'s, 'a> {
         args: Vec<mir::Value>,
         result: Option<MType>,
     ) -> mir::Value {
-        self.retain_locals(&op);
         let tys: Vec<MType> = result.into_iter().collect();
         let (_, rs) = self.f.add_inst(self.cur, op, args, &tys, vec![]);
         rs.first()
@@ -99,7 +94,6 @@ impl<'s, 'a> Run<'s, 'a> {
     }
 
     pub(super) fn term(&mut self, op: Opcode, args: Vec<mir::Value>, mut succs: Vec<Edge>) {
-        self.retain_locals(&op);
         self.fence_params(&op, &args, &mut succs);
         let (inst, _) = self.f.add_inst(self.cur, op, args, &[], succs);
         self.attach_targets(inst);
@@ -173,47 +167,6 @@ impl<'s, 'a> Run<'s, 'a> {
         self.live = true;
     }
 
-    /// Before an op that may GC: write each managed local (formal, local,
-    /// rval) to the frame, where the GC sees it. A local's value then stays
-    /// alive until the local is overwritten, as in baseline, whose frame
-    /// holds it (a `WeakMap` key held only by a dead local must survive);
-    /// MIR otherwise roots only what is live. Emitted before every such op:
-    /// the lowering writes them only where the op can GC (a slow path, or
-    /// the call), and drops a store of what the frame holds on the path.
-    pub(super) fn retain_locals(&mut self, op: &Opcode) {
-        use mir::ops::SuccRole;
-        let may_gc = op
-            .roles()
-            .iter()
-            .any(|r| matches!(r, SuccRole::Err | SuccRole::OkDirty));
-        if may_gc {
-            self.retain_all();
-        }
-    }
-
-    /// `retain_locals` unconditionally: before an inlined callee, whose
-    /// GC points are its own ops.
-    pub(super) fn retain_all(&mut self) {
-        for ix in 1..self.frame_len().min(self.st.len()) {
-            let x = self.st[ix];
-            let v = if Self::managed_ty(x.ty) {
-                self.retained_once.insert(ix);
-                x.v
-            } else if self.overwritten.contains(&ix) && !self.no_release(ix) {
-                self.release_undef()
-            } else {
-                continue;
-            };
-            self.f.add_inst(
-                self.cur,
-                Opcode::FrameStore(u32::try_from(ix).unwrap()),
-                vec![v],
-                &[],
-                vec![],
-            );
-        }
-    }
-
     /// Whether a value of type `t` can hold a GC thing, so the frame must
     /// keep it visible to the GC while its local holds it.
     fn managed_ty(t: Ty) -> bool {
@@ -229,80 +182,55 @@ impl<'s, 'a> Run<'s, 'a> {
         )
     }
 
-    /// This block's `undefined` for a release store.
-    pub(super) fn release_undef(&mut self) -> mir::Value {
-        if let Some((b, v)) = self.block_undef {
-            if b == self.cur {
-                return v;
-            }
-        }
-        let v = self.const_val(ConstVal::Undefined);
-        self.block_undef = Some((self.cur, v));
-        v
-    }
-
-    /// Whether slot `ix`, of type `t`, may have held a heap value: not
-    /// `undefined`, a number or a boolean. A slot a block enters dead has no
-    /// type, so it may have if a retaining store put a managed value in it.
-    fn may_hold_gc_thing(&self, ix: usize, t: Ty) -> bool {
+    /// Whether a value of type `t` may be a heap thing (not `undefined`,
+    /// `null`, a boolean or a number).
+    fn heap_ty(t: Ty) -> bool {
         use crate::opsem::{NUM, PRIM_BOOLEAN, PRIM_NULL, PRIM_UNDEFINED};
         match t {
             Ty::Val(tags) => !tags.subset_of(TagSet::prims(
                 PRIM_UNDEFINED | PRIM_NULL | PRIM_BOOLEAN | NUM,
             )),
-            Ty::Dead => self.retained_once.contains(&ix),
             t => Self::managed_ty(t),
         }
     }
 
-    /// A local that held, or now holds, a managed value, overwritten by a
-    /// value it is never read again from (or by a scalar, dead or not): retain
-    /// the new value (`undefined` for a scalar) in its frame slot, like
-    /// `retain_all`, lazily. An earlier retaining store may have put the old
-    /// object there, and the frame is all that keeps it, so an exit that
-    /// finds the local dead would leave it alive. Baseline's write of the new
-    /// value releases it.
-    fn retain_dead_overwrite(&mut self, ix: usize, old: Slot) {
-        let x = self.st[ix];
+    /// Baseline writes every assignment to a local's frame slot, so the slot
+    /// holds the local's latest value until the next assignment: a dead local
+    /// keeps its object (a `WeakMap` key held only by a dead local must
+    /// survive), and the object an overwritten local held is released. MIR
+    /// keeps values in SSA, so it writes the slot where that matters, at the
+    /// assignment: the new value if it may be a heap thing, else `undefined`
+    /// if the slot may hold one (its old type is a heap type, or unknown
+    /// because the slot is dead here). A scalar over a scalar writes nothing:
+    /// by induction the slot holds no heap thing. Nothing else rewrites the
+    /// slot, so no path-dependent state is kept.
+    ///
+    /// A formal of a script that reads its actuals later (`Rest`, `arguments`,
+    /// spread forwarding) keeps the caller's value in its slot; the return
+    /// value slot is written like any local.
+    fn frame_set(&mut self, ix: usize, old: Slot, x: Slot) {
         if ix == 0
             || ix >= self.frame_len()
-            || self.no_release(ix)
+            || x.ty == Ty::Dead
             || self.write_through(ix)
-            || !(Self::managed_ty(x.ty) || Self::managed_ty(old.ty) || old.ty == Ty::Dead)
+            || (self.is_formal(ix) && crate::wasm::baseline::layout::reads_actuals(self.s.script))
         {
             return;
         }
-        let dead_after = self
-            .next_pc
-            .and_then(|n| self.s.live.get(&n))
-            .is_some_and(|l| ix < l.len() && !l[ix]);
-        // A live scalar replacing a managed value releases it too: `retain_all`
-        // skips scalar slots, so nothing else would clear the frame copy. A
-        // slot a block enters dead has no type (`Ty::Dead`), yet a
-        // predecessor's retaining store may have left an object in the frame:
-        // it counts as possibly managed.
-        // The old object may be in the frame whatever the new value is, and the
-        // slot may die later (a block boundary makes it `Ty::Dead`, which
-        // `retain_all` skips): remember the overwrite even when the new value
-        // is managed and still read.
-        if self.may_hold_gc_thing(ix, old.ty) || self.retained_once.contains(&ix) {
-            self.overwritten.insert(ix);
-        }
-        if dead_after || !Self::managed_ty(x.ty) {
-            let v = if Self::managed_ty(x.ty) {
-                self.retained_once.insert(ix);
-                x.v
-            } else {
-                self.release_undef()
-            };
-            self.f.add_inst(
-                self.cur,
-                Opcode::FrameStore(u32::try_from(ix).unwrap()),
-                vec![v],
-                &[],
-                vec![],
-            );
-        }
+        let v = if Self::heap_ty(x.ty) {
+            x.v
+        } else if Self::heap_ty(old.ty) || old.ty == Ty::Dead {
+            self.const_val(ConstVal::Undefined)
+        } else {
+            return;
+        };
+        self.f.add_inst(
+            self.cur,
+            Opcode::FrameSet(u32::try_from(ix).unwrap()),
+            vec![v],
+            &[],
+            vec![],
+        );
     }
 
     pub(super) fn const_val(&mut self, c: ConstVal) -> mir::Value {
@@ -444,19 +372,9 @@ impl<'s, 'a> Run<'s, 'a> {
         (2 + self.s.nargs + self.s.nlocals) as usize
     }
 
-    /// Whether slot `ix` is a formal: its frame slot is where the caller put
-    /// the actual, which `Rest`, `arguments` and spread forwarding read, so a
-    /// release store must not clobber it. (The caller keeps what it passed
-    /// rooted for the call; baseline shares the slot.)
+    /// Whether slot `ix` is a formal.
     pub(super) fn is_formal(&self, ix: usize) -> bool {
         ix >= 1 && ix <= self.s.nargs as usize
-    }
-
-    /// Whether slot `ix` takes no release store: a formal (see `is_formal`),
-    /// or the return value, which a generator's forced return and every exit
-    /// read from the frame after the code that set it.
-    pub(super) fn no_release(&self, ix: usize) -> bool {
-        self.is_formal(ix) || ix == self.rval_ix()
     }
 
     /// Whether frame slot `ix` is written through: only the formals of a
@@ -491,7 +409,7 @@ impl<'s, 'a> Run<'s, 'a> {
         }
         let old = self.st[ix];
         self.st[ix] = x;
-        self.retain_dead_overwrite(ix, old);
+        self.frame_set(ix, old, x);
     }
 
     pub(super) fn arg_ix(&self, n: u32) -> usize {

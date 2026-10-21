@@ -587,7 +587,6 @@ impl<'s, 'a> Run<'s, 'a> {
                 let ok = self.new_block();
                 let fail = self.exit_block(false);
                 let err = self.exit_block(true);
-                self.retain_locals(&Opcode::SetPropData(a));
                 let (inst, _) = self.f.add_inst(
                     self.cur,
                     Opcode::SetPropData(a),

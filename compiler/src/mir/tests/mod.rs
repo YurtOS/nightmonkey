@@ -1109,13 +1109,13 @@ b5(v21: val):\n  v10 = const.i32 1\n  i32.add.ovf v6, v10 -> ok b4(v11: i32), fa
 #[test]
 fn slot_load_keeps_the_release_store() {
     // A dead local overwritten before a proven field read: the builder's
-    // `frame.store undefined` for the slot is the only release of the object
+    // `frame.set undefined` for the slot is the only release of the object
     // the local held, so folding the read to `load_slot` must keep it.
     let src = "module {\n  layout L3 = { x: val{int32} }\n}\n\
 func @s1 (formals=1, locals=1, depths={0:0}) {\n  root entry b0\n\
 b0(v0: obj{Function(s1)}, v1: val, v2: val):\n  guard.unbox.obj v2 -> ok b5(v3: obj), fail b9\n\
 b5(v3: obj):\n  guard.layout v3 L3 types slots -> ok b6(v4: obj{L3 types slots}), fail b9\n\
-b6(v4: obj{L3 types slots}):\n  v5 = const.val undefined\n  frame.store v5 2\n\
+b6(v4: obj{L3 types slots}):\n  v5 = const.val undefined\n  frame.set v5 2\n\
   load_field v4 x -> ok_clean b3(v8: val{int32}), ok_dirty b9, err b10\n\
 b3(v8: val{int32}):\n  return v1\n\
 b9:\n  exit pc=0 this=v1 args=[v2] locals=[v1] rval=v1 stack=[]\n\
@@ -1124,7 +1124,7 @@ b10:\n  exit.throw pc=0 this=v1 args=[v2] locals=[v1] rval=v1 stack=[]\n}\n";
     assert_eq!(text.matches("load_field").count(), 0, "{text}");
     assert_eq!(text.matches("load_slot").count(), 1, "{text}");
     assert!(
-        text.contains("frame.store"),
+        text.contains("frame.set"),
         "the release store was dropped:\n{text}"
     );
 }

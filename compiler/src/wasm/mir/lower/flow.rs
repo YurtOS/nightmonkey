@@ -398,7 +398,7 @@ impl<'a> Lower<'a> {
         for b in body {
             for &i in &f.blocks[b].insts {
                 match f.insts[i].op {
-                    Opcode::FrameStore(k) => {
+                    Opcode::FrameStore(k) | Opcode::FrameSet(k) => {
                         stores
                             .entry((f.inst_frame[i], k))
                             .or_default()

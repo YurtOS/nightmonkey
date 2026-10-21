@@ -191,7 +191,6 @@ impl<'s, 'a> Run<'s, 'a> {
                 let fail = self.exit_block(false);
                 let err = self.exit_block(true);
                 let op = Opcode::SetElemData(duty);
-                self.retain_locals(&op);
                 let (inst, _) = self.f.add_inst(
                     self.cur,
                     op,

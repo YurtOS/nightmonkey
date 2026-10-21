@@ -154,7 +154,6 @@ impl<'s, 'a> Run<'s, 'a> {
                 let a = self.pop();
                 let x = self.boxed(a);
                 let err = self.exit_block(true);
-                self.retain_locals(&Opcode::JsThrow);
                 let (t, _) = self.f.add_inst(
                     self.cur,
                     Opcode::JsThrow,

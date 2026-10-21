@@ -232,7 +232,6 @@ impl<'s, 'a> Run<'s, 'a> {
             },
             Self::goto(err),
         ];
-        self.retain_locals(&op);
         self.fence_params(&op, &args, &mut succs);
         let (inst, _) = self.f.add_inst(self.cur, op, args, &[], succs);
         self.f.witnesses[inst] = Some(mir::func::Witness {
@@ -279,7 +278,6 @@ impl<'s, 'a> Run<'s, 'a> {
         };
         let err = self.exit_block(true);
         // Not `term`: the clean edge is no fence.
-        self.retain_locals(&op);
         let (inst, _) =
             self.f
                 .add_inst(self.cur, op, args, &[], vec![clean, dirty, Self::goto(err)]);
@@ -336,7 +334,6 @@ impl<'s, 'a> Run<'s, 'a> {
             args: p.map(|_| vec![EdgeArg::Out(0)]).unwrap_or_default(),
         };
         let err = self.exit_block(true);
-        self.retain_locals(&op);
         let (inst, _) =
             self.f
                 .add_inst(self.cur, op, args, &[], vec![clean, dirty, Self::goto(err)]);
@@ -532,7 +529,6 @@ impl<'s, 'a> Run<'s, 'a> {
             }
             let saved_mm = self.mm.clone();
             let saved_frames = self.f.inline_frames.len();
-            self.retain_all();
             let frame_this = this_raw.map(|_| vals[1]);
             match super::super::inline::splice(
                 &mut self.mm,
@@ -582,7 +578,6 @@ impl<'s, 'a> Run<'s, 'a> {
         match dirty {
             Some(d) => {
                 // Not `term`: the clean edge is no fence.
-                self.retain_locals(&op);
                 self.f
                     .add_inst(self.cur, op, args, &[], vec![e, d, Self::goto(err)]);
                 self.live = false;
@@ -793,7 +788,6 @@ impl<'s, 'a> Run<'s, 'a> {
         let saved_mm = self.mm.clone();
         let saved_frames = self.f.inline_frames.len();
         let here = self.cur;
-        self.retain_all();
         match super::super::inline::splice(
             &mut self.mm,
             &mut self.f,

@@ -680,11 +680,6 @@ fn build_at<'a>(
         }
     }
     let mut table: BTreeMap<Pc, Vec<Ty>> = BTreeMap::new();
-    // Frame slots that may hold a stale heap value (`Run::overwritten`,
-    // `retained_once`): a run learns them in build order, so an op built
-    // before an overwrite that a back edge reaches after it needs a rerun
-    // seeded with what the loop did.
-    let mut released = Released::default();
     // Loop-header slots guarded on the way into their loop (§10.2).
     let mut hoist: BTreeMap<(Pc, usize), Ty> = BTreeMap::new();
     // Within a run, a block's entry types join every forward edge into it
@@ -692,24 +687,15 @@ fn build_at<'a>(
     // bring. Each rerun widens some loop header's entry types, and there
     // are finitely many widenings; the bound is a backstop.
     for _ in 0..256 {
-        let mut run = Run::new(&shape, &table, &hoist, &released);
+        let mut run = Run::new(&shape, &table, &hoist);
         run.build()?;
-        let grown = !run.preheaders.is_empty()
-            && !(run.overwritten.is_subset(&released.overwritten)
-                && run.retained_once.is_subset(&released.retained_once));
-        if grown {
-            released.overwritten.extend(run.overwritten.iter().copied());
-            released
-                .retained_once
-                .extend(run.retained_once.iter().copied());
-        }
         let new_hoists: Vec<((Pc, usize), Ty)> = run
             .hoist_req
             .iter()
             .filter(|(k, _)| !hoist.contains_key(k))
             .map(|(&k, &t)| (k, t))
             .collect();
-        if !run.widen && new_hoists.is_empty() && !grown {
+        if !run.widen && new_hoists.is_empty() {
             let mm = std::mem::take(&mut run.mm);
             let this_out = run.this_out.flatten();
             let sites = run.inline_sites;
@@ -732,14 +718,6 @@ fn build_at<'a>(
         }
     }
     Err("BUG: type fixpoint did not converge".into())
-}
-
-/// What the builder has learned about stale frame copies (see
-/// `Run::overwritten`), carried across reruns; the sets only grow.
-#[derive(Default)]
-struct Released {
-    overwritten: std::collections::BTreeSet<usize>,
-    retained_once: std::collections::BTreeSet<usize>,
 }
 
 /// A decoded op.
@@ -1116,21 +1094,6 @@ struct Run<'s, 'a> {
     /// A builder invariant that failed where the code cannot return an error
     /// (`enter`); the run reports it when it ends.
     bug: Option<String>,
-    /// Frame slots whose local was overwritten (so far in build order) with a
-    /// value that is not managed, from one that was or may have been: their
-    /// frame copy may hold an object the local no longer does, so each
-    /// may-GC op and each exit writes `undefined` over it while the local is
-    /// not managed (a one-shot release would be spent on an op whose GC is
-    /// slow-path only). Over-releasing a dead local is always sound.
-    overwritten: std::collections::BTreeSet<usize>,
-    /// Frame slots a retaining store has put a managed value in so far. A
-    /// slot that is `Ty::Dead` counts as having held a heap value only if
-    /// it is in this set (the first assignment to a local finds it dead).
-    retained_once: std::collections::BTreeSet<usize>,
-    /// The `undefined` constant already made in a block, for the release
-    /// stores: one value per block lets the lowering see that the frame
-    /// already holds it (`framed`) and drop the repeats.
-    block_undef: Option<(mir::Block, mir::Value)>,
     /// The likely callees the next generic `call` gets (`attach_targets`).
     likely_targets: Vec<ScriptId>,
     /// Values read from a global by name, and the Math functions read off

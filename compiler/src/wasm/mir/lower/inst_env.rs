@@ -68,7 +68,7 @@ impl<'a> Lower<'a> {
                 let s = self.i32c(slot.get());
                 self.post_barrier(self.h.post_write_barrier, a[0], s, a[1]);
             }
-            Opcode::FrameStore(k) => {
+            Opcode::FrameStore(k) | Opcode::FrameSet(k) => {
                 let fid = self.cur_frame as usize;
                 let l = self.frame_layouts[fid];
                 let (nargs, nlocals) = (l.nargs, l.nlocals);
@@ -98,6 +98,13 @@ impl<'a> Lower<'a> {
                     self.vp
                 };
                 self.store_i64(base, off, v);
+                if matches!(d.op, Opcode::FrameSet(_)) {
+                    // The frame holds this value now, and no older retaining
+                    // store may be written over it.
+                    let key = (self.cur_frame, k);
+                    self.pending_retain.retain(|(q, _)| *q != key);
+                    self.framed.insert(key, d.args[0]);
+                }
             }
             Opcode::LitNew(n) => {
                 // As `js.rt.newobject`: the inline nursery allocation from

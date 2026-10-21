@@ -1398,6 +1398,7 @@ impl Parser {
             ActualArgOr(_) => ActualArgOr(self.int()?),
             JsIsBuiltin(_) => JsIsBuiltin(self.int()?),
             FrameStore(_) => FrameStore(self.int()?),
+            FrameSet(_) => FrameSet(self.int()?),
             CreateThis(..) => {
                 let n = self.int()?;
                 self.expect_punct(",")?;
@@ -1789,6 +1790,7 @@ fn template(mn: &str) -> Option<Opcode> {
         JsRt(RtOp::Symbol(0)),
         JsRt(RtOp::BuiltinObject(0)),
         FrameStore(0),
+        FrameSet(0),
         JsSetName(placeholder_atom, false),
         JsSetName(placeholder_atom, true),
         LoadField(placeholder_atom),

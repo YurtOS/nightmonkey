@@ -479,6 +479,7 @@ pub fn mnemonic(op: &Opcode) -> String {
         }
         .into(),
         FrameStore(_) => "frame.store".into(),
+        FrameSet(_) => "frame.set".into(),
         JsSetName(_, false) => "js.setname".into(),
         JsSetName(_, true) => "js.setname.strict".into(),
         LoadField(_) => "load_field".into(),
@@ -621,9 +622,8 @@ fn immediates(m: &Module, op: &Opcode) -> Option<String> {
         LitNew(n) => n.to_string(),
         LitInit(a, k) => format!("{}, L{k}", atom(Some(m), *a)),
         EnvLoad(s) | EnvStore(s) => s.to_string(),
-        JsLambda(k) | FrameStore(k) | RestArray(k) | ActualArgOr(k) | JsIsBuiltin(k) => {
-            k.to_string()
-        }
+        JsLambda(k) | FrameStore(k) | FrameSet(k) | RestArray(k) | ActualArgOr(k)
+        | JsIsBuiltin(k) => k.to_string(),
         JsRt(RtOp::DelProp(a, _)) | JsRt(RtOp::Intrinsic(a)) | JsRt(RtOp::GetNameTypeof(a)) => {
             atom(Some(m), *a)
         }

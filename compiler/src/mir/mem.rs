@@ -719,7 +719,9 @@ fn plan_one(m: &Module, f: &Func, snap: &Snapshot, t: Inst) -> Option<Plan> {
                         Opcode::LoadSlot(_) => loads.push(i),
                         // A retaining store (in its frame; a mapped formal's
                         // is the `arguments` object's slot, which is real).
-                        Opcode::FrameStore(k) if k > formals => fstores.push(i),
+                        Opcode::FrameStore(k) | Opcode::FrameSet(k) if k > formals => {
+                            fstores.push(i)
+                        }
                         // Exits of any frame: an inlined callee's writes its
                         // frame, and finishes it in baseline.
                         Opcode::Exit { .. }

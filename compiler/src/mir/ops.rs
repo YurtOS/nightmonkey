@@ -798,6 +798,12 @@ pub enum Opcode {
     /// frame's copy of every formal, local and rval equal to the slot's
     /// value, so exits need not carry them (§5.1).
     FrameStore(u32),
+    /// As `FrameStore`, but written where it stands, and the frame slot's new
+    /// value replaces whatever the slot held: the builder's write at an
+    /// assignment of a local, so the frame keeps the local's latest value as
+    /// baseline's does. (`FrameStore` is held by the lowering for the next
+    /// instruction that can GC.)
+    FrameSet(u32),
     /// A closure of the script's inner function `index` (a gcthing index)
     /// over environment `args[0]` (`Lambda`).
     JsLambda(u32),
@@ -2084,14 +2090,14 @@ pub fn signature(op: &Opcode, args: &[Type], m: &Module) -> SigResult {
             arity(args, 0)?;
             Sig::output(Type::val(TagSet::OBJECT))
         }
-        FrameStore(_) => {
+        FrameStore(_) | FrameSet(_) => {
             arity(args, 1)?;
             want(
                 matches!(
                     args[0],
                     Type::Val(_) | Type::I32(_) | Type::F64(_) | Type::Bool | Type::Obj(_)
                 ),
-                || "frame.store: expected a val, i32, f64, bool or obj".into(),
+                || "frame.store/frame.set: expected a val, i32, f64, bool or obj".into(),
             )?;
             Sig::none()
         }

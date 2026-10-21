@@ -147,10 +147,6 @@ impl<'s, 'a> Run<'s, 'a> {
             let ok = self.new_block();
             let obj = self.f.add_param(ok, MType::val(TagSet::OBJECT));
             let err = self.new_block();
-            // Retained as the exit has them (a dirty exit's are weakened).
-            let live = std::mem::replace(&mut self.st, st.clone());
-            self.retain_locals(&Opcode::ArgsObject);
-            self.st = live;
             let (t, _) = self.f.add_inst(
                 self.cur,
                 Opcode::ArgsObject,
@@ -202,9 +198,7 @@ impl<'s, 'a> Run<'s, 'a> {
             .insert(pc, u32::try_from(depth).unwrap());
         // A slot dead at the exit's pc goes as `const.val dead`: baseline
         // never reads it before writing it, so the frame keeps whatever
-        // (valid) value it has. A dead local overwritten after an earlier
-        // retaining store had its new value retained too (`retain_dead_overwrite`),
-        // so the frame never holds an object the local no longer does.
+        // (valid) value it has: the latest the local was assigned (`frame_set`).
         let live = self.s.live.get(&pc).cloned();
         let mut dead = None;
         let mut ops = vec![];
@@ -213,11 +207,7 @@ impl<'s, 'a> Run<'s, 'a> {
             let in_frame = self.write_through(i);
             let is_dead =
                 in_frame || x.ty == Ty::Dead || live.as_ref().is_some_and(|l| i < l.len() && !l[i]);
-            if is_dead && !in_frame && !self.no_release(i) && self.overwritten.contains(&i) {
-                // The frame may hold an object this local no longer does:
-                // the exit overwrites it (baseline would, before any read).
-                ops.push(self.release_undef());
-            } else if is_dead {
+            if is_dead {
                 let d = *dead.get_or_insert_with(|| self.const_val(ConstVal::Dead));
                 ops.push(d);
             } else {
