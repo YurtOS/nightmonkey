@@ -368,6 +368,12 @@ interpreter lane (`tests/jit-test-excludes.txt`):
   reads need, so the compiled tiers do not write an assignment to it there:
   an object assigned to such a formal is released once nothing else holds it,
   where baseline holds it until the formal is assigned again.
+- An object literal the optimizer scalar-replaces (it never escapes) does not
+  exist at run time, so a local assigned one holds nothing in its frame slot:
+  what only that object would have kept alive (a field's value nothing else
+  uses) is released as soon as nothing else holds it, where baseline holds it
+  until the local is assigned again. Keeping it would mean building the
+  object, which is what scalar replacement avoids.
 - An `arguments` element that the interpreter keeps alive after `delete` or a
   strict `defineProperty` may be released earlier. The specification allows it.
 
