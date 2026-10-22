@@ -158,3 +158,12 @@ prefer `search_graph`, `trace_path`, `get_code_snippet` and `query_graph` for co
 discovery. Use `rg` for literals, non-code files or insufficient graph results.
 Never copy local permission grants, credentials, personal memory commands or
 machine-specific MCP paths from another repository.
+
+## Worktree hygiene
+
+Every worktree's `target/` is tens of GB. `scripts/prune-worktree-targets.sh`
+lists idle ones (dry run). Run `--apply` only after the owner of every worktree
+it lists has confirmed, and pass any you cannot confirm with `--keep`. Delete
+only your own worktrees and `target/` directories, never another session's.
+The script is a copy of the one in `YurtOS/yurtos-kernel` (where its tests
+live); change it there first.
