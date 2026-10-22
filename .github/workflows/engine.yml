@@ -18,11 +18,10 @@ defaults:
   run:
     shell: bash
 
-# Resolve the supported engine branch once and record its exact SHA.
-# Every engine cache includes that revision; no neighboring build is reused.
+# The engine is built by YurtOS/yurt-firefox's scripts/build-engine.sh at the
+# commit pinned in engine/QUEUE_PIN: pinned Firefox tag + patch queue. It leaves
+# the patched tree in firefox/, which is also the jit-test/jstests source.
 env:
-  FIREFOX_REPO: YurtOS/firefox
-  FIREFOX_REF: yurt
   SM_OBJDIR: obj-nightmonkey-sm
 
 jobs:
@@ -43,62 +42,53 @@ jobs:
       - name: Prepare logs
         run: mkdir -p "$RUNNER_TEMP/nightmonkey-logs"
 
-      - name: Resolve the SpiderMonkey revision
-        id: smrev
+      - name: Free disk space
         run: |
-          sha=$(git ls-remote "https://github.com/$FIREFOX_REPO" "refs/heads/$FIREFOX_REF" | cut -f1)
-          if [ -z "$sha" ]; then
-            echo "::error::branch $FIREFOX_REF not found on https://github.com/$FIREFOX_REPO"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip python3-venv build-essential
+
+      - name: Read the engine queue pin
+        id: pin
+        run: |
+          pin=$(tr -d '[:space:]' < engine/QUEUE_PIN)
+          if ! [[ "$pin" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::engine/QUEUE_PIN is not a 40-hex commit SHA"
             exit 1
           fi
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "SpiderMonkey: $FIREFOX_REPO@$sha" | tee "$RUNNER_TEMP/nightmonkey-logs/engine.txt"
-          echo "SpiderMonkey: $FIREFOX_REPO@$sha" >> "$GITHUB_STEP_SUMMARY"
+          echo "sha=$pin" >> "$GITHUB_OUTPUT"
+          echo "Engine queue: YurtOS/yurt-firefox@$pin" | tee "$RUNNER_TEMP/nightmonkey-logs/engine.txt"
+          echo "Engine queue: YurtOS/yurt-firefox@$pin" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Cache the SpiderMonkey checkout
-        id: cache-src
-        uses: actions/cache@v4
+      - name: Check out the engine queue
+        uses: actions/checkout@v4
         with:
-          path: firefox
-          key: firefox-src-${{ steps.smrev.outputs.sha }}
+          repository: YurtOS/yurt-firefox
+          ref: ${{ steps.pin.outputs.sha }}
+          path: engine-src
+          persist-credentials: false
 
-      - name: Fetch SpiderMonkey (shallow)
-        if: steps.cache-src.outputs.cache-hit != 'true'
-        run: |
-          git init firefox
-          cd firefox
-          git remote add origin "https://github.com/$FIREFOX_REPO"
-          git fetch --depth 1 origin "${{ steps.smrev.outputs.sha }}"
-          git checkout --detach FETCH_HEAD
-
-      - name: Verify cached engine identity
+      - name: Verify engine queue identity
         env:
-          EXPECTED_SHA: ${{ steps.smrev.outputs.sha }}
-        run: test "$(git -C firefox rev-parse HEAD)" = "$EXPECTED_SHA"
+          EXPECTED_SHA: ${{ steps.pin.outputs.sha }}
+        run: test "$(git -C engine-src rev-parse HEAD)" = "$EXPECTED_SHA"
 
+      # ~/.mozbuild (toolchains, sysroot) is the cache that pays off. The
+      # Firefox tree and objdir are rebuilt from the pin on every run: the
+      # build script needs an empty workdir.
       - name: Cache the mach toolchains
         uses: actions/cache@v4
         with:
           path: ~/.mozbuild
-          key: mozbuild-${{ runner.os }}-${{ steps.smrev.outputs.sha }}
+          key: mozbuild-${{ runner.os }}-${{ steps.pin.outputs.sha }}
           restore-keys: mozbuild-${{ runner.os }}-
 
-      - name: Bootstrap SpiderMonkey
-        run: |
-          cd firefox
-          ./mach --no-interactive bootstrap --application-choice=js
-          # mach bootstrap only fetches host-target toolchains; the wasm32-wasi
-          # sysroot (crt1.o, libc) must be fetched explicitly into ~/.mozbuild.
-          cd ~/.mozbuild && "$GITHUB_WORKSPACE/firefox/mach" --log-no-times artifact toolchain --from-build sysroot-wasm32-wasi
-
-      - name: Cache the SpiderMonkey objdir
-        uses: actions/cache@v4
-        with:
-          path: firefox/${{ env.SM_OBJDIR }}
-          key: firefox-obj-v3-ubuntu-24.04-${{ steps.smrev.outputs.sha }}-${{ hashFiles('rust-toolchain.toml', 'spidermonkey/mozconfig', 'configs/**', 'scripts/build-spidermonkey.sh') }}
-
-      - name: Build SpiderMonkey
-        run: scripts/build-spidermonkey.sh firefox
+      - name: Build the engine (patched SpiderMonkey)
+        run: engine-src/scripts/build-engine.sh --workdir "$GITHUB_WORKSPACE/firefox"
 
       - uses: Swatinem/rust-cache@v2
         with:

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Build SpiderMonkey for NightMonkey: the wasm32-wasi JS shell with the
 # external compiler hook surface (spidermonkey/mozconfig), from a checkout of
-# the SpiderMonkey branch NightMonkey tracks.
+# the SpiderMonkey branch NightMonkey tracks. For local use: CI builds the
+# engine with YurtOS/yurt-firefox's scripts/build-engine.sh at the commit in
+# engine/QUEUE_PIN instead.
 #
 #   scripts/build-spidermonkey.sh <firefox-checkout>
 #
