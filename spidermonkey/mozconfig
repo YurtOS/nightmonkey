@@ -1,5 +1,3 @@
-# The canonical copy of this file is built from YurtOS/yurt-firefox (its
-# mozconfig); this copy is kept equal until the engine inputs move there.
 # SpiderMonkey for NightMonkey: the JS shell built for wasm32-wasi with the
 # external compiler hook surface, private-header export and the `jsshell`
 # static library enabled, and wizer snapshot support in the shell. Build from

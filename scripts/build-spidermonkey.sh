@@ -3,7 +3,8 @@
 # external compiler hook surface (spidermonkey/mozconfig), from a checkout of
 # the SpiderMonkey branch NightMonkey tracks. For local use: CI builds the
 # engine with YurtOS/yurt-firefox's scripts/build-engine.sh at the commit in
-# engine/QUEUE_PIN instead.
+# engine/QUEUE_PIN instead. spidermonkey/mozconfig stays byte-identical to the
+# copy built from YurtOS/yurt-firefox (its drift check enforces this).
 #
 #   scripts/build-spidermonkey.sh <firefox-checkout>
 #
