@@ -81,6 +81,8 @@ jobs:
           for script in scripts/*.sh scripts/*.sh.in; do
             bash -n "$script"
           done
+      - name: Check the engine source pin
+        run: scripts/check-engine-source.sh
       - name: Test opcode generation and regression harness
         run: python3 -m unittest discover -s scripts/tests -v
 
