@@ -192,6 +192,41 @@ class CheckEngineSourceTests(unittest.TestCase):
         workflow = self.mutate(anchor, "      - name: Adjust\n        run: git -C engine-src checkout -q HEAD~1\n\n" + anchor)
         self.assert_rejected(self.check(workflow), "Adjust")
 
+    # Round 3: key order inside a step, and plain diagnostics.
+    def first_step(self, text):
+        return self.mutate("    steps:\n", "    steps:\n" + text)
+
+    def test_step_with_run_before_name_is_rejected(self):
+        workflow = self.first_step("      - run: scripts/build-spidermonkey.sh firefox\n"
+                                   "        name: Rebuild engine\n")
+        self.assert_rejected(self.check(workflow), "Rebuild engine")
+
+    def test_unnamed_step_touching_engine_src_is_rejected(self):
+        workflow = self.first_step("      - run: git -C engine-src checkout -q HEAD~1\n")
+        self.assert_rejected(self.check(workflow), "git -C engine-src checkout")
+
+    def test_plain_diagnostics_are_accepted(self):
+        df = "          df -h /\n"
+        for label, workflow in (
+            ("echo mach", self.mutate(df, df + '          echo "Disk space ready for mach"\n')),
+            ("echo engine-src", self.mutate(df, df + "          echo 'engine-src holds the queue checkout'\n")),
+            ("printf", self.mutate(df, df + '          printf "%s\\n" "build-engine.sh runs next"\n')),
+            ("one-line run", self.first_step('      - name: Note\n        run: echo "mach toolchains next"\n\n')),
+        ):
+            with self.subTest(case=label):
+                result = self.check(workflow)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_echo_that_acts_on_engine_src_is_rejected(self):
+        df = "          df -h /\n"
+        for extra in ("echo x > engine-src/mozconfig",
+                      'echo "$(cd engine-src && git log -1)"',
+                      "echo build | tee engine-src/x",
+                      "echo ok; ./mach build"):
+            with self.subTest(extra=extra):
+                workflow = self.mutate(df, df + "          " + extra + "\n")
+                self.assert_rejected(self.check(workflow), "Free disk space")
+
     def test_missing_pin_file_is_rejected(self):
         self.assert_rejected(self.check(pin=None), "engine/QUEUE_PIN is missing")
 
