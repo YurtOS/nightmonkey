@@ -27,12 +27,12 @@ jobs:
       matrix:
         check: [fmt, check, test, clippy]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust from rust-toolchain.toml
         run: rustup show
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: ${{ matrix.check }}
       - name: Check formatting
@@ -52,7 +52,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Lint workflows
@@ -71,7 +71,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust from rust-toolchain.toml
@@ -81,6 +81,8 @@ jobs:
           for script in scripts/*.sh scripts/*.sh.in; do
             bash -n "$script"
           done
+      - name: Check the engine source pin
+        run: scripts/check-engine-source.sh
       - name: Test opcode generation and regression harness
         run: python3 -m unittest discover -s scripts/tests -v
 

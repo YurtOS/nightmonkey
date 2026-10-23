@@ -37,16 +37,26 @@ checks. Check dependency MSRVs when updating the lockfile. Use `--locked` for
 reproducible host Rust commands.
 
 ```sh
+cd /path/to/nightmonkey
 cargo build --workspace --locked
-scripts/build-spidermonkey.sh /path/to/firefox
+git clone https://github.com/YurtOS/yurt-firefox /path/to/yurt-firefox
+git -C /path/to/yurt-firefox checkout "$(cat /path/to/nightmonkey/engine/QUEUE_PIN)"
+/path/to/yurt-firefox/scripts/build-engine.sh --workdir /path/to/firefox
 cmake -S . -B build -DSPIDERMONKEY_DIST=/path/to/firefox/obj-nightmonkey-sm/dist
 cmake --build build
 ```
 
-Integrated builds need the patched SpiderMonkey tree, its private headers and
-libraries, the WASI sysroot, CMake and the `wasm32-wasip1` Rust target. Consult
-`.github/workflows/engine.yml` for bootstrap steps and the engine branch. That branch
-is resolved to a SHA per CI run; record the resolved revision when reproducing.
+The engine is the pinned Firefox tag plus YurtOS/yurt-firefox's patch queue,
+built by its `scripts/build-engine.sh` at the commit in `engine/QUEUE_PIN`
+(Linux only for a full build; `--dry-run` only fetches and patches the tree,
+and `scripts/build-spidermonkey.sh /path/to/firefox` rebuilds it). The patched
+tree is also the jit-test/jstests source. Integrated builds need its private
+headers and libraries, the WASI sysroot, CMake and the `wasm32-wasip1` Rust
+target; `.github/workflows/engine.yml` has the bootstrap steps. Record the
+`build-manifest.json` build-engine.sh writes next to the tree when reproducing;
+the script refuses to overwrite one, so move it aside before building again.
+CI also checks that the pin is on yurt-firefox `main`; this local recipe does
+not (`git -C /path/to/yurt-firefox merge-base --is-ancestor HEAD origin/main`).
 Do not assume a neighboring repository's engine build is ABI-compatible.
 
 ## Verification

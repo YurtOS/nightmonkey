@@ -98,18 +98,32 @@ which adds the per-object/per-script words and the hook table the tier plugs
 into, exports the engine's private headers, and builds the shell as a static
 library (`docs/INTEGRATION.md`).
 
-Step 1 -- build SpiderMonkey (wasm32-wasi, wizer-capable shell, hooks on):
+Step 1 -- build SpiderMonkey (wasm32-wasi, wizer-capable shell, hooks on).
+The engine is the pinned Firefox tag plus the patch queue in
+[YurtOS/yurt-firefox](https://github.com/YurtOS/yurt-firefox), at the commit in
+`engine/QUEUE_PIN`:
 
 ```
-scripts/build-spidermonkey.sh /path/to/firefox
-# -> /path/to/firefox/obj-nightmonkey-sm/dist
+git clone https://github.com/YurtOS/yurt-firefox /path/to/yurt-firefox
+git -C /path/to/yurt-firefox checkout "$(cat /path/to/nightmonkey/engine/QUEUE_PIN)"
+/path/to/yurt-firefox/scripts/build-engine.sh --workdir /path/to/firefox
+# -> /path/to/firefox/obj-nightmonkey-sm/dist, /path/to/build-manifest.json
 ```
 
-This is `MOZCONFIG=spidermonkey/mozconfig ./mach build` in the SpiderMonkey
-checkout. `dist/include-private/` mirrors `js/src` (source and generated
-headers) and records the compile flags libjs was built with in
-`js-build-config.json`; `dist/lib/` holds `libjsshell.a`, `libjs_static.a`,
-`libjsrust.a` and `libpure_virtual.a`.
+build-engine.sh fetches the tag, applies the queue, bootstraps the toolchains
+and runs `./mach build` with the queue's `mozconfig` (identical to
+`spidermonkey/mozconfig`; CI checks this). A full build is Linux only;
+`--dry-run` stops after patching the tree, and
+`scripts/build-spidermonkey.sh /path/to/firefox` rebuilds a patched tree with
+`MOZCONFIG=spidermonkey/mozconfig ./mach build`. build-engine.sh refuses to
+overwrite an existing `build-manifest.json`; move it aside before building
+again. CI also checks that the pin is on yurt-firefox `main`; this recipe does
+not.
+
+`dist/include-private/` mirrors `js/src` (source and generated headers) and
+records the compile flags libjs was built with in `js-build-config.json`;
+`dist/lib/` holds `libjsshell.a`, `libjs_static.a`, `libjsrust.a` and
+`libpure_virtual.a`.
 
 Step 2 -- build NightMonkey against it:
 
@@ -169,14 +183,15 @@ trees and runs local regressions and jit-tests in both AOT and interpreter
 lanes. Full jstests run nightly at 02:23 UTC and through manual dispatch of
 `Full jstests`, with separate jobs for the two lanes. Existing exclusion
 lists apply; the shipping snapshot flow is still a manual check. Execution
-logs and the exact resolved SpiderMonkey revision are retained for seven days.
+logs, the engine queue pin and the engine's `build-manifest.json` are retained
+for seven days.
 
 ## Prerequisites
 
-- A SpiderMonkey checkout on the tracked branch, bootstrapped for the JS
-  shell (`./mach --no-interactive bootstrap --application-choice=js`) plus
-  the wasm32-wasi sysroot in `~/.mozbuild` (see `.github/workflows/engine.yml`
-  for the exact steps).
+- The patched SpiderMonkey tree from YurtOS/yurt-firefox at `engine/QUEUE_PIN`
+  (Step 1 above). Its `scripts/build-engine.sh` bootstraps the JS shell
+  toolchains and the wasm32-wasi sysroot into `~/.mozbuild`; see
+  `.github/workflows/engine.yml` for the CI steps.
 - Rust 1.98.1 (pinned in `rust-toolchain.toml`) with the `wasm32-wasip1` target
   (`rustup target add wasm32-wasip1`), CMake 3.20+.
 - `wasmtime` on `$PATH` or at `$HOME/bin/wasmtime`, to run compiled modules.
@@ -226,7 +241,7 @@ runner's preopen root (`--dir /`). `--cache-dir` caches the compiled shell.
 Everything after `--` goes to the JS shell. Omitting `--night-inprocess` runs
 the same binary as a plain interpreter -- the interpreter lane, the differential reference.
 
-The jit-test suite in both lanes, from the SpiderMonkey checkout's harness:
+The jit-test suite in both lanes, from the patched tree's harness:
 
 ```
 scripts/run-jit-tests.sh /path/to/firefox build -- -j16
