@@ -7,10 +7,12 @@
 # verify it is on yurt-firefox main, compare the mozconfigs, build) must each
 # appear once, in that order, with exactly the text in REQUIRED below: no added
 # `if:`, `continue-on-error:`, refspec or command. Changing one of them means
-# changing this script too. No other step may touch engine-src or build the
-# engine, the job may not carry `if:` or `continue-on-error:`, every action is
-# pinned to a full commit SHA, nothing references the YurtOS/firefox fork, and
-# engine/QUEUE_PIN is exactly one line of 40 lowercase hex digits.
+# changing this script too. No other step may reference engine-src, mach,
+# build-engine.sh or build-spidermonkey.sh in any of its keys, whatever their
+# order, except in a plain echo/printf line (no redirection, pipe, chaining or
+# substitution). The job may not carry `if:` or `continue-on-error:`, every
+# action is pinned to a full commit SHA, nothing references the YurtOS/firefox
+# fork, and engine/QUEUE_PIN is exactly one line of 40 lowercase hex digits.
 #
 #   scripts/check-engine-source.sh
 set -euo pipefail
@@ -117,8 +119,23 @@ if not steps:
 
 
 def name_of(step):
-    m = re.match(r"^- name: (.*)$", step.split("\n")[0])
+    """The step's name: key, wherever it is among the keys; else its first line."""
+    m = re.search(r"^(?:- |  )name: (.*)$", step, re.M)
     return m.group(1) if m else step.split("\n")[0]
+
+
+def acting_lines(step):
+    """The step's lines minus its name: key and plain echo/printf lines (no
+    redirection, pipe, chaining or substitution), which only print text."""
+    out = []
+    for line in step.split("\n"):
+        if re.match(r"^(?:- |  )name: ", line):
+            continue
+        t = re.sub(r"^run:\s*", "", re.sub(r"^(?:- |\s+)", "", line))
+        if re.match(r"(?:echo|printf)\b", t) and not re.search(r"[<>|;&`]|\$\(", t):
+            continue
+        out.append(line)
+    return out
 
 
 for step in steps:
@@ -144,8 +161,11 @@ required_names = {name_of(text.strip("\n")) for _, text in REQUIRED}
 for step in steps:
     if name_of(step) in required_names:
         continue
-    if re.search(r"engine-src|\bmach\b|build-engine\.sh|build-spidermonkey\.sh", step.split("\n", 1)[-1]):
-        err("step '%s' touches engine-src or builds the engine; only the required steps may" % name_of(step))
+    hits = [l.strip() for l in acting_lines(step)
+            if re.search(r"engine-src|\bmach\b|build-engine\.sh|build-spidermonkey\.sh", l)]
+    if hits:
+        err("step '%s' references engine-src, mach, build-engine.sh or build-spidermonkey.sh "
+            "outside a plain echo/printf (%s); only the required steps may" % (name_of(step), hits[0]))
 
 try:
     data = open(pin_file, "rb").read()
