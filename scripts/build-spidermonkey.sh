@@ -10,12 +10,12 @@
 #
 #   scripts/build-spidermonkey.sh <patched-firefox-tree>
 #
-# Produces <firefox-checkout>/obj-nightmonkey-sm/dist, the SPIDERMONKEY_DIST
+# Produces <patched-firefox-tree>/obj-nightmonkey-sm/dist, the SPIDERMONKEY_DIST
 # the CMake build consumes.
 set -euo pipefail
 
 if [ $# -ne 1 ]; then
-  echo "usage: $0 <firefox-checkout>" >&2
+  echo "usage: $0 <patched-firefox-tree>" >&2
   exit 2
 fi
 firefox=$(cd "$1" && pwd)

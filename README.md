@@ -105,7 +105,7 @@ The engine is the pinned Firefox tag plus the patch queue in
 
 ```
 git clone https://github.com/YurtOS/yurt-firefox /path/to/yurt-firefox
-git -C /path/to/yurt-firefox checkout "$(cat engine/QUEUE_PIN)"
+git -C /path/to/yurt-firefox checkout "$(cat /path/to/nightmonkey/engine/QUEUE_PIN)"
 /path/to/yurt-firefox/scripts/build-engine.sh --workdir /path/to/firefox
 # -> /path/to/firefox/obj-nightmonkey-sm/dist, /path/to/build-manifest.json
 ```
@@ -115,11 +115,15 @@ and runs `./mach build` with the queue's `mozconfig` (identical to
 `spidermonkey/mozconfig`; CI checks this). A full build is Linux only;
 `--dry-run` stops after patching the tree, and
 `scripts/build-spidermonkey.sh /path/to/firefox` rebuilds a patched tree with
-`MOZCONFIG=spidermonkey/mozconfig ./mach build`.
+`MOZCONFIG=spidermonkey/mozconfig ./mach build`. build-engine.sh refuses to
+overwrite an existing `build-manifest.json`; move it aside before building
+again. CI also checks that the pin is on yurt-firefox `main`; this recipe does
+not.
 
-`dist/include-private/` mirrors `js/src` (source and generated headers) and records the compile flags libjs was built with in
-`js-build-config.json`; `dist/lib/` holds `libjsshell.a`, `libjs_static.a`,
-`libjsrust.a` and `libpure_virtual.a`.
+`dist/include-private/` mirrors `js/src` (source and generated headers) and
+records the compile flags libjs was built with in `js-build-config.json`;
+`dist/lib/` holds `libjsshell.a`, `libjs_static.a`, `libjsrust.a` and
+`libpure_virtual.a`.
 
 Step 2 -- build NightMonkey against it:
 
