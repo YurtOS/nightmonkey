@@ -21,7 +21,7 @@ class CheckEngineSourceTests(unittest.TestCase):
         (self.root / "engine").mkdir()
         self.workflow = (REPO / ".github/workflows/engine.yml").read_text()
 
-    def check(self, workflow=None, pin=(PIN + "\n").encode()):
+    def check(self, workflow: str | None = None, pin: bytes | None = (PIN + "\n").encode()):
         (self.root / ".github/workflows/engine.yml").write_text(self.workflow if workflow is None else workflow)
         pin_file = self.root / "engine/QUEUE_PIN"
         if pin is None:
@@ -36,6 +36,10 @@ class CheckEngineSourceTests(unittest.TestCase):
     def mutate(self, old, new, count=1):
         self.assertEqual(self.workflow.count(old), count, f"fixture text not found once: {old!r}")
         return self.workflow.replace(old, new)
+
+    def add_to_step(self, name, line):
+        """Insert a key line right after the step's `- name:` line."""
+        return self.mutate(f"      - name: {name}\n", f"      - name: {name}\n        {line}\n")
 
     def assert_rejected(self, result, reason):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -133,6 +137,60 @@ class CheckEngineSourceTests(unittest.TestCase):
         ):
             with self.subTest(pin=label):
                 self.assert_rejected(self.check(pin=pin), "engine/QUEUE_PIN")
+
+    # Round 2: a check step switched off, made non-blocking or rewritten.
+    STEPS = {
+        "pin": "Read the engine queue pin",
+        "checkout": "Check out the engine queue",
+        "ancestry": "Verify the engine queue pin is on yurt-firefox main",
+        "mozconfig": "Check spidermonkey/mozconfig matches the engine queue",
+        "build": "Build the engine (patched SpiderMonkey)",
+    }
+
+    def test_disabled_or_non_blocking_steps_are_rejected(self):
+        for step, name in self.STEPS.items():
+            for line in ("if: false", "if: ${{ github.event_name == 'never' }}", "continue-on-error: true"):
+                with self.subTest(step=step, line=line):
+                    self.assert_rejected(self.check(self.add_to_step(name, line)), name)
+
+    def test_job_level_if_or_continue_on_error_is_rejected(self):
+        for line in ("    if: false\n", "    continue-on-error: true\n"):
+            with self.subTest(line=line):
+                workflow = self.mutate("    runs-on: ubuntu-24.04\n", "    runs-on: ubuntu-24.04\n" + line)
+                self.assert_rejected(self.check(workflow), "job-level " + line.split(":")[0].strip())
+
+    def test_fetch_from_another_remote_is_rejected(self):
+        workflow = self.mutate("git -C engine-src fetch --no-tags origin +refs",
+                               "git -C engine-src fetch --no-tags https://github.com/evil/yurt-firefox +refs")
+        self.assert_rejected(self.check(workflow), self.STEPS["ancestry"])
+
+    def test_extra_refspec_is_rejected(self):
+        workflow = self.mutate("--no-tags origin +refs/heads/main:refs/remotes/origin/main",
+                               "--no-tags origin +refs/heads/evil:refs/remotes/origin/main +refs/heads/main:refs/remotes/origin/main")
+        self.assert_rejected(self.check(workflow), self.STEPS["ancestry"])
+
+    def test_lines_before_the_ancestry_check_are_rejected(self):
+        line = next(l for l in self.workflow.splitlines() if "merge-base --is-ancestor" in l)
+        indent = line[:len(line) - len(line.lstrip())]
+        for extra in ("exit 0", "git -C engine-src update-ref refs/remotes/origin/main HEAD"):
+            with self.subTest(extra=extra):
+                workflow = self.mutate(line, indent + extra + "\n" + line)
+                self.assert_rejected(self.check(workflow), self.STEPS["ancestry"])
+
+    def test_second_sha_output_is_rejected(self):
+        line = '          echo "sha=$pin" >> "$GITHUB_OUTPUT"\n'
+        workflow = self.mutate(line, line + '          echo "sha=0123456789abcdef0123456789abcdef01234567" >> "$GITHUB_OUTPUT"\n')
+        self.assert_rejected(self.check(workflow), self.STEPS["pin"])
+
+    def test_extra_engine_build_step_is_rejected(self):
+        anchor = "      - uses: Swatinem/rust-cache@"
+        workflow = self.mutate(anchor, "      - name: Rebuild\n        run: (cd firefox && ./mach build)\n\n" + anchor)
+        self.assert_rejected(self.check(workflow), "Rebuild")
+
+    def test_other_step_touching_engine_src_is_rejected(self):
+        anchor = "      - name: Build the engine (patched SpiderMonkey)\n"
+        workflow = self.mutate(anchor, "      - name: Adjust\n        run: git -C engine-src checkout -q HEAD~1\n\n" + anchor)
+        self.assert_rejected(self.check(workflow), "Adjust")
 
     def test_missing_pin_file_is_rejected(self):
         self.assert_rejected(self.check(pin=None), "engine/QUEUE_PIN is missing")
