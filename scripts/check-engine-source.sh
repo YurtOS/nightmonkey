@@ -7,12 +7,17 @@
 # verify it is on yurt-firefox main, compare the mozconfigs, build) must each
 # appear once, in that order, with exactly the text in REQUIRED below: no added
 # `if:`, `continue-on-error:`, refspec or command. Changing one of them means
-# changing this script too. No other step may reference engine-src, mach,
+# changing this script too. No other step may mention engine-src, mach,
 # build-engine.sh or build-spidermonkey.sh in any of its keys, whatever their
-# order, except in a plain echo/printf line (no redirection, pipe, chaining or
-# substitution). The job may not carry `if:` or `continue-on-error:`, every
-# action is pinned to a full commit SHA, nothing references the YurtOS/firefox
-# fork, and engine/QUEUE_PIN is exactly one line of 40 lowercase hex digits.
+# order, not even in echo text (the rule is deliberately conservative). The job
+# may not carry `if:` or `continue-on-error:`, every action is pinned to a full
+# commit SHA, nothing references the YurtOS/firefox fork, and engine/QUEUE_PIN is
+# exactly one line of 40 lowercase hex digits.
+#
+# This blocks accidental regressions (a check switched off, an unpinned build
+# slipped in), not deliberate sabotage by someone who can edit this repository,
+# guard included: an obfuscated name (variable indirection, YAML escapes,
+# GITHUB_ENV) is out of its reach.
 #
 #   scripts/check-engine-source.sh
 set -euo pipefail
@@ -124,18 +129,10 @@ def name_of(step):
     return m.group(1) if m else step.split("\n")[0]
 
 
-def acting_lines(step):
-    """The step's lines minus its name: key and plain echo/printf lines (no
-    redirection, pipe, chaining or substitution), which only print text."""
-    out = []
-    for line in step.split("\n"):
-        if re.match(r"^(?:- |  )name: ", line):
-            continue
-        t = re.sub(r"^run:\s*", "", re.sub(r"^(?:- |\s+)", "", line))
-        if re.match(r"(?:echo|printf)\b", t) and not re.search(r"[<>|;&`]|\$\(", t):
-            continue
-        out.append(line)
-    return out
+def body_lines(step):
+    """Every line of the step except its key-level name: line, whatever the key
+    order: run, env, with and any other key are all searched."""
+    return [l for l in step.split("\n") if not re.match(r"^(?:- |  )name: ", l)]
 
 
 for step in steps:
@@ -161,11 +158,12 @@ required_names = {name_of(text.strip("\n")) for _, text in REQUIRED}
 for step in steps:
     if name_of(step) in required_names:
         continue
-    hits = [l.strip() for l in acting_lines(step)
+    hits = [l.strip() for l in body_lines(step)
             if re.search(r"engine-src|\bmach\b|build-engine\.sh|build-spidermonkey\.sh", l)]
     if hits:
-        err("step '%s' references engine-src, mach, build-engine.sh or build-spidermonkey.sh "
-            "outside a plain echo/printf (%s); only the required steps may" % (name_of(step), hits[0]))
+        err("step '%s' mentions engine-src, mach, build-engine.sh or build-spidermonkey.sh (%s); "
+            "only the required steps may, even in echo text: move the text out of non-critical "
+            "steps or update this guard" % (name_of(step), hits[0]))
 
 try:
     data = open(pin_file, "rb").read()
