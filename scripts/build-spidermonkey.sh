@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Build SpiderMonkey for NightMonkey: the wasm32-wasi JS shell with the
-# external compiler hook surface (spidermonkey/mozconfig), from a checkout of
-# the SpiderMonkey branch NightMonkey tracks. For local use: CI builds the
-# engine with YurtOS/yurt-firefox's scripts/build-engine.sh at the commit in
-# engine/QUEUE_PIN instead. spidermonkey/mozconfig stays byte-identical to the
-# copy built from YurtOS/yurt-firefox (its drift check enforces this).
+# Rebuild SpiderMonkey for NightMonkey (the wasm32-wasi JS shell with the
+# external compiler hook surface, spidermonkey/mozconfig) in an existing patched
+# tree. The tree comes from YurtOS/yurt-firefox at the commit in
+# engine/QUEUE_PIN: its scripts/build-engine.sh fetches the pinned Firefox tag
+# and applies the patch queue (--dry-run stops there; without it, it also
+# bootstraps the toolchains and builds, as CI does, and this script is only
+# needed to rebuild after local edits). CI fails unless spidermonkey/mozconfig
+# is byte-identical to yurt-firefox's mozconfig at that commit.
 #
-#   scripts/build-spidermonkey.sh <firefox-checkout>
+#   scripts/build-spidermonkey.sh <patched-firefox-tree>
 #
 # Produces <firefox-checkout>/obj-nightmonkey-sm/dist, the SPIDERMONKEY_DIST
 # the CMake build consumes.
