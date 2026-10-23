@@ -205,7 +205,12 @@ class CheckEngineSourceTests(unittest.TestCase):
         workflow = self.first_step("      - run: git -C engine-src checkout -q HEAD~1\n")
         self.assert_rejected(self.check(workflow), "git -C engine-src checkout")
 
-    def test_plain_diagnostics_are_accepted(self):
+    # The guard is conservative: any mention of engine-src, mach, build-engine.sh
+    # or build-spidermonkey.sh outside the required steps is rejected, plain
+    # echo/printf text included (an exemption for "printing" lines was bypassed
+    # by continuations, folded scalars, heredocs and YAML data). Such text goes
+    # in a required step or out of the workflow.
+    def test_plain_diagnostics_are_rejected_conservatively(self):
         df = "          df -h /\n"
         for label, workflow in (
             ("echo mach", self.mutate(df, df + '          echo "Disk space ready for mach"\n')),
@@ -214,8 +219,7 @@ class CheckEngineSourceTests(unittest.TestCase):
             ("one-line run", self.first_step('      - name: Note\n        run: echo "mach toolchains next"\n\n')),
         ):
             with self.subTest(case=label):
-                result = self.check(workflow)
-                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assert_rejected(self.check(workflow), "move the text out of non-critical steps")
 
     def test_echo_that_acts_on_engine_src_is_rejected(self):
         df = "          df -h /\n"
@@ -226,6 +230,33 @@ class CheckEngineSourceTests(unittest.TestCase):
             with self.subTest(extra=extra):
                 workflow = self.mutate(df, df + "          " + extra + "\n")
                 self.assert_rejected(self.check(workflow), "Free disk space")
+
+    # Round 4: the printing-line exemption's bypasses, now caught by the plain rule.
+    def test_backslash_continuation_onto_echo_is_rejected(self):
+        df = "          df -h /\n"
+        workflow = self.mutate(df, df + "          rm -rf \\\n          echo engine-src\n")
+        self.assert_rejected(self.check(workflow), "Free disk space")
+
+    def test_folded_scalar_is_rejected(self):
+        workflow = self.first_step("      - name: Fold\n        run: >\n          rm -rf\n          echo engine-src\n\n")
+        self.assert_rejected(self.check(workflow), "Fold")
+
+    def test_heredoc_line_starting_with_echo_is_rejected(self):
+        workflow = self.first_step("      - name: Py\n        run: |\n          python3 - <<'PYX'\n"
+                                   "          echo = __import__(\"shutil\").rmtree(\"engine-src\")\n"
+                                   "          PYX\n\n")
+        self.assert_rejected(self.check(workflow), "Py")
+
+    def test_yaml_data_named_echo_is_rejected(self):
+        checkout = next(l for l in self.workflow.splitlines() if "uses: actions/checkout@" in l).split("uses: ")[1]
+        for label, step in (
+            ("env key", "      - name: Env\n        env:\n          echo: engine-src\n"
+                        "        run: rm -rf \"${{ env.echo }}\"\n\n"),
+            ("with path", "      - name: Extra checkout\n        uses: " + checkout + "\n        with:\n"
+                          "          path: >-\n            echo/../engine-src\n\n"),
+        ):
+            with self.subTest(case=label):
+                self.assert_rejected(self.check(self.first_step(step)), step.split("name: ")[1].split("\n")[0])
 
     def test_missing_pin_file_is_rejected(self):
         self.assert_rejected(self.check(pin=None), "engine/QUEUE_PIN is missing")
