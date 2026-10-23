@@ -31,7 +31,7 @@ jobs:
     env:
       CI_LANE: ${{ inputs.lane }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust from rust-toolchain.toml
@@ -55,7 +55,7 @@ jobs:
       - name: Read the engine queue pin
         id: pin
         run: |
-          pin=$(tr -d '[:space:]' < engine/QUEUE_PIN)
+          pin=$(cat engine/QUEUE_PIN)
           if ! [[ "$pin" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::engine/QUEUE_PIN is not a 40-hex commit SHA"
             exit 1
@@ -65,32 +65,46 @@ jobs:
           echo "Engine queue: YurtOS/yurt-firefox@$pin" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Check out the engine queue
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: YurtOS/yurt-firefox
           ref: ${{ steps.pin.outputs.sha }}
           path: engine-src
+          fetch-depth: 0
           persist-credentials: false
 
-      - name: Verify engine queue identity
+      # GitHub serves any commit in the repository's fork network, and any
+      # pull request head, by SHA. Build only a pin that has landed on
+      # yurt-firefox main.
+      - name: Verify the engine queue pin is on yurt-firefox main
         env:
-          EXPECTED_SHA: ${{ steps.pin.outputs.sha }}
-        run: test "$(git -C engine-src rev-parse HEAD)" = "$EXPECTED_SHA"
+          PIN: ${{ steps.pin.outputs.sha }}
+        run: |
+          git -C engine-src fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          test "$(git -C engine-src rev-parse HEAD)" = "$PIN" || { echo "::error::engine-src is not at $PIN"; exit 1; }
+          git -C engine-src merge-base --is-ancestor "$PIN" origin/main || { echo "::error::engine/QUEUE_PIN $PIN is not on YurtOS/yurt-firefox main"; exit 1; }
+
+      # CI builds with the queue's mozconfig; local builds use spidermonkey/mozconfig.
+      - name: Check spidermonkey/mozconfig matches the engine queue
+        run: |
+          cmp spidermonkey/mozconfig engine-src/mozconfig || { echo "::error::spidermonkey/mozconfig differs from YurtOS/yurt-firefox's mozconfig at engine/QUEUE_PIN: change it there and bump engine/QUEUE_PIN"; exit 1; }
 
       # ~/.mozbuild (toolchains, sysroot) is the cache that pays off. The
       # Firefox tree and objdir are rebuilt from the pin on every run: the
       # build script needs an empty workdir.
       - name: Cache the mach toolchains
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.mozbuild
           key: mozbuild-${{ runner.os }}-${{ steps.pin.outputs.sha }}
           restore-keys: mozbuild-${{ runner.os }}-
 
       - name: Build the engine (patched SpiderMonkey)
-        run: engine-src/scripts/build-engine.sh --workdir "$GITHUB_WORKSPACE/firefox"
+        run: |
+          engine-src/scripts/build-engine.sh --workdir "$GITHUB_WORKSPACE/firefox"
+          cp "$GITHUB_WORKSPACE/build-manifest.json" "$RUNNER_TEMP/nightmonkey-logs/"
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: . -> build/cargo
           key: engine-ubuntu-24.04
@@ -138,7 +152,7 @@ jobs:
 
       - name: Upload execution logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nightmonkey-execution-${{ inputs.lane }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/nightmonkey-logs
