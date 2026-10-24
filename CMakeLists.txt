@@ -37,6 +37,12 @@ set(NIGHT_STACK_SIZE "67108864" CACHE STRING "linear-memory stack size of the sh
 set(NIGHT_CARGO_TARGET_DIR "" CACHE PATH "cargo target directory (default: <build>/cargo; share it between build trees)")
 set(NIGHT_ENGINE_VERSION "ff147" CACHE STRING
     "engine version the compiler is built for: a checked-in opcode table compiler/src/opcodes/<version>.rs and the cargo feature of the same name")
+# A packaged engine's config names a bare clang/clang++ and no sysroot; the
+# consumer provides both. When set, these replace the config's compilers and
+# its sysroot option.
+set(NIGHT_TOOLCHAIN_ROOT "" CACHE PATH
+    "extracted clang toolchain: bin/clang and bin/clang++ (with their resource dir and wasm-ld) replace the engine config's compilers")
+set(NIGHT_SYSROOT "" CACHE PATH "WASI sysroot that replaces the engine config's sysroot option")
 
 if(NOT SPIDERMONKEY_DIST)
   message(FATAL_ERROR "SPIDERMONKEY_DIST is required: the dist/ directory of a SpiderMonkey build made with --enable-external-compiler-hooks (see spidermonkey/mozconfig)")
@@ -62,7 +68,8 @@ function(sm_json_list out key)
 endfunction()
 
 # The compiler command lines libjs was built with: the executable plus the
-# sysroot, standard and target flags.
+# sysroot, standard and target flags. Only the C compiler's executable is
+# used (there are no C sources).
 string(JSON SM_CXX_CMD GET "${SM_JSON}" cxx)
 string(JSON SM_CC_CMD GET "${SM_JSON}" cc)
 separate_arguments(SM_CXX_CMD NATIVE_COMMAND "${SM_CXX_CMD}")
@@ -70,7 +77,29 @@ separate_arguments(SM_CC_CMD NATIVE_COMMAND "${SM_CC_CMD}")
 list(GET SM_CXX_CMD 0 SM_CXX)
 list(GET SM_CC_CMD 0 SM_CC)
 list(REMOVE_AT SM_CXX_CMD 0)
-list(REMOVE_AT SM_CC_CMD 0)
+if(NIGHT_TOOLCHAIN_ROOT)
+  get_filename_component(NIGHT_TOOLCHAIN_ROOT "${NIGHT_TOOLCHAIN_ROOT}" ABSOLUTE)
+  set(SM_CC "${NIGHT_TOOLCHAIN_ROOT}/bin/clang")
+  set(SM_CXX "${NIGHT_TOOLCHAIN_ROOT}/bin/clang++")
+elseif(NOT IS_ABSOLUTE "${SM_CXX}")
+  # Never a compiler from PATH: it would not match the engine's.
+  message(FATAL_ERROR "${SM_CONFIG_JSON} names the compiler ${SM_CXX}, not an absolute path (a packaged engine): set NIGHT_TOOLCHAIN_ROOT to the clang toolchain it was built with")
+endif()
+if(NIGHT_SYSROOT)
+  get_filename_component(NIGHT_SYSROOT "${NIGHT_SYSROOT}" ABSOLUTE)
+  set(flags)
+  set(skip_next FALSE)
+  foreach(arg IN LISTS SM_CXX_CMD)
+    if(skip_next)
+      set(skip_next FALSE)
+    elseif(arg STREQUAL "--sysroot" OR arg STREQUAL "-isysroot")
+      set(skip_next TRUE)
+    elseif(NOT arg MATCHES "^--sysroot=")
+      list(APPEND flags "${arg}")
+    endif()
+  endforeach()
+  set(SM_CXX_CMD "--sysroot=${NIGHT_SYSROOT}" ${flags})
+endif()
 sm_json_list(SM_OS_CXXFLAGS os_cxxflags)
 sm_json_list(SM_OPTIMIZE_FLAGS optimize_flags)
 sm_json_list(SM_DEBUG_FLAGS debug_flags)

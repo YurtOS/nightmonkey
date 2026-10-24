@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # CI lane policy: run every requested lane, retaining each lane's status/log.
 #   scripts/ci-suite.sh <local|jit|jstests> <aot|interpreter|both>
+# NIGHT_FIREFOX_TESTS names the jit/jstests source tree (default: ./firefox).
 # Requires GNU timeout (provided by Ubuntu coreutils).
 set -euo pipefail
 
@@ -10,10 +11,13 @@ if [ "$#" -ne 2 ]; then
 fi
 suite=$1
 here=$(cd "$(dirname "$0")/.." && pwd)
+# The tree holding js/src/jit-test and js/src/tests: a Firefox checkout or an
+# extracted test-source bundle.
+tests=${NIGHT_FIREFOX_TESTS:-$here/firefox}
 case "$suite" in
   local) seconds=1800; harness=("$here/scripts/run-night-tests.sh" "$here/build") ;;
-  jit) seconds=3600; harness=("$here/scripts/run-jit-tests.sh" "$here/firefox" "$here/build") ;;
-  jstests) seconds=7200; harness=("$here/scripts/run-jstests.sh" "$here/firefox" "$here/build") ;;
+  jit) seconds=3600; harness=("$here/scripts/run-jit-tests.sh" "$tests" "$here/build") ;;
+  jstests) seconds=7200; harness=("$here/scripts/run-jstests.sh" "$tests" "$here/build") ;;
   *) echo "unknown suite: $suite" >&2; exit 2 ;;
 esac
 case "$2" in
