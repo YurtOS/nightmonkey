@@ -60,7 +60,8 @@ not (`git -C /path/to/yurt-firefox merge-base --is-ancestor HEAD origin/main`).
 Do not assume a neighboring repository's engine build is ABI-compatible.
 A packaged (relocatable) engine also needs `-DNIGHT_TOOLCHAIN_ROOT` and
 `-DNIGHT_SYSROOT` (README "Building"); `scripts/ci-suite.sh` reads the test
-sources from `NIGHT_FIREFOX_TESTS` (default `./firefox`).
+sources from `NIGHT_FIREFOX_TESTS` (default `firefox/` in the
+repository root).
 
 ## Verification
 

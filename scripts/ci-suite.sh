@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # CI lane policy: run every requested lane, retaining each lane's status/log.
 #   scripts/ci-suite.sh <local|jit|jstests> <aot|interpreter|both>
-# NIGHT_FIREFOX_TESTS names the jit/jstests source tree (default: ./firefox).
+# NIGHT_FIREFOX_TESTS names the jit/jstests source tree (default: <repo>/firefox).
 # Requires GNU timeout (provided by Ubuntu coreutils).
 set -euo pipefail
 

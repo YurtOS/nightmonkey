@@ -261,7 +261,7 @@ NIGHT_INPROCESS_OFF=1 scripts/run-jit-tests.sh /path/to/firefox build -- -j16
 suite; append a path to scope). The first argument is any tree holding
 `js/src/jit-test` and `js/src/tests`: the patched checkout or extracted test
 sources. `scripts/ci-suite.sh` takes it from `NIGHT_FIREFOX_TESTS` (default
-`./firefox`). Both lanes are expected to pass completely.
+`firefox/` in this repository). Both lanes are expected to pass completely.
 Both lanes skip `tests/wasi-jit-test-excludes.txt` and
 `tests/wasi-jstests-excludes.txt`: tests the wasm32-wasi shell cannot run at
 all (no Intl, no shared memory or Atomics, no threads, no time zone database,

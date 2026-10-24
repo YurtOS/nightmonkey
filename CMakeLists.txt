@@ -69,7 +69,8 @@ endfunction()
 
 # The compiler command lines libjs was built with: the executable plus the
 # sysroot, standard and target flags. Only the C compiler's executable is
-# used (there are no C sources).
+# used (there are no C sources). NIGHT_SYSROOT replaces --sysroot X,
+# --sysroot=X, -isysroot X and -isysrootX.
 string(JSON SM_CXX_CMD GET "${SM_JSON}" cxx)
 string(JSON SM_CC_CMD GET "${SM_JSON}" cc)
 separate_arguments(SM_CXX_CMD NATIVE_COMMAND "${SM_CXX_CMD}")
@@ -81,9 +82,9 @@ if(NIGHT_TOOLCHAIN_ROOT)
   get_filename_component(NIGHT_TOOLCHAIN_ROOT "${NIGHT_TOOLCHAIN_ROOT}" ABSOLUTE)
   set(SM_CC "${NIGHT_TOOLCHAIN_ROOT}/bin/clang")
   set(SM_CXX "${NIGHT_TOOLCHAIN_ROOT}/bin/clang++")
-elseif(NOT IS_ABSOLUTE "${SM_CXX}")
+elseif(NOT IS_ABSOLUTE "${SM_CXX}" OR NOT IS_ABSOLUTE "${SM_CC}")
   # Never a compiler from PATH: it would not match the engine's.
-  message(FATAL_ERROR "${SM_CONFIG_JSON} names the compiler ${SM_CXX}, not an absolute path (a packaged engine): set NIGHT_TOOLCHAIN_ROOT to the clang toolchain it was built with")
+  message(FATAL_ERROR "${SM_CONFIG_JSON} names the compilers ${SM_CC} and ${SM_CXX}, not both absolute paths (a packaged engine): set NIGHT_TOOLCHAIN_ROOT to the clang toolchain it was built with")
 endif()
 if(NIGHT_SYSROOT)
   get_filename_component(NIGHT_SYSROOT "${NIGHT_SYSROOT}" ABSOLUTE)
@@ -94,7 +95,7 @@ if(NIGHT_SYSROOT)
       set(skip_next FALSE)
     elseif(arg STREQUAL "--sysroot" OR arg STREQUAL "-isysroot")
       set(skip_next TRUE)
-    elseif(NOT arg MATCHES "^--sysroot=")
+    elseif(NOT arg MATCHES "^(--sysroot=|-isysroot)")
       list(APPEND flags "${arg}")
     endif()
   endforeach()
