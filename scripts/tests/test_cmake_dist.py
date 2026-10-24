@@ -27,9 +27,9 @@ from pathlib import Path
 
 SOURCE = Path(__file__).resolve().parents[2]
 
-# A valid table that cannot match the checked-in ff147 table (the real
-# Opcodes.h is not available here, so only the refusal path is exercised;
-# the engine job covers the passing one).
+# A fixture engine table. The opcode check test generates a matching ff147
+# table for it in a copy of the source tree (the real Opcodes.h is not
+# available here).
 OPCODES_H = """#define FOR_EACH_OPCODE(MACRO) \\
   MACRO(Undefined, undefined, NULL, 1, 0, 1, JOF_BYTE) \\
   MACRO(Pop, pop, NULL, 1, 1, 0, JOF_BYTE)
@@ -73,14 +73,16 @@ class CMakeDistTests(unittest.TestCase):
         self.env["PATH"] = str(self.base / "path") + os.pathsep + os.environ["PATH"]
         self.builds = 0
 
-    def write_config(self, sysroot_option, bare=False):
+    def write_config(self, sysroot_option, bare=False, bare_cc=None):
         """The real config's shape (macOS build, warnings trimmed)."""
-        clang = "clang" if bare else str(self.producer / "clang/bin/clang")
+        absolute = str(self.producer / "clang/bin/clang")
+        cxx = "clang" if bare else absolute
+        cc = "clang" if (bare if bare_cc is None else bare_cc) else absolute
         flags = " ".join(sysroot_option)
         config = {
             "ar": str(self.producer / "clang/bin/llvm-ar"),
-            "cc": f"{clang} {flags} --target=wasm32-wasi",
-            "cxx": f"{clang}++ {flags} -std=gnu++20 --target=wasm32-wasi",
+            "cc": f"{cc} {flags} --target=wasm32-wasi",
+            "cxx": f"{cxx}++ {flags} -std=gnu++20 --target=wasm32-wasi",
             "cxx_base_flags": [*sysroot_option, "-std=gnu++20", "--target=wasm32-wasi"],
             "debug_defines": ["NDEBUG", "TRIMMED"],
             "debug_flags": [],
@@ -113,19 +115,19 @@ class CMakeDistTests(unittest.TestCase):
     def provisioned(self):
         return {"NIGHT_TOOLCHAIN_ROOT": self.toolchain, "NIGHT_SYSROOT": self.sysroot}
 
-    def configure(self, **variables):
+    def configure(self, source=SOURCE, **variables):
         self.builds += 1
         build = self.base / f"build{self.builds}"
         defines = [f"-D{k}={v}" for k, v in variables.items()]
         result = subprocess.run(
-            ["cmake", "-S", str(SOURCE), "-B", str(build), "-G", "Unix Makefiles",
+            ["cmake", "-S", str(source), "-B", str(build), "-G", "Unix Makefiles",
              f"-DSPIDERMONKEY_DIST={self.dist}", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON", *defines],
             env=self.env, capture_output=True, text=True, check=False,
         )
         return build, result
 
-    def configured(self, **variables):
-        build, result = self.configure(**variables)
+    def configured(self, source=SOURCE, **variables):
+        build, result = self.configure(source, **variables)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return build
 
@@ -164,6 +166,7 @@ class CMakeDistTests(unittest.TestCase):
             "--sysroot X": ["--sysroot", str(self.producer_sysroot)],
             "--sysroot=X": ["--sysroot=" + str(self.producer_sysroot)],
             "-isysroot X": ["-isysroot", str(self.producer_sysroot)],
+            "-isysrootX": ["-isysroot" + str(self.producer_sysroot)],
         }
         for spelling, option in spellings.items():
             with self.subTest(spelling=spelling):
@@ -181,10 +184,13 @@ class CMakeDistTests(unittest.TestCase):
                     self.assertNotIn(str(self.producer), " ".join(line))
 
     def test_package_config_without_toolchain_root_fails(self):
-        self.package_config()
-        build, result = self.configure(NIGHT_SYSROOT=self.sysroot)
-        self.assertNotEqual(result.returncode, 0, "configured with a clang from PATH")
-        self.assertIn("NIGHT_TOOLCHAIN_ROOT", result.stderr)
+        for kind, write in (("package", self.package_config),
+                            ("bare cc only", lambda: self.write_config([], bare_cc=True))):
+            with self.subTest(config=kind):
+                write()
+                _, result = self.configure(NIGHT_SYSROOT=self.sysroot)
+                self.assertNotEqual(result.returncode, 0, "configured with a clang from PATH")
+                self.assertIn("NIGHT_TOOLCHAIN_ROOT", result.stderr)
 
     def test_both_compilers_resolve_under_the_root(self):
         for kind in ("legacy", "package"):
@@ -194,17 +200,45 @@ class CMakeDistTests(unittest.TestCase):
                 self.assertEqual(self.compiler(build, "C"), str(self.toolchain / "bin/clang"))
                 self.assertEqual(self.compiler(build, "CXX"), str(self.toolchain / "bin/clang++"))
 
-    def test_opcode_check_refuses_a_different_opcodes_h(self):
-        self.package_config()
-        build = self.configured(**self.provisioned())
-        # The check is a build target, so the header is read at build time.
-        self.opcodes_h.write_text(OPCODES_H + "// altered\n")
+    def source_with_fixture_table(self):
+        """A copy of the source tree whose ff147 table is the fixture's.
+
+        gen_opcodes.py checks against the table next to itself, so it is
+        copied (not linked) and generates the table there; everything else
+        is linked to the real tree.
+        """
+        source = self.base / "source"
+        (source / "scripts").mkdir(parents=True)
+        for entry in SOURCE.iterdir():
+            if entry.name not in ("scripts", "compiler", "target", "build"):
+                (source / entry.name).symlink_to(entry)
+        for entry in (SOURCE / "scripts").iterdir():
+            if entry.name != "gen_opcodes.py":
+                (source / "scripts" / entry.name).symlink_to(entry)
+        shutil.copyfile(SOURCE / "scripts/gen_opcodes.py", source / "scripts/gen_opcodes.py")
+        subprocess.run(["python3", str(source / "scripts/gen_opcodes.py"), "generate", "ff147",
+                        str(self.opcodes_h)], check=True, capture_output=True)
+        return source
+
+    def build_opcodes_check(self, build):
         result = subprocess.run(
             ["cmake", "--build", str(build), "--target", "night_opcodes_check"],
             env=self.env, capture_output=True, text=True, check=False,
         )
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn(f"is not what {self.opcodes_h} generates", result.stdout + result.stderr)
+        return result.returncode, result.stdout + result.stderr
+
+    def test_opcode_check_refuses_a_different_opcodes_h(self):
+        self.package_config()
+        build = self.configured(self.source_with_fixture_table(), **self.provisioned())
+        status, output = self.build_opcodes_check(build)
+        self.assertEqual(status, 0, output)
+        # The check is a build target, so the header is read at build time.
+        # A comment changes only the digest, not the parsed table.
+        self.opcodes_h.write_text(OPCODES_H + "// altered\n")
+        status, output = self.build_opcodes_check(build)
+        self.assertNotEqual(status, 0, output)
+        self.assertIn(f"is not what {self.opcodes_h} generates", output)
+        self.assertIn("OPCODES_H_SHA256", output)
 
 
 if __name__ == "__main__":
