@@ -58,6 +58,9 @@ the script refuses to overwrite one, so move it aside before building again.
 CI also checks that the pin is on yurt-firefox `main`; this local recipe does
 not (`git -C /path/to/yurt-firefox merge-base --is-ancestor HEAD origin/main`).
 Do not assume a neighboring repository's engine build is ABI-compatible.
+A packaged (relocatable) engine also needs `-DNIGHT_TOOLCHAIN_ROOT` and
+`-DNIGHT_SYSROOT` (README "Building"); `scripts/ci-suite.sh` reads the test
+sources from `NIGHT_FIREFOX_TESTS` (default `./firefox`).
 
 ## Verification
 
