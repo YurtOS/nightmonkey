@@ -32,13 +32,15 @@ class CiSuiteTests(unittest.TestCase):
             harness = scripts / name
             harness.write_text(
                 '#!/usr/bin/env bash\nprintf "%s\\n" "$NIGHT_INPROCESS_OFF" >> "$LANES"\n'
+                'printf "%s\\n" "$1" >> "$ROOTS"\n'
                 'if [ "$NIGHT_INPROCESS_OFF" = 0 ]; then exit "${AOT_STATUS:-0}"; fi\n'
                 'exit "${INTERPRETER_STATUS:-0}"\n'
             )
             harness.chmod(0o755)
         self.env = {**os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"],
                     "RUNNER_TEMP": str(self.root), "CAPS": str(self.root / "caps"),
-                    "LANES": str(self.root / "lanes")}
+                    "LANES": str(self.root / "lanes"), "ROOTS": str(self.root / "roots")}
+        self.env.pop("NIGHT_FIREFOX_TESTS", None)
 
     def run_suite(self, suite, lane, **extra):
         return subprocess.run(
@@ -75,6 +77,19 @@ class CiSuiteTests(unittest.TestCase):
                 result = self.run_suite(suite, "both")
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual((self.root / "caps").read_text(), f"--kill-after=30s {seconds}s\n" * 2)
+
+    def test_test_source_root_comes_from_the_environment(self):
+        bundle = self.root / "testsrc"
+        cases = (("jit", {}, self.root / "firefox"), ("jstests", {}, self.root / "firefox"),
+                 ("jit", {"NIGHT_FIREFOX_TESTS": str(bundle)}, bundle),
+                 ("jstests", {"NIGHT_FIREFOX_TESTS": str(bundle)}, bundle),
+                 ("local", {"NIGHT_FIREFOX_TESTS": str(bundle)}, self.root / "build"))
+        for suite, extra, expected in cases:
+            with self.subTest(suite=suite, env=extra):
+                (self.root / "roots").unlink(missing_ok=True)
+                result = self.run_suite(suite, "aot", **extra)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual((self.root / "roots").read_text(), f"{expected}\n")
 
     def test_invalid_contract_values_are_setup_failures(self):
         for suite, lane in (("unknown", "aot"), ("jit", "unknown")):

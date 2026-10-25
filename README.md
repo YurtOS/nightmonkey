@@ -145,6 +145,15 @@ compiler, no runner); `-DNIGHT_DEBUG=ON` turns on the runtime diagnostics and
 the crash-on-failure of the in-process lane; `-DNIGHT_ENGINE_VERSION=ff147`
 selects the engine version (below).
 
+A packaged engine (a relocatable `dist/` whose `js-build-config.json` names
+a bare `clang`/`clang++` and no sysroot) also needs the toolchain it was
+built with: `-DNIGHT_TOOLCHAIN_ROOT=/path/to/clang` (the directory holding
+`bin/clang` and `bin/clang++`, next to their resource directory and
+`wasm-ld`) and `-DNIGHT_SYSROOT=/path/to/sysroot-wasm32-wasi`. When set,
+they replace the config's compilers and its sysroot option; configure fails
+on a bare compiler without `NIGHT_TOOLCHAIN_ROOT` rather than using one from
+`PATH`.
+
 Plain `cargo build` works for the Rust crates.
 
 ### Engine versions
@@ -249,7 +258,10 @@ NIGHT_INPROCESS_OFF=1 scripts/run-jit-tests.sh /path/to/firefox build -- -j16
 ```
 
 `scripts/run-jstests.sh` does the same for jstests (hours for the full
-suite; append a path to scope). Both lanes are expected to pass completely.
+suite; append a path to scope). The first argument is any tree holding
+`js/src/jit-test` and `js/src/tests`: the patched checkout or extracted test
+sources. `scripts/ci-suite.sh` takes it from `NIGHT_FIREFOX_TESTS` (default
+`firefox/` in this repository). Both lanes are expected to pass completely.
 Both lanes skip `tests/wasi-jit-test-excludes.txt` and
 `tests/wasi-jstests-excludes.txt`: tests the wasm32-wasi shell cannot run at
 all (no Intl, no shared memory or Atomics, no threads, no time zone database,
