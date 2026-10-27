@@ -7,8 +7,8 @@
 # restored with `wasmtime run`, which calls main(). Each restore must exit 0
 # and print exactly the expected stdout.
 # The runner is $WASMTIME, else `wasmtime` on PATH, else $HOME/bin/wasmtime.
-# $WASMTIME_FLAGS (word-split, default empty) goes between `run` and the
-# module, e.g. WASMTIME_FLAGS="-W unknown-imports-trap".
+# $WASMTIME_FLAGS (split on whitespace only: no quoting, no globbing; default
+# empty) goes between `run` and the module, e.g. "-W unknown-imports-trap".
 # Exit 0 pass; 1 round-trip failure; 2 usage or missing prerequisite.
 set -euo pipefail
 # A set CDPATH makes `cd` print the directory, corrupting $(cd ... && pwd).
@@ -54,7 +54,10 @@ else
   setup "no wasmtime: set WASMTIME, or put wasmtime on PATH or at \$HOME/bin/wasmtime"
 fi
 
-read -r -a runner_flags <<< "${WASMTIME_FLAGS:-}"
+# Split on all whitespace, newlines included; `read -a` never globs. With
+# -d '' read stops at end of input and returns 1, hence `|| true`.
+runner_flags=()
+read -r -d '' -a runner_flags <<< "${WASMTIME_FLAGS:-}" || true
 
 # nightmonkey wants absolute paths (AGENTS.md "Verification").
 abs() { (cd "$(dirname "$1")" && printf '%s/%s\n' "$(pwd)" "$(basename "$1")"); }

@@ -253,12 +253,15 @@ and queues a promise job. The script keeps the raw snapshot and the AOT module
 and restores each with `wasmtime run`. It passes (exit 0) only when both
 restores exit 0 and print exactly the expected stdout. It exits 1 when
 `nightmonkey` fails, when the snapshot or module is empty, or when a restore
-fails or prints different output. It exits 2 on a usage error (one or two
-arguments), or when `<build-dir>/bin/nightmonkey`, `<build-dir>/bin/js`, the
-program, the expected-stdout file or the runner is missing. The runner is
-`$WASMTIME` (which must be executable when set), else `wasmtime` on `PATH`,
-else `$HOME/bin/wasmtime`. `WASMTIME_FLAGS` (split on whitespace, empty by
-default) is passed between `run` and the module. Call the script directly;
+fails or prints different output. It exits 2 on a usage error (two
+arguments, or four or more; zero, one or three are valid), or when
+`<build-dir>/bin/nightmonkey`, `<build-dir>/bin/js`, the program, the
+expected-stdout file or the runner is missing. The runner is `$WASMTIME`
+(which must be executable when set), else `wasmtime` on `PATH`, else
+`$HOME/bin/wasmtime`. `WASMTIME_FLAGS` (empty by default) is passed between
+`run` and the module. It is split on whitespace, newlines included, and
+nothing else: there is no quoting and no globbing, so a single flag cannot
+contain a space. Call the script directly;
 it is not a `scripts/ci-suite.sh` suite.
 `scripts/tests/test_snapshot_roundtrip.py` tests the script's contract with
 fake binaries.
