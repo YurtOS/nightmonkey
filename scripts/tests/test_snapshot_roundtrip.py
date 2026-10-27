@@ -7,6 +7,7 @@ fixed text, to isolate the empty-file checks from the output comparison).
 Every call is logged so a test can tell whether the runner was reached.
 """
 
+import json
 import os
 import shlex
 import shutil
@@ -36,10 +37,12 @@ with open(value("-o"), "w") as f:
 """
 
 FAKE_RUNNER = """\
-import os, sys
+import json, os, sys
 args = sys.argv[1:]
 with open(os.environ["CALLS"], "a") as log:
     log.write("LABEL " + " ".join(args) + "\\n")
+with open(os.environ["RUNNER_ARGV"], "a") as log:
+    log.write(json.dumps(args) + "\\n")
 if "RUNNER_PRINTS" in os.environ:
     sys.stdout.write(os.environ["RUNNER_PRINTS"])
 else:
@@ -103,6 +106,7 @@ class SnapshotRoundtripTests(unittest.TestCase):
             "HOME": str(self.root / "home"),
             "WASMTIME": str(self.runner),
             "CALLS": str(self.calls),
+            "RUNNER_ARGV": str(self.root / "runner-argv"),
             "SNAPSHOT_OUTPUT": self.expected,
             "AOT_OUTPUT": self.expected,
         }
@@ -212,13 +216,34 @@ class SnapshotRoundtripTests(unittest.TestCase):
                 self.assert_fails(result, 2, message, False)
                 self.assertEqual(self.call_log(), [])
 
-    def test_runner_flags_reach_the_runner(self):
-        result = self.run_script(WASMTIME_FLAGS="-W unknown-imports-trap")
+    def runner_argvs(self):
+        log = self.root / "runner-argv"
+        lines = log.read_text().splitlines() if log.exists() else []
+        return [json.loads(line) for line in lines]
+
+    def assert_runner_flags(self, flags, expected, **extra):
+        (self.root / "runner-argv").unlink(missing_ok=True)
+        result = self.run_script(WASMTIME_FLAGS=flags, **extra)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        runs = self.runner_calls()
-        self.assertEqual(len(runs), 2, self.call_log())
-        for line in runs:
-            self.assertTrue(line.startswith("runner run -W unknown-imports-trap /"), line)
+        argvs = self.runner_argvs()
+        self.assertEqual(len(argvs), 2, argvs)
+        for argv in argvs:
+            self.assertEqual(argv[:-1], ["run", *expected], argv)
+            self.assertTrue(argv[-1].endswith(".wasm"), argv)
+
+    def test_runner_flags_reach_the_runner_as_separate_arguments(self):
+        self.assert_runner_flags("-W unknown-imports-trap", ["-W", "unknown-imports-trap"])
+
+    def test_runner_flags_split_on_newlines_without_globbing(self):
+        # cwd holds files, so an unquoted, globbed `*` would expand.
+        self.assert_runner_flags("-W unknown-imports-trap\n\t--env  X=*\n*\n",
+                                 ["-W", "unknown-imports-trap", "--env", "X=*", "*"],
+                                 cwd=self.root)
+
+    def test_empty_runner_flags_add_no_arguments(self):
+        for flags in ("", " \n\t"):
+            with self.subTest(flags=repr(flags)):
+                self.assert_runner_flags(flags, [])
 
     def test_runner_search_order(self):
         on_path = self.path_dir / "wasmtime"
@@ -254,8 +279,15 @@ class SnapshotRoundtripTests(unittest.TestCase):
             self.call_log())
 
     def test_wrong_argument_count_is_a_usage_failure(self):
-        result = self.run_script(str(self.root / "build"), "only-a-program.js")
-        self.assert_fails(result, 2, "usage:", False)
+        build = str(self.root / "build")
+        program = str(self.root / FIXTURE / "main.js")
+        expected = str(self.root / FIXTURE / "expected.txt")
+        for args in ((build, program), (build, program, expected, "extra")):
+            with self.subTest(count=len(args)):
+                self.calls.unlink(missing_ok=True)
+                result = self.run_script(*args)
+                self.assert_fails(result, 2, "usage:", False)
+                self.assertEqual(self.call_log(), [])
 
 
 if __name__ == "__main__":
