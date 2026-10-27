@@ -8,6 +8,7 @@ Every call is logged so a test can tell whether the runner was reached.
 """
 
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -38,7 +39,7 @@ FAKE_RUNNER = """\
 import os, sys
 args = sys.argv[1:]
 with open(os.environ["CALLS"], "a") as log:
-    log.write("runner " + " ".join(args) + "\\n")
+    log.write("LABEL " + " ".join(args) + "\\n")
 if "RUNNER_PRINTS" in os.environ:
     sys.stdout.write(os.environ["RUNNER_PRINTS"])
 else:
@@ -48,9 +49,25 @@ sys.exit(int(os.environ.get("RUNNER_STATUS", "0")))
 """
 
 
+# Commands the script runs besides shell builtins; the tests' PATH holds only
+# these, so no host wasmtime can be found.
+SCRIPT_UTILITIES = ("basename", "cmp", "diff", "dirname", "mktemp", "rm")
+
+
 def write_tool(path, body):
-    path.write_text(f"#!{sys.executable}\n{body}")
+    """An executable fake: a /bin/sh launcher running the Python body.
+
+    A shebang naming sys.executable directly breaks when that path (or the
+    temp dir) contains spaces, so the launcher quotes both.
+    """
+    script = path.with_name(path.name + ".py")
+    script.write_text(body)
+    path.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$0.py" "$@"\n')
     path.chmod(0o755)
+
+
+def write_runner(path, label="runner"):
+    write_tool(path, FAKE_RUNNER.replace("LABEL", label))
 
 
 class SnapshotRoundtripTests(unittest.TestCase):
@@ -71,13 +88,18 @@ class SnapshotRoundtripTests(unittest.TestCase):
         (bin_dir / "js").write_text("fake wasm shell\n")
         self.runner = self.root / "tools/wasmtime"
         self.runner.parent.mkdir()
-        write_tool(self.runner, FAKE_RUNNER)
+        write_runner(self.runner)
         self.calls = self.root / "calls"
         # HOME and PATH hold no wasmtime, so only WASMTIME can name a runner.
-        empty_path = self.root / "empty-path"
-        empty_path.mkdir()
+        self.path_dir = self.root / "path"
+        self.path_dir.mkdir()
+        for name in SCRIPT_UTILITIES:
+            found = shutil.which(name)
+            self.assertIsNotNone(found, name)
+            (self.path_dir / name).symlink_to(found)
+        self.bash = shutil.which("bash")
         self.env = {
-            "PATH": os.pathsep.join([str(empty_path), "/usr/bin", "/bin"]),
+            "PATH": str(self.path_dir),
             "HOME": str(self.root / "home"),
             "WASMTIME": str(self.runner),
             "CALLS": str(self.calls),
@@ -85,13 +107,13 @@ class SnapshotRoundtripTests(unittest.TestCase):
             "AOT_OUTPUT": self.expected,
         }
 
-    def run_script(self, *args, unset=(), **extra):
+    def run_script(self, *args, unset=(), cwd=None, **extra):
         env = {**self.env, **extra}
         for name in unset:
             env.pop(name, None)
         return subprocess.run(
-            ["bash", str(self.root / "scripts/snapshot-roundtrip.sh"), *args],
-            env=env, capture_output=True, text=True, check=False,
+            [self.bash, str(self.root / "scripts/snapshot-roundtrip.sh"), *args],
+            env=env, capture_output=True, text=True, check=False, cwd=cwd,
         )
 
     def call_log(self):
@@ -175,6 +197,61 @@ class SnapshotRoundtripTests(unittest.TestCase):
                 result = self.run_script(str(build))
                 self.assert_fails(result, 2, f"{build}/bin/{name}", False)
                 self.assertEqual(self.call_log(), [])
+
+    def test_missing_program_or_expected_is_a_setup_failure(self):
+        program = self.root / FIXTURE / "main.js"
+        expected = self.root / FIXTURE / "expected.txt"
+        absent = self.root / "absent"
+        for name, args, message in (
+                ("program", (str(absent), str(expected)), f"missing program {absent}"),
+                ("expected", (str(program), str(absent)),
+                 f"missing expected output {absent}")):
+            with self.subTest(missing=name):
+                self.calls.unlink(missing_ok=True)
+                result = self.run_script(str(self.root / "build"), *args)
+                self.assert_fails(result, 2, message, False)
+                self.assertEqual(self.call_log(), [])
+
+    def test_runner_flags_reach_the_runner(self):
+        result = self.run_script(WASMTIME_FLAGS="-W unknown-imports-trap")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        runs = self.runner_calls()
+        self.assertEqual(len(runs), 2, self.call_log())
+        for line in runs:
+            self.assertTrue(line.startswith("runner run -W unknown-imports-trap /"), line)
+
+    def test_runner_search_order(self):
+        on_path = self.path_dir / "wasmtime"
+        in_home = self.root / "home/bin/wasmtime"
+        in_home.parent.mkdir(parents=True)
+        write_runner(in_home, "home-runner")
+        with self.subTest(found="home"):
+            result = self.run_script(unset=("WASMTIME",))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual([l.split()[0] for l in self.call_log()[1:]],
+                             ["home-runner"] * 2)
+        write_runner(on_path, "path-runner")
+        with self.subTest(found="path before home"):
+            self.calls.unlink()
+            result = self.run_script(unset=("WASMTIME",))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual([l.split()[0] for l in self.call_log()[1:]],
+                             ["path-runner"] * 2)
+        with self.subTest(found="WASMTIME before path"):
+            self.calls.unlink()
+            result = self.run_script()
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual([l.split()[0] for l in self.call_log()[1:]], ["runner"] * 2)
+
+    def test_relative_build_dir_with_cdpath(self):
+        result = self.run_script("build", cwd=self.root, CDPATH=".")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # The relative build dir resolves against the physical cwd (macOS
+        # temp dirs sit behind /var -> /private/var); fold that back.
+        line = self.call_log()[0].replace(str(self.root.resolve()), str(self.root))
+        self.assertTrue(line.startswith(
+            f"nightmonkey --shell {self.root}/build/bin/js {self.root / FIXTURE}/main.js "),
+            self.call_log())
 
     def test_wrong_argument_count_is_a_usage_failure(self):
         result = self.run_script(str(self.root / "build"), "only-a-program.js")
