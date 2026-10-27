@@ -253,11 +253,20 @@ and queues a promise job. The script keeps the raw snapshot and the AOT module
 and restores each with `wasmtime run`. It passes (exit 0) only when both
 restores exit 0 and print exactly the expected stdout. It exits 1 when
 `nightmonkey` fails, when the snapshot or module is empty, or when a restore
-fails or prints different output. It exits 2 when an argument, a build binary
-or the runner is missing. The runner is `$WASMTIME`, else `wasmtime` on
-`PATH`, else `$HOME/bin/wasmtime`. Call it directly; it is not a
-`scripts/ci-suite.sh` suite. `scripts/tests/test_snapshot_roundtrip.py` tests
-the script's contract with fake binaries.
+fails or prints different output. It exits 2 on a usage error (one or two
+arguments), or when `<build-dir>/bin/nightmonkey`, `<build-dir>/bin/js`, the
+program, the expected-stdout file or the runner is missing. The runner is
+`$WASMTIME` (which must be executable when set), else `wasmtime` on `PATH`,
+else `$HOME/bin/wasmtime`. `WASMTIME_FLAGS` (split on whitespace, empty by
+default) is passed between `run` and the module. Call the script directly;
+it is not a `scripts/ci-suite.sh` suite.
+`scripts/tests/test_snapshot_roundtrip.py` tests the script's contract with
+fake binaries.
+
+The script has not yet run against a real engine build. Plain `wasmtime run`
+follows the recipe above, but the tools in `tools/` pass
+`-W unknown-imports-trap`. If a restore fails to instantiate, retry with
+`WASMTIME_FLAGS="-W unknown-imports-trap"`.
 
 ## Flow 2: in-process (drop-in shell for jit-tests)
 

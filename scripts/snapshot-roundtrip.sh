@@ -7,8 +7,12 @@
 # restored with `wasmtime run`, which calls main(). Each restore must exit 0
 # and print exactly the expected stdout.
 # The runner is $WASMTIME, else `wasmtime` on PATH, else $HOME/bin/wasmtime.
+# $WASMTIME_FLAGS (word-split, default empty) goes between `run` and the
+# module, e.g. WASMTIME_FLAGS="-W unknown-imports-trap".
 # Exit 0 pass; 1 round-trip failure; 2 usage or missing prerequisite.
 set -euo pipefail
+# A set CDPATH makes `cd` print the directory, corrupting $(cd ... && pwd).
+unset CDPATH
 
 usage() {
   echo "usage: $0 [<build-dir> [<program.js> <expected-stdout>]]" >&2
@@ -50,6 +54,8 @@ else
   setup "no wasmtime: set WASMTIME, or put wasmtime on PATH or at \$HOME/bin/wasmtime"
 fi
 
+read -r -a runner_flags <<< "${WASMTIME_FLAGS:-}"
+
 # nightmonkey wants absolute paths (AGENTS.md "Verification").
 abs() { (cd "$(dirname "$1")" && printf '%s/%s\n' "$(pwd)" "$(basename "$1")"); }
 shell=$(abs "$shell")
@@ -69,7 +75,8 @@ status=0
 
 restore() { # <label> <module>
   local out=$work/$1.stdout status=0
-  "$runner" run "$2" > "$out" || status=$?
+  # ${a[@]+...}: an empty array is "unbound" under set -u in bash < 4.4.
+  "$runner" run ${runner_flags[@]+"${runner_flags[@]}"} "$2" > "$out" || status=$?
   [ "$status" -eq 0 ] || fail "restored $1 exited with status $status"
   if ! cmp -s "$expected" "$out"; then
     diff -u "$expected" "$out" >&2 || true
