@@ -191,7 +191,8 @@ Its reusable engine workflow (`.github/workflows/engine.yml`) builds both
 trees and runs local regressions and jit-tests in both AOT and interpreter
 lanes. Full jstests run nightly at 02:23 UTC and through manual dispatch of
 `Full jstests`, with separate jobs for the two lanes. Existing exclusion
-lists apply; the shipping snapshot flow is still a manual check. Execution
+lists apply; the shipping snapshot flow is not a hosted gate (run
+`scripts/snapshot-roundtrip.sh` against a build, see Flow 1). Execution
 logs, the engine queue pin and the engine's `build-manifest.json` are retained
 for seven days.
 
@@ -235,6 +236,40 @@ instrumentation flags (`--mir-exit-census`, `--block-census`,
 `--root-census`, `--guard-census`) and the compilation options (`--pipeline
 mir|baseline`, `--strict-coverage`, `--keep-names`). Debug sections are
 stripped by default; `--keep-names` retains them.
+
+### Snapshot round-trip check
+
+`scripts/snapshot-roundtrip.sh` runs this flow end to end on a representative
+program:
+
+```
+scripts/snapshot-roundtrip.sh [build-dir [program.js expected-stdout]]
+```
+
+The default is `build/` and `tests/fixtures/snapshot-roundtrip/`. That
+program's top level builds state (a class instance, a `Map`, a computed array
+and a closure) into the image, and its `main()` reads and mutates that state
+and queues a promise job. The script keeps the raw snapshot and the AOT module
+and restores each with `wasmtime run`. It passes (exit 0) only when both
+restores exit 0 and print exactly the expected stdout. It exits 1 when
+`nightmonkey` fails, when the snapshot or module is empty, or when a restore
+fails or prints different output. It exits 2 on a usage error (two
+arguments, or four or more; zero, one or three are valid), or when
+`<build-dir>/bin/nightmonkey`, `<build-dir>/bin/js`, the program, the
+expected-stdout file or the runner is missing. The runner is `$WASMTIME`
+(which must be executable when set), else `wasmtime` on `PATH`, else
+`$HOME/bin/wasmtime`. `WASMTIME_FLAGS` (empty by default) is passed between
+`run` and the module. It is split on whitespace, newlines included, and
+nothing else: there is no quoting and no globbing, so a single flag cannot
+contain a space. Call the script directly;
+it is not a `scripts/ci-suite.sh` suite.
+`scripts/tests/test_snapshot_roundtrip.py` tests the script's contract with
+fake binaries.
+
+The script has not yet run against a real engine build. Plain `wasmtime run`
+follows the recipe above, but the tools in `tools/` pass
+`-W unknown-imports-trap`. If a restore fails to instantiate, retry with
+`WASMTIME_FLAGS="-W unknown-imports-trap"`.
 
 ## Flow 2: in-process (drop-in shell for jit-tests)
 

@@ -1,0 +1,6 @@
+primes 2,3,5,7,11,13,17,19,23,29
+table a=1,b=2
+counter 6
+adder 42
+fib 6765
+job 7
