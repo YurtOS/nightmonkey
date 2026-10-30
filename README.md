@@ -189,7 +189,11 @@ CI (`.github/workflows/ci.yml`) runs Rust formatting, check, tests and Clippy,
 workflow lint and script regressions on pull requests and pushes to `yurt`.
 Its reusable engine workflow (`.github/workflows/engine.yml`) builds both
 trees and runs local regressions and jit-tests in both AOT and interpreter
-lanes. Full jstests run nightly at 02:23 UTC and through manual dispatch of
+lanes. The jit-tests are tiered: a pull request runs a small subset
+(`JIT_SUBSET` in engine.yml), and a push to `yurt`, a manual dispatch or a
+pull request labelled `ci:full` runs all of them, split over four shard jobs
+(`scripts/ci-suite.sh jit both -- --total-chunks=4 --this-chunk=N`). The
+SpiderMonkey build uses ccache; caches are saved only from `yurt`. Full jstests run nightly at 02:23 UTC and through manual dispatch of
 `Full jstests`, with separate jobs for the two lanes. Existing exclusion
 lists apply; the shipping snapshot flow is not a hosted gate (run
 `scripts/snapshot-roundtrip.sh` against a build, see Flow 1). Execution
