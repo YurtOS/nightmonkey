@@ -3,8 +3,8 @@
 These rules apply in every YurtOS repository. Each repository's `AGENTS.md` adds
 what is specific to it (build, the **Verification** section, layout, domain
 rules) and must not restate or contradict these. The canonical copy is
-`docs/agents/org.md` in YurtOS/yurtos-kernel; every other repository carries a
-verbatim copy at the same path. Change it there first, then sync the copies.
+`docs/agents/org.md` in the YurtOS kernel repository; every other repository
+carries a verbatim copy at the same path. Change it there first, then sync the copies.
 
 If a repository rule and a rule here disagree, stop and tell the user. Do not
 pick one silently.
@@ -22,11 +22,10 @@ documented where the code lives (what Linux does, what we do, why).
 
 ## No legacy compatibility
 
-There are no external users and no backwards-compatibility constraints. When an
-interface needs a different shape, change it and update every caller, generated
-artifact and fixture in the same change. No `V1`/`V2` shims, no
-deprecated-but-callable stubs, no "clean up later". The guest↔kernel ABI follows
-each repository's `AGENTS.md`.
+Pre-1.0: no compatibility guarantees yet. When an interface needs a different
+shape, change it and update every caller, generated artifact and fixture in the
+same change. No `V1`/`V2` shims, no deprecated-but-callable stubs, no "clean up
+later". The guest↔kernel ABI follows each repository's `AGENTS.md`.
 
 ## KISS, except where security says otherwise
 

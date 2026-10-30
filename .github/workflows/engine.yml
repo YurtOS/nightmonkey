@@ -118,7 +118,7 @@ jobs:
       # build script needs an empty workdir.
       #
       # Caches are written only from yurt (a push, or a dispatch on yurt);
-      # pull requests restore them and save nothing (yurt-sandbox#367).
+      # pull requests restore them and save nothing.
       - name: Restore the mach toolchains
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
