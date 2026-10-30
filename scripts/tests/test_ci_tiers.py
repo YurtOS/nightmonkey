@@ -187,6 +187,12 @@ class DocsOnlyTests(unittest.TestCase):
     def test_the_lint_jobs_always_run(self):
         self.assertNotIn("docs_only", job(self.ci, "workflows"))
 
+    def test_the_classifier_test_runs_on_docs_only_pull_requests(self):
+        # The scripts job skips on a Markdown-only PR, so a PR that broke the
+        # classifier into answering "docs-only" would skip its own test.
+        self.assertIn("run: python3 -m unittest discover -s scripts/tests -p test_ci_tiers.py",
+                      job(self.ci, "workflows"))
+
 
 if __name__ == "__main__":
     unittest.main()
