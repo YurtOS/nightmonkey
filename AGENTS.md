@@ -126,8 +126,8 @@ regressions and jit-tests in both AOT and interpreter lanes: on a pull request
 only the `JIT_SUBSET` paths, and all of them, in four shard jobs, on a push to
 `yurt`, a dispatch, or a pull request labelled `ci:full`. `jstests.yml`
 calls the same engine workflow nightly and manually with full jstests enabled
-(a scheduled run of an unchanged `yurt` repeats the last scheduled result in
-seconds, green as a skip and red as a failure naming that run, per
+(a scheduled run of an unchanged `yurt` repeats the newest scheduled or
+dispatched result on `yurt` in seconds, green as a skip and red as a failure naming that run, per
 `scripts/nightly-gate.py`; a dispatch always runs);
 the caller gives the long suites separate jobs per lane. `scripts/ci-suite.sh`
 owns lane selection, per-lane time limits and independent failure collection;

@@ -4,7 +4,8 @@
         --workflow FILE --branch BRANCH
 
 Writes run=true or run=false to $GITHUB_OUTPUT (stdout when unset). The
-base is the last completed scheduled run of the same workflow on BRANCH.
+base is the newest completed run of the same workflow on BRANCH started by
+a schedule or a workflow_dispatch (so a green manual retry clears a red).
 A scheduled run whose HEAD is the base's head repeats the base's result in
 seconds: after a green base it skips (run=false); after a red one it exits 1
 with an error naming that run, so the red stays visible without a rebuild.
@@ -19,23 +20,27 @@ import subprocess
 import sys
 
 
+BASE_EVENTS = ("schedule", "workflow_dispatch")
+
+
 def decide(args):
     if args.event != "schedule":
         return True, f"{args.event}: always runs"
     path = (f"repos/{args.repo}/actions/workflows/{args.workflow}/runs"
-            f"?event=schedule&status=completed&branch={args.branch}&per_page=1")
+            f"?status=completed&branch={args.branch}&per_page=50")
     try:
         result = subprocess.run(["gh", "api", path], capture_output=True, text=True,
                                 check=True, timeout=60)
-        runs = json.loads(result.stdout)["workflow_runs"]
-        base = runs[0] if runs else None
+        runs = [r for r in json.loads(result.stdout)["workflow_runs"]
+                if r["event"] in BASE_EVENTS and r["head_branch"] == args.branch]
+        base = max(runs, key=lambda r: r["created_at"]) if runs else None
         last = base["head_sha"] if base else None
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, IndexError) as error:
         detail = getattr(error, "stderr", "") or error
         print(f"::warning::cannot read the previous scheduled runs ({detail}); running")
         return True, "previous run unknown"
     if last is None:
-        return True, "no previous completed scheduled run"
+        return True, "no previous completed scheduled or dispatched run"
     if last != args.head:
         return True, f"{args.branch} moved from {last} to {args.head}"
     url = base.get("html_url", "the last scheduled run")
