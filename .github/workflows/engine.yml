@@ -255,11 +255,15 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.jit_tests == 'sharded' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: nightmonkey-shard-inputs-${{ inputs.lane }}-${{ github.run_attempt }}
+          name: nightmonkey-shard-inputs-${{ inputs.lane }}
           path: ${{ runner.temp }}/shard-inputs.tar.zst
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
+          # One name for every attempt: "Re-run failed jobs" reruns a failed
+          # shard but not this job, so the shard must find this attempt's
+          # upload; a rerun of this job replaces it.
+          overwrite: true
 
       - name: Full jstests
         if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.full_jstests }}
@@ -274,4 +278,3 @@ jobs:
           path: ${{ runner.temp }}/nightmonkey-logs
           if-no-files-found: error
           retention-days: 7
-

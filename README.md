@@ -193,7 +193,8 @@ lanes. The jit-tests are tiered: a pull request runs a small subset
 (`JIT_SUBSET` in engine.yml), and a push to `yurt`, a manual dispatch or a
 pull request labelled `ci:full` runs all of them, split over four shard jobs
 (`scripts/ci-suite.sh jit both -- --total-chunks=4 --this-chunk=N`). The
-SpiderMonkey build uses ccache; caches are saved only from `yurt`. Full jstests run nightly at 02:23 UTC and through manual dispatch of
+SpiderMonkey build uses ccache; caches are saved only from `yurt`. Full
+jstests run nightly at 02:23 UTC and through manual dispatch of
 `Full jstests`, with separate jobs for the two lanes. Existing exclusion
 lists apply; the shipping snapshot flow is not a hosted gate (run
 `scripts/snapshot-roundtrip.sh` against a build, see Flow 1). Execution

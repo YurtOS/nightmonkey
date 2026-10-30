@@ -13,8 +13,14 @@ name: CI
 # sent, so a push a few seconds after labelling would take the pull request
 # tier and cancel the `labeled` run (yurt-playground#276). Adding the label
 # starts a run (the `labeled` type); while it is on, every push runs the
-# merge tier. Any label starts a run, which cancels the one in progress and
-# runs the same jobs again; labels are rare here.
+# merge tier.
+#
+# Any other label starts a run too (the event cannot filter on the label).
+# That run gets a concurrency group of its own (its run id), so it cancels
+# nothing, and the tier job's `if:` skips it, which skips every job (they
+# all need the tier). Its skipped checks can show as the latest for the head
+# over an earlier red one; no check here is required, so nothing is bypassed,
+# but read the run list, not only the checks summary.
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
@@ -28,9 +34,10 @@ permissions:
 
 # Each push to yurt has a group of its own: a group holds one running and one
 # waiting run, and a newer waiting run replaces the older, so back-to-back
-# merges would drop the middle one's merge-tier result.
+# merges would drop the middle one's merge-tier result. So has a run started
+# by a label other than ci:full (see the top).
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{ github.event_name == 'push' && format('-{0}', github.sha) || '' }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{ github.event_name == 'push' && format('-{0}', github.sha) || '' }}${{ github.event.action == 'labeled' && github.event.label.name != 'ci:full' && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 defaults:
@@ -40,6 +47,7 @@ defaults:
 jobs:
   rust:
     name: Rust (${{ matrix.check }})
+    needs: tier
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
@@ -69,6 +77,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   workflows:
+    needs: tier
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -88,6 +97,7 @@ jobs:
           "$RUNNER_TEMP/actionlint" -color -shellcheck=
 
   scripts:
+    needs: tier
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -109,6 +119,8 @@ jobs:
   # Picks the jit-test tier (see the top). An API error fails the job, and
   # with it the engine, never picks a tier.
   tier:
+    # Not on a run started by a label other than ci:full (see the top).
+    if: github.event.action != 'labeled' || github.event.label.name == 'ci:full'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
