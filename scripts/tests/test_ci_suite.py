@@ -33,18 +33,20 @@ class CiSuiteTests(unittest.TestCase):
             harness.write_text(
                 '#!/usr/bin/env bash\nprintf "%s\\n" "$NIGHT_INPROCESS_OFF" >> "$LANES"\n'
                 'printf "%s\\n" "$1" >> "$ROOTS"\n'
+                'shift\nprintf "%s\\n" "$*" >> "$ARGS"\n'
                 'if [ "$NIGHT_INPROCESS_OFF" = 0 ]; then exit "${AOT_STATUS:-0}"; fi\n'
                 'exit "${INTERPRETER_STATUS:-0}"\n'
             )
             harness.chmod(0o755)
         self.env = {**os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"],
                     "RUNNER_TEMP": str(self.root), "CAPS": str(self.root / "caps"),
-                    "LANES": str(self.root / "lanes"), "ROOTS": str(self.root / "roots")}
+                    "LANES": str(self.root / "lanes"), "ROOTS": str(self.root / "roots"),
+                    "ARGS": str(self.root / "args")}
         self.env.pop("NIGHT_FIREFOX_TESTS", None)
 
-    def run_suite(self, suite, lane, **extra):
+    def run_suite(self, suite, lane, *harness_args, **extra):
         return subprocess.run(
-            ["bash", str(self.root / "scripts/ci-suite.sh"), suite, lane],
+            ["bash", str(self.root / "scripts/ci-suite.sh"), suite, lane, *harness_args],
             env={**self.env, **extra}, capture_output=True, text=True, check=False,
         )
 
@@ -90,6 +92,34 @@ class CiSuiteTests(unittest.TestCase):
                 result = self.run_suite(suite, "aot", **extra)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual((self.root / "roots").read_text(), f"{expected}\n")
+
+    def test_harness_arguments_follow_a_separator(self):
+        # A jit-test shard or path subset: arguments after `--` reach the
+        # upstream harness, after the build directory and its own `--`.
+        build = self.root / "build"
+        for suite in ("jit", "jstests"):
+            with self.subTest(suite=suite):
+                (self.root / "args").unlink(missing_ok=True)
+                result = self.run_suite(suite, "both", "--", "--total-chunks=4", "--this-chunk=2")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual((self.root / "args").read_text(),
+                                 f"{build} -- --total-chunks=4 --this-chunk=2\n" * 2)
+
+    def test_no_separator_passes_no_harness_arguments(self):
+        (self.root / "args").unlink(missing_ok=True)
+        result = self.run_suite("jit", "aot")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / "args").read_text(), f"{self.root / 'build'}\n")
+
+    def test_local_suite_refuses_harness_arguments(self):
+        result = self.run_suite("local", "aot", "--", "warp/")
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse((self.root / "lanes").exists())
+
+    def test_extra_arguments_need_the_separator(self):
+        result = self.run_suite("jit", "aot", "warp/")
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse((self.root / "lanes").exists())
 
     def test_invalid_contract_values_are_setup_failures(self):
         for suite, lane in (("unknown", "aot"), ("jit", "unknown")):
