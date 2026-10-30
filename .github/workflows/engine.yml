@@ -12,7 +12,7 @@ on:
         default: both
       # full: every jit-test in this job (the nightly jstests runs).
       # subset: only JIT_SUBSET below (the pull request tier).
-      # sharded: every jit-test, split over JIT_SHARDS jobs that take this
+      # sharded: every jit-test, in jit-shards.yml's jobs, which take this
       #   job's build (the merge tier: push to yurt, dispatch, `ci:full`).
       jit_tests:
         description: 'full, subset, or sharded'
@@ -40,9 +40,6 @@ env:
   # 11,100 s (46 min) for all 8,571. Every one passed in each of the 15 green
   # runs of 2026-10-20..28.
   JIT_SUBSET: warp/ baseline/ sunspider/
-  # jit_test.py --total-chunks: contiguous slices of the sorted test list.
-  # Four put 2,300-3,000 s of AOT test time (10-13 min) in each shard.
-  JIT_SHARDS: 4
 
 jobs:
   jit-test:
@@ -136,13 +133,27 @@ jobs:
             ccache-sm-${{ runner.os }}-${{ steps.pin.outputs.sha }}-
             ccache-sm-${{ runner.os }}-
 
+      # The build step itself stays as scripts/check-engine-source.sh
+      # requires; ccache reaches it through the job environment.
+      - name: Configure ccache
+        run: |
+          {
+            echo "CCACHE=ccache"
+            echo "CCACHE_DIR=$HOME/.ccache"
+            echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+            echo "CCACHE_COMPILERCHECK=content"
+            echo "CCACHE_MAXSIZE=2G"
+          } >> "$GITHUB_ENV"
+          CCACHE_DIR="$HOME/.ccache" ccache -z
+
       - name: Build the engine (patched SpiderMonkey)
         run: |
-          export CCACHE=ccache CCACHE_DIR="$HOME/.ccache" CCACHE_BASEDIR="$GITHUB_WORKSPACE"
-          export CCACHE_COMPILERCHECK=content CCACHE_MAXSIZE=2G
-          ccache -z
           engine-src/scripts/build-engine.sh --workdir "$GITHUB_WORKSPACE/firefox"
           cp "$GITHUB_WORKSPACE/build-manifest.json" "$RUNNER_TEMP/nightmonkey-logs/"
+
+      - name: ccache statistics
+        if: ${{ !cancelled() }}
+        run: |
           {
             echo '### SpiderMonkey ccache'
             echo '```'
@@ -264,57 +275,3 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # The full jit-tests, sharded (jit_tests: sharded). Each shard runs its
-  # slice in every requested lane against the build job's shell; together the
-  # slices are the whole list (jit_test.py chunks the sorted list after the
-  # excludes). Skipped, as a whole, in the other modes.
-  jit-test-shard:
-    name: jit-test shard ${{ matrix.shard }}
-    needs: jit-test
-    if: ${{ inputs.jit_tests == 'sharded' }}
-    runs-on: ubuntu-24.04
-    # A shard's AOT slice is 10-13 min; ci-suite.sh caps a lane at 60.
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4]
-    env:
-      CI_LANE: ${{ inputs.lane }}
-      SHARD: ${{ matrix.shard }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Prepare logs
-        run: mkdir -p "$RUNNER_TEMP/nightmonkey-logs"
-      - name: Download the shard inputs
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: nightmonkey-shard-inputs-${{ inputs.lane }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/shard-inputs
-      - name: Unpack the shard inputs
-        run: |
-          set -euo pipefail
-          test ! -e build
-          mkdir -p "$RUNNER_TEMP/testsrc"
-          zstd -dc "$RUNNER_TEMP/shard-inputs/shard-inputs.tar.zst" | tar -x -C "$RUNNER_TEMP/testsrc"
-          mv "$RUNNER_TEMP/testsrc/build" build
-          test -x build/bin/inproc-shell.sh
-          test -f "$RUNNER_TEMP/testsrc/js/src/jit-test/jit_test.py"
-      - name: jit-tests (shard ${{ matrix.shard }} of ${{ env.JIT_SHARDS }})
-        timeout-minutes: 125
-        run: |
-          set -euo pipefail
-          [ "$SHARD" -ge 1 ] && [ "$SHARD" -le "$JIT_SHARDS" ] ||
-            { echo "::error::shard $SHARD is outside 1..$JIT_SHARDS (update the matrix with JIT_SHARDS)"; exit 1; }
-          NIGHT_FIREFOX_TESTS="$RUNNER_TEMP/testsrc" \
-            scripts/ci-suite.sh jit "$CI_LANE" -- --total-chunks="$JIT_SHARDS" --this-chunk="$SHARD"
-      - name: Upload execution logs
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: nightmonkey-execution-${{ inputs.lane }}-shard${{ matrix.shard }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/nightmonkey-logs
-          if-no-files-found: error
-          retention-days: 7

@@ -5,7 +5,7 @@ name: CI
 # build, local and tier regressions). The jit-tests are tiered:
 #   pull request tier: the JIT_SUBSET path filters of engine.yml, both lanes,
 #     in the build job.
-#   merge tier: every jit-test, split over engine.yml's JIT_SHARDS shard jobs.
+#   merge tier: every jit-test, split over jit-shards.yml's four shard jobs.
 #     It runs on a push to yurt, in a merge queue (merge_group), on a
 #     workflow_dispatch, and on a pull request while it carries `ci:full`.
 # The `tier` job reads the label through the API when the run starts, not
@@ -142,3 +142,10 @@ jobs:
     uses: ./.github/workflows/engine.yml
     with:
       jit_tests: ${{ needs.tier.outputs.jit_tests }}
+
+  # The merge tier's jit-tests (see the top), from the engine job's build.
+  # On the pull request tier the whole job is skipped.
+  jit-shards:
+    needs: [tier, engine]
+    if: ${{ needs.tier.outputs.jit_tests == 'sharded' }}
+    uses: ./.github/workflows/jit-shards.yml
