@@ -12,8 +12,14 @@ SCRIPT = Path(__file__).resolve().parents[1] / "nightly-gate.py"
 URL = "https://github.com/YurtOS/nightmonkey/actions/runs/7"
 
 
-def run(head_sha, conclusion):
-    return {"head_sha": head_sha, "conclusion": conclusion, "html_url": URL}
+def run(head_sha, conclusion, event="schedule", branch="yurt", created="2026-10-30T02:23:00Z",
+        url=URL):
+    return {"head_sha": head_sha, "conclusion": conclusion, "html_url": url, "event": event,
+            "head_branch": branch, "created_at": created}
+
+
+OLDER, NEWER = "2026-10-29T02:23:00Z", "2026-10-30T09:00:00Z"
+DISPATCH = "https://github.com/YurtOS/nightmonkey/actions/runs/8"
 
 
 class NightlyGateTests(unittest.TestCase):
@@ -60,8 +66,9 @@ class NightlyGateTests(unittest.TestCase):
         self.assertIn(URL, log)
         call = self.calls.read_text()
         self.assertIn("repos/YurtOS/nightmonkey/actions/workflows/jstests.yml/runs", call)
-        for field in ("event=schedule", "status=completed", "branch=yurt"):
+        for field in ("status=completed", "branch=yurt"):
             self.assertIn(field, call)
+        self.assertNotIn("event=", call)
 
     def test_unchanged_after_a_red_run_fails_fast_naming_it(self):
         out, log = self.gate("schedule", runs=[run("abc", "failure")], code=1)
@@ -87,6 +94,34 @@ class NightlyGateTests(unittest.TestCase):
     def test_schedule_runs_when_there_is_no_previous_run(self):
         out, _ = self.gate("schedule", runs=[])
         self.assertEqual(out, "run=true\n")
+
+    def test_a_newer_green_dispatch_clears_a_carried_red(self):
+        out, log = self.gate("schedule", runs=[
+            run("abc", "success", "workflow_dispatch", created=NEWER, url=DISPATCH),
+            run("abc", "failure", created=OLDER)])
+        self.assertEqual(out, "run=false\n")
+        self.assertIn(DISPATCH, log)
+
+    def test_a_newer_red_dispatch_fails_fast(self):
+        out, log = self.gate("schedule", runs=[
+            run("abc", "success", created=OLDER),
+            run("abc", "failure", "workflow_dispatch", created=NEWER, url=DISPATCH)], code=1)
+        self.assertIn("::error::", log)
+        self.assertIn(DISPATCH, log)
+
+    def test_the_newest_run_wins_whatever_the_api_order(self):
+        out, _ = self.gate("schedule", runs=[
+            run("abc", "failure", created=OLDER),
+            run("abc", "success", "workflow_dispatch", created=NEWER, url=DISPATCH)])
+        self.assertEqual(out, "run=false\n")
+
+    def test_runs_on_other_branches_or_events_are_ignored(self):
+        out, log = self.gate("schedule", runs=[
+            run("abc", "success", "workflow_dispatch", branch="fix/x", created=NEWER, url=DISPATCH),
+            run("abc", "success", "pull_request", created=NEWER, url=DISPATCH),
+            run("abc", "failure", created=OLDER)], code=1)
+        self.assertIn(URL, log)
+        self.assertNotIn(DISPATCH, log)
 
     def test_api_failure_runs_and_warns(self):
         for status, raw in ((1, ""), (0, "not json"), (0, "{}")):
