@@ -27,9 +27,12 @@ defaults:
     shell: bash
 
 env:
-  # About 55 min of AOT tests per shard on the 4-core runner. Keep the
-  # matrix below in step.
-  SHARDS: 4
+  # The slices are contiguous in the sorted list, so slow directories stay
+  # together. From the per-test times of run 41086602517 (30,177 of the
+  # 52,523 tests measured, the rest estimated from their directories), five
+  # put 51, 41, 36, 46 and 49 min in the shards on the 4-core runner; four
+  # would put 66 min in the first. Keep the matrix below in step.
+  SHARDS: 5
 
 jobs:
   # As in jstests.yml, on this workflow's own runs: a scheduled run of a
@@ -78,7 +81,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5]
     env:
       SHARD: ${{ matrix.shard }}
     steps:

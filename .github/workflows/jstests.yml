@@ -2,7 +2,7 @@ name: Full jstests
 
 # Nightly: the interpreter lane (the engine as built, tier off), the full
 # jit-tests and every jstest, about 30 min. The AOT lane's jstests take about
-# 3.5 h (every test compiled), so they run weekly in four shards instead
+# 3.5 h (every test compiled), so they run weekly in five shards instead
 # (jstests-aot.yml); the AOT jit-tests run on every push to yurt (ci.yml).
 
 on:

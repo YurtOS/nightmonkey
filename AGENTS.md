@@ -127,7 +127,7 @@ only the `JIT_SUBSET` paths, and all of them, in four shard jobs, on a push to
 `yurt`, a dispatch, or a pull request labelled `ci:full`. `jstests.yml`
 calls the same engine workflow nightly and manually with full jstests enabled
 in the interpreter lane. `jstests-aot.yml` runs the AOT lane's jstests weekly
-and manually: one engine build (`jit_tests: none`) and four shard jobs
+and manually: one engine build (`jit_tests: none`) and five shard jobs
 (`jstests.py --this-chunk`; `run-jstests-checked.py` sorts the test walk so
 the shards partition one list). Each workflow has a gate: a scheduled run of
 an unchanged `yurt` repeats the newest scheduled or dispatched result of that

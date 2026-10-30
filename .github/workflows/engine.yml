@@ -292,7 +292,8 @@ jobs:
           path: ${{ runner.temp }}/jstests-inputs.tar.zst
           if-no-files-found: error
           compression-level: 0
-          retention-days: 1
+          # A week: "Re-run failed jobs" on the weekly run can come days later.
+          retention-days: 7
           # One name for every attempt, as for the jit-test shard inputs.
           overwrite: true
 
