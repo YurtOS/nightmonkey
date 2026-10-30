@@ -382,3 +382,4 @@ baseline compiler, and within ~3.5x of the IonMonkey optimized native-code
 ceiling (while running within a Wasm engine). On benchmarks where type-based
 specialization works especially well, NightMonkey comes within ~2.5x (e.g.
 Richards) of native Ion.
+
