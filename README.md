@@ -7,6 +7,19 @@ code generation, with dynamic guards for correctness. (The night monkey,
 genus *Aotus*, is the only truly nocturnal monkey: it does its work in
 the night, before the program runs during the day.)
 
+This repository is the YurtOS fork of
+[NightMonkey](https://github.com/bytecodealliance/nightmonkey), maintained for
+[Yurt](https://github.com/YurtOS): a Linux-compatible kernel compiled to
+WebAssembly that runs a Linux sandbox (a shell, CPython, Jupyter) inside a
+browser tab or natively on your machine. Try it at
+<https://yurt-playground.pages.dev>. Yurt guests run as WebAssembly, so a
+JavaScript engine there cannot generate native code. NightMonkey gives the
+SpiderMonkey shell built for Yurt compiled Wasm instead: ahead of time from a
+snapshot, or in-process, where the shell compiles its own scripts and mounts the
+module through Yurt's JIT mount ABI. The engine it links against is the
+SpiderMonkey patch queue in
+[YurtOS/yurt-firefox](https://github.com/YurtOS/yurt-firefox).
+
 Each JS function's bytecode is compiled to a WebAssembly function that
 runs alongside the runtime compiled to Wasm. There are two modes of use:
 

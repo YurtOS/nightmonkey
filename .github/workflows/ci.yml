@@ -1,6 +1,6 @@
 name: CI
 
-# Two tiers (YurtOS/yurt-sandbox#367). Every event runs the Rust, workflow
+# Two tiers, to keep pull-request CI cheap. Every event runs the Rust, workflow
 # and script jobs and builds the engine (engine.yml's jit-test job: the
 # build, local and tier regressions). The jit-tests are tiered:
 #   pull request tier: the JIT_SUBSET path filters of engine.yml, both lanes,

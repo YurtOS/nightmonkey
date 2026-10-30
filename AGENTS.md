@@ -188,5 +188,5 @@ Every worktree's `target/` is tens of GB. `scripts/prune-worktree-targets.sh`
 lists idle ones (dry run). Run `--apply` only after the owner of every worktree
 it lists has confirmed, and pass any you cannot confirm with `--keep`. Delete
 only your own worktrees and `target/` directories, never another session's.
-The script is a copy of the one in `YurtOS/yurtos-kernel` (where its tests
-live); change it there first.
+The script is a copy of the one in the YurtOS kernel repository (where its
+tests live); change it there first.

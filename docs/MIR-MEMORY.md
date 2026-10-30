@@ -315,7 +315,7 @@ Lessons:
 - The validator declines invalid MIR to baseline silently
   (`BUG: invalid MIR` in `--dump-tiers`): an early `fold_unbox` that
   reused a pre-fence value declined 87 scripts with every lane passing.
-  `~/work/nm-mir-scratch/prof8/bugcheck.sh` counts them over the suite.
+  Count them by grepping the suite's `--dump-tiers` output for that line.
 - A pass that substitutes a value must not extend one with killable type
   components past a fence (`gvn`'s and `fold_unbox`'s rule).
 

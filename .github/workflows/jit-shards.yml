@@ -1,6 +1,6 @@
 name: jit-test shards
 
-# The merge tier's jit-tests (YurtOS/yurt-sandbox#367): every jit-test, split
+# The merge tier's jit-tests (see ci.yml): every jit-test, split
 # over SHARDS jobs. Called by ci.yml after engine.yml ran with
 # `jit_tests: sharded`, which uploads the inputs: the built shell (build/bin)
 # and the jit-test sources of the patched tree. Each shard runs its slice in

@@ -1,4 +1,4 @@
-# Contributing to weval
+# Contributing to NightMonkey
 
 ## Code of Conduct
 
