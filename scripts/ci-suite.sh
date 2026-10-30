@@ -29,7 +29,7 @@ tests=${NIGHT_FIREFOX_TESTS:-$here/firefox}
 case "$suite" in
   local) seconds=1800; harness=("$here/scripts/run-night-tests.sh" "$here/build") ;;
   jit) seconds=3600; harness=("$here/scripts/run-jit-tests.sh" "$tests" "$here/build") ;;
-  jstests) seconds=7200; harness=("$here/scripts/run-jstests.sh" "$tests" "$here/build") ;;
+  jstests) seconds=5400; harness=("$here/scripts/run-jstests.sh" "$tests" "$here/build") ;;
   *) echo "unknown suite: $suite" >&2; exit 2 ;;
 esac
 case "$lane_arg" in

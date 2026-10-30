@@ -1,5 +1,10 @@
 name: Full jstests
 
+# Nightly: the interpreter lane (the engine as built, tier off), the full
+# jit-tests and every jstest, about 30 min. The AOT lane's jstests take about
+# 3.5 h (every test compiled), so they run weekly in four shards instead
+# (jstests-aot.yml); the AOT jit-tests run on every push to yurt (ci.yml).
+
 on:
   schedule:
     - cron: '23 2 * * *'
@@ -17,7 +22,7 @@ concurrency:
 jobs:
   # Seconds, not hours: a scheduled run of a yurt that has not moved since
   # the newest completed scheduled or dispatched run on yurt repeats that
-  # run's result without a rebuild: green skips both lanes, red fails here naming the red run. Any
+  # run's result without a rebuild: green skips the lane, red fails here naming the red run. Any
   # other conclusion, no previous run or an unreadable runs API runs the
   # suites; a dispatch always does (scripts/nightly-gate.py).
   gate:
@@ -43,13 +48,6 @@ jobs:
         run: >-
           python3 scripts/nightly-gate.py --event "$EVENT" --head "$HEAD"
           --repo "$GITHUB_REPOSITORY" --workflow jstests.yml --branch "$BRANCH"
-  aot:
-    needs: gate
-    if: ${{ needs.gate.outputs.run == 'true' }}
-    uses: ./.github/workflows/engine.yml
-    with:
-      lane: aot
-      full_jstests: true
   interpreter:
     needs: gate
     if: ${{ needs.gate.outputs.run == 'true' }}

@@ -43,6 +43,7 @@ class UpstreamHarnessTests(unittest.TestCase):
         lib.mkdir()
         (lib / "__init__.py").write_text("")
         (lib / "results.py").write_text("class ResultsSink:\n    def finish(self, completed): pass\n")
+        (lib / "manifest.py").write_text("def _find_all_js_files(location):\n    yield from ()\n")
 
     def run_wrapper(self, suite, output, status=0):
         return subprocess.run(

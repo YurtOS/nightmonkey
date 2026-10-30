@@ -126,10 +126,14 @@ regressions and jit-tests in both AOT and interpreter lanes: on a pull request
 only the `JIT_SUBSET` paths, and all of them, in four shard jobs, on a push to
 `yurt`, a dispatch, or a pull request labelled `ci:full`. `jstests.yml`
 calls the same engine workflow nightly and manually with full jstests enabled
-(a scheduled run of an unchanged `yurt` repeats the newest scheduled or
-dispatched result on `yurt` in seconds, green as a skip and red as a failure naming that run, per
-`scripts/nightly-gate.py`; a dispatch always runs);
-the caller gives the long suites separate jobs per lane. `scripts/ci-suite.sh`
+in the interpreter lane. `jstests-aot.yml` runs the AOT lane's jstests weekly
+and manually: one engine build (`jit_tests: none`) and four shard jobs
+(`jstests.py --this-chunk`; `run-jstests-checked.py` sorts the test walk so
+the shards partition one list). Each workflow has a gate: a scheduled run of
+an unchanged `yurt` repeats the newest scheduled or dispatched result of that
+workflow on `yurt` in seconds, green as a skip and red as a failure naming
+that run (`scripts/nightly-gate.py`); a dispatch always runs.
+`scripts/ci-suite.sh`
 owns lane selection, per-lane time limits and independent failure collection;
 the upstream harness wrappers own nonempty-suite validation. Execution logs and the resolved
 engine revision are uploaded as artifacts. Existing WASI-wide and AOT-only
