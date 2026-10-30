@@ -73,7 +73,7 @@ class CiSuiteTests(unittest.TestCase):
         self.assertEqual((self.root / "lanes").read_text(), "0\n1\n")
 
     def test_per_lane_caps_are_applied_to_each_requested_process(self):
-        for suite, seconds in (("local", 1800), ("jit", 3600), ("jstests", 7200)):
+        for suite, seconds in (("local", 1800), ("jit", 3600), ("jstests", 5400)):
             with self.subTest(suite=suite):
                 (self.root / "caps").unlink(missing_ok=True)
                 result = self.run_suite(suite, "both")

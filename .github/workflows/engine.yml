@@ -14,10 +14,17 @@ on:
       # subset: only JIT_SUBSET below (the pull request tier).
       # sharded: every jit-test, in jit-shards.yml's jobs, which take this
       #   job's build (the merge tier: push to yurt, dispatch, `ci:full`).
+      # none: no jit-tests (the weekly AOT jstests, whose shards take this
+      #   job's build; the merge tier runs the AOT jit-tests on every push).
       jit_tests:
-        description: 'full, subset, or sharded'
+        description: 'full, subset, sharded, or none'
         type: string
         default: full
+      # Upload the built shell and the whole jstests tree for
+      # jstests-aot.yml's shard jobs.
+      jstests_inputs:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -215,7 +222,7 @@ jobs:
           done
 
       - name: jit-tests (${{ inputs.jit_tests == 'subset' && 'pull request subset' || 'all' }})
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.jit_tests != 'sharded' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.jit_tests != 'sharded' && inputs.jit_tests != 'none' }}
         timeout-minutes: 125
         env:
           JIT_TESTS: ${{ inputs.jit_tests }}
@@ -263,6 +270,31 @@ jobs:
           # One name for every attempt: "Re-run failed jobs" reruns a failed
           # shard but not this job, so the shard must find this attempt's
           # upload; a rerun of this job replaces it.
+          overwrite: true
+
+      # The jstests shards' inputs (jstests-aot.yml): the built shell, as for
+      # the jit-test shards, and js/src/tests whole (test262, non262, the
+      # harness and its lib); about 11 MB compressed.
+      - name: Package the jstests inputs
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.jstests_inputs }}
+        run: |
+          set -euo pipefail
+          tar -C "$GITHUB_WORKSPACE" -cf "$RUNNER_TEMP/jstests-inputs.tar" build/bin
+          tar -C "$GITHUB_WORKSPACE/firefox" -rf "$RUNNER_TEMP/jstests-inputs.tar" js/src/tests
+          zstd -q -T0 --rm "$RUNNER_TEMP/jstests-inputs.tar"
+          ls -la "$RUNNER_TEMP/jstests-inputs.tar.zst"
+
+      - name: Upload the jstests inputs
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.jstests_inputs }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightmonkey-jstests-inputs-${{ inputs.lane }}
+          path: ${{ runner.temp }}/jstests-inputs.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          # A week: "Re-run failed jobs" on the weekly run can come days later.
+          retention-days: 7
+          # One name for every attempt, as for the jit-test shard inputs.
           overwrite: true
 
       - name: Full jstests
