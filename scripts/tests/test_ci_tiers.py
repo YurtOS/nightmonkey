@@ -1,6 +1,10 @@
 """Static checks of the CI tier wiring (ci.yml, engine.yml, jit-shards.yml)."""
 
+import json
+import os
 import re
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -76,6 +80,112 @@ class OtherLabelTests(unittest.TestCase):
                 continue
             with self.subTest(job=name):
                 self.assertRegex(text, re.compile(r"^    needs: (tier|\[tier.*\])$", re.M))
+
+
+def job(text, name):
+    """The lines of the top-level job `name`, up to the next job."""
+    m = re.search(rf"^  {name}:\n((?:    .*\n|\n)*)", text + "\n", re.M)
+    return m.group(1)
+
+
+def run_block(step_text):
+    """The shell of a step's `run: |` block, dedented."""
+    lines = step_text.splitlines()
+    start = next(i for i, l in enumerate(lines) if l.strip() == "run: |")
+    out = []
+    for l in lines[start + 1:]:
+        out.append(l[10:] if l.strip() else "")
+    return "\n".join(out) + "\n"
+
+
+class DocsOnlyTests(unittest.TestCase):
+    """A pull request that changes only Markdown runs only the lint jobs:
+    Rust (fmt) and workflows. The engine, the scripts job and the other
+    Rust checks skip. Every other event runs everything."""
+
+    def setUp(self):
+        self.ci = body("ci.yml")
+        self.tier = step(self.ci, "Pick the jit-test tier")
+
+    def pick(self, event="pull_request", files=None, labels="", fail=None):
+        """Run the tier step with a fake gh; return (exit code, outputs)."""
+        with tempfile.TemporaryDirectory() as d:
+            gh = Path(d, "gh")
+            files_text = "\n".join(files or []) + ("\n" if files else "")
+            Path(d, "files").write_text(files_text)
+            Path(d, "labels").write_text(labels)
+            gh.write_text(
+                "#!/usr/bin/env bash\n"
+                f"case \"$*\" in *{fail or 'NO-FAILURE'}*) exit 1 ;; esac\n"
+                f"case \"$*\" in *pulls/*/files*) cat {d}/files ;; *labels*) cat {d}/labels ;; *) exit 9 ;; esac\n")
+            gh.chmod(0o755)
+            out = Path(d, "out")
+            out.write_text("")
+            env = dict(os.environ, PATH=f"{d}:{os.environ['PATH']}", GITHUB_EVENT_NAME=event,
+                       GITHUB_REPOSITORY="o/r", PR="1", GITHUB_OUTPUT=str(out),
+                       GITHUB_STEP_SUMMARY=str(Path(d, "summary")), GH_TOKEN="x")
+            r = subprocess.run(["bash", "-c", run_block(self.tier)], env=env, capture_output=True, text=True)
+            outputs = dict(l.split("=", 1) for l in out.read_text().splitlines() if "=" in l)
+            return r.returncode, outputs
+
+    def test_markdown_only_runs_only_fmt(self):
+        code, out = self.pick(files=["README.md", "docs/plan.md"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out["docs_only"], "true")
+        self.assertEqual(json.loads(out["rust_checks"]), ["fmt"])
+        self.assertEqual(out["jit_tests"], "subset")
+
+    def test_a_code_file_runs_everything(self):
+        code, out = self.pick(files=["README.md", "scripts/ci-suite.sh"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out["docs_only"], "false")
+        self.assertEqual(json.loads(out["rust_checks"]), ["fmt", "check", "test", "clippy"])
+
+    def test_a_rename_from_code_to_markdown_runs_everything(self):
+        # previous_filename is listed too, so the code path it left counts.
+        code, out = self.pick(files=["notes.md", "scripts/old.sh"])
+        self.assertEqual(out["docs_only"], "false")
+
+    def test_ci_full_runs_everything(self):
+        code, out = self.pick(files=["README.md"], labels="ci:full\n")
+        self.assertEqual(code, 0)
+        self.assertEqual(out["docs_only"], "false")
+        self.assertEqual(out["jit_tests"], "sharded")
+
+    def test_push_runs_everything_without_the_api(self):
+        code, out = self.pick(event="push", fail="api")
+        self.assertEqual(code, 0)
+        self.assertEqual(out["docs_only"], "false")
+        self.assertEqual(json.loads(out["rust_checks"]), ["fmt", "check", "test", "clippy"])
+
+    def test_an_api_error_fails_closed(self):
+        code, out = self.pick(files=["README.md"], fail="files")
+        self.assertNotEqual(code, 0)
+        self.assertNotEqual(out.get("docs_only"), "true")
+
+    def test_an_empty_file_list_fails_closed(self):
+        code, out = self.pick(files=[])
+        self.assertNotEqual(code, 0)
+        self.assertNotEqual(out.get("docs_only"), "true")
+
+    def test_the_file_list_includes_previous_names(self):
+        self.assertIn("previous_filename", self.tier)
+
+    def test_the_tier_job_exports_the_outputs(self):
+        tier = job(self.ci, "tier")
+        self.assertIn("docs_only: ${{ steps.tier.outputs.docs_only }}", tier)
+        self.assertIn("rust_checks: ${{ steps.tier.outputs.rust_checks }}", tier)
+
+    def test_heavy_jobs_skip_on_docs_only(self):
+        for name in ("engine", "scripts"):
+            with self.subTest(job=name):
+                self.assertIn("if: needs.tier.outputs.docs_only != 'true'", job(self.ci, name))
+
+    def test_rust_matrix_comes_from_the_tier(self):
+        self.assertIn("check: ${{ fromJSON(needs.tier.outputs.rust_checks) }}", job(self.ci, "rust"))
+
+    def test_the_lint_jobs_always_run(self):
+        self.assertNotIn("docs_only", job(self.ci, "workflows"))
 
 
 if __name__ == "__main__":
