@@ -1,4 +1,4 @@
-"""The AOT jstests run weekly in shards; the nightly runs the interpreter lane.
+"""The AOT jstests run weekly in five shards; the nightly runs the interpreter lane.
 
 jstests.py --total-chunks slices the test list in the order os.walk yields
 it, which is not sorted: shards on different runners could overlap or miss
@@ -109,7 +109,9 @@ class WeeklyAotTests(unittest.TestCase):
 
     def test_shards_cover_one_through_shards(self):
         shards = int(re.search(r"^  SHARDS: (\d+)$", self.text, re.M).group(1))
-        self.assertEqual(shards, 4)
+        # Five: the per-test times of run 41086602517 project 41-51 min per
+        # shard (four would put about 66 min in the first).
+        self.assertEqual(shards, 5)
         matrix = re.search(r"shard: \[([\d, ]+)\]", self.shard).group(1)
         self.assertEqual([int(s) for s in matrix.split(",")], list(range(1, shards + 1)))
         self.assertIn("needs: engine", self.shard)
@@ -122,6 +124,8 @@ class WeeklyAotTests(unittest.TestCase):
         self.assertEqual(value(upload, "name"), "nightmonkey-jstests-inputs-${{ inputs.lane }}")
         self.assertEqual(value(download, "name"), "nightmonkey-jstests-inputs-aot")
         self.assertEqual(value(upload, "overwrite"), "true")
+        # "Re-run failed jobs" on a weekly run can come days later.
+        self.assertGreaterEqual(int(value(upload, "retention-days")), 7)
         for text in (upload, download):
             self.assertNotIn("run_attempt", value(text, "name"))
 
@@ -142,7 +146,7 @@ class WeeklyAotTests(unittest.TestCase):
         run = step(self.shard, "AOT jstests (shard ${{ matrix.shard }})")
         step_minutes = int(value(run, "timeout-minutes"))
         job_minutes = int(re.search(r"^    timeout-minutes: (\d+)$", self.shard, re.M).group(1))
-        # About 55 min of AOT tests per shard (4.2 tests/s, run 41086602517).
+        # At most about 51 min of AOT tests per shard (run 41086602517).
         self.assertGreaterEqual(seconds, 80 * 60)
         self.assertGreater(step_minutes * 60, seconds + 30)
         self.assertGreater(job_minutes, step_minutes)
