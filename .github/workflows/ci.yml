@@ -15,6 +15,12 @@ name: CI
 # starts a run (the `labeled` type); while it is on, every push runs the
 # merge tier.
 #
+# A pull request that changes only Markdown (every file, and every renamed
+# file's old name, ends in .md; nothing in the repository reads one) runs
+# only the lint jobs: Rust (fmt) and workflows. The tier job lists the files
+# through the API; an API error or an empty list fails it. With `ci:full`,
+# and on every other event, everything runs.
+#
 # Any other label starts a run too (the event cannot filter on the label).
 # That run gets a concurrency group of its own (its run id), so it cancels
 # nothing, and the tier job's `if:` skips it, which skips every job (they
@@ -53,7 +59,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        check: [fmt, check, test, clippy]
+        # [fmt] on a Markdown-only pull request (see the top).
+        check: ${{ fromJSON(needs.tier.outputs.rust_checks) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -95,9 +102,15 @@ jobs:
           echo "$ACTIONLINT_SHA256  $archive" | sha256sum -c -
           tar -xzf "$archive" -C "$RUNNER_TEMP" actionlint
           "$RUNNER_TEMP/actionlint" -color -shellcheck=
+      # Here, not only in the scripts job: that job skips on a docs-only
+      # pull request, which would let a classifier broken into answering
+      # "docs-only" skip the test that catches it.
+      - name: Test the CI tier wiring
+        run: python3 -m unittest discover -s scripts/tests -p test_ci_tiers.py
 
   scripts:
     needs: tier
+    if: needs.tier.outputs.docs_only != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -129,6 +142,8 @@ jobs:
       pull-requests: read
     outputs:
       jit_tests: ${{ steps.tier.outputs.jit_tests }}
+      docs_only: ${{ steps.tier.outputs.docs_only }}
+      rust_checks: ${{ steps.tier.outputs.rust_checks }}
     steps:
       - name: Pick the jit-test tier
         id: tier
@@ -138,11 +153,34 @@ jobs:
         run: |
           set -euo pipefail
           jit_tests=sharded
+          docs_only=false
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
             labels=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR/labels" --jq '.[].name')
-            grep -qx 'ci:full' <<< "$labels" || jit_tests=subset
+            if ! grep -qx 'ci:full' <<< "$labels"; then
+              jit_tests=subset
+              files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" \
+                --jq '.[] | .filename, (.previous_filename // empty)')
+              if [ -z "$files" ]; then
+                echo "::error::the API listed no changed files for #$PR" >&2
+                exit 1
+              fi
+              # pulls/files stops at 3000 files: a list that long runs everything.
+              if [ "$(wc -l <<< "$files")" -lt 3000 ] && ! grep -qvE '\.md$' <<< "$files"; then
+                docs_only=true
+              fi
+            fi
           fi
-          echo "jit_tests=$jit_tests" >> "$GITHUB_OUTPUT"
+          if [ "$docs_only" = true ]; then
+            rust_checks='["fmt"]'
+            echo '### Markdown-only pull request: lint only (Rust fmt, workflows)' >> "$GITHUB_STEP_SUMMARY"
+          else
+            rust_checks='["fmt","check","test","clippy"]'
+          fi
+          {
+            echo "jit_tests=$jit_tests"
+            echo "docs_only=$docs_only"
+            echo "rust_checks=$rust_checks"
+          } >> "$GITHUB_OUTPUT"
           if [ "$jit_tests" = subset ]; then
             echo "### jit-tests: pull request subset (label the PR \`ci:full\` for all of them)" >> "$GITHUB_STEP_SUMMARY"
           else
@@ -151,6 +189,7 @@ jobs:
 
   engine:
     needs: tier
+    if: needs.tier.outputs.docs_only != 'true'
     uses: ./.github/workflows/engine.yml
     with:
       jit_tests: ${{ needs.tier.outputs.jit_tests }}
