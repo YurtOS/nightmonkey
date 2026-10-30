@@ -1,15 +1,27 @@
 #!/usr/bin/env bash
 # CI lane policy: run every requested lane, retaining each lane's status/log.
-#   scripts/ci-suite.sh <local|jit|jstests> <aot|interpreter|both>
+#   scripts/ci-suite.sh <local|jit|jstests> <aot|interpreter|both> [-- harness args...]
+# Arguments after -- go to jit_test.py/jstests.py in every lane: a path subset
+# (`warp/ baseline/`) or a shard (`--total-chunks=4 --this-chunk=2`). The
+# local suite takes none.
 # NIGHT_FIREFOX_TESTS names the jit/jstests source tree (default: <repo>/firefox).
 # Requires GNU timeout (provided by Ubuntu coreutils).
 set -euo pipefail
 
-if [ "$#" -ne 2 ]; then
-  echo "usage: $0 <local|jit|jstests> <aot|interpreter|both>" >&2
+usage() {
+  echo "usage: $0 <local|jit|jstests> <aot|interpreter|both> [-- harness args...]" >&2
   exit 2
-fi
+}
+if [ "$#" -lt 2 ] || { [ "$#" -gt 2 ] && [ "$3" != -- ]; }; then usage; fi
 suite=$1
+lane_arg=$2
+shift 2
+extra=()
+if [ "$#" -gt 0 ]; then
+  shift
+  [ "$suite" != local ] || usage
+  extra=(-- "$@")
+fi
 here=$(cd "$(dirname "$0")/.." && pwd)
 # The tree holding js/src/jit-test and js/src/tests: a Firefox checkout or an
 # extracted test-source bundle.
@@ -20,10 +32,10 @@ case "$suite" in
   jstests) seconds=7200; harness=("$here/scripts/run-jstests.sh" "$tests" "$here/build") ;;
   *) echo "unknown suite: $suite" >&2; exit 2 ;;
 esac
-case "$2" in
-  aot|interpreter) lanes=("$2") ;;
+case "$lane_arg" in
+  aot|interpreter) lanes=("$lane_arg") ;;
   both) lanes=(aot interpreter) ;;
-  *) echo "unknown lane: $2" >&2; exit 2 ;;
+  *) echo "unknown lane: $lane_arg" >&2; exit 2 ;;
 esac
 
 logs=${RUNNER_TEMP:?RUNNER_TEMP must name the CI temporary directory}/nightmonkey-logs
@@ -44,7 +56,7 @@ for lane in "${lanes[@]}"; do
   # the scripts interpreted and every test green.
   if timeout --kill-after=30s "${seconds}s" \
       env NIGHT_INPROCESS_OFF="$off" NIGHT_INPROC_STRICT="$strict" NIGHT_OPTIONS="$opts" \
-      "${harness[@]}" 2>&1 | tee "$logs/$suite-$lane.log"; then
+      "${harness[@]}" ${extra[@]+"${extra[@]}"} 2>&1 | tee "$logs/$suite-$lane.log"; then
     echo "$suite ($lane): passed"
   else
     status=$?
