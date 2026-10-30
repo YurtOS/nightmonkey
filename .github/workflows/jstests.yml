@@ -15,12 +15,43 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Seconds, not hours: a scheduled run of a yurt that has not moved since
+  # the last completed scheduled run (any conclusion) tests nothing new, so
+  # it skips the build and both lanes. A dispatch always runs; an unreadable
+  # runs API runs too (scripts/nightly-gate.py).
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: scripts/nightly-gate.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          HEAD: ${{ github.sha }}
+          BRANCH: ${{ github.event.repository.default_branch }}
+        run: >-
+          python3 scripts/nightly-gate.py --event "$EVENT" --head "$HEAD"
+          --repo "$GITHUB_REPOSITORY" --workflow jstests.yml --branch "$BRANCH"
   aot:
+    needs: gate
+    if: ${{ needs.gate.outputs.run == 'true' }}
     uses: ./.github/workflows/engine.yml
     with:
       lane: aot
       full_jstests: true
   interpreter:
+    needs: gate
+    if: ${{ needs.gate.outputs.run == 'true' }}
     uses: ./.github/workflows/engine.yml
     with:
       lane: interpreter

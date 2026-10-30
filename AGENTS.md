@@ -125,7 +125,9 @@ It calls `engine.yml` to build SpiderMonkey and Nightmonkey and run local
 regressions and jit-tests in both AOT and interpreter lanes: on a pull request
 only the `JIT_SUBSET` paths, and all of them, in four shard jobs, on a push to
 `yurt`, a dispatch, or a pull request labelled `ci:full`. `jstests.yml`
-calls the same engine workflow nightly and manually with full jstests enabled;
+calls the same engine workflow nightly and manually with full jstests enabled
+(a scheduled run is skipped when `yurt` has not moved since the last completed
+scheduled run, per `scripts/nightly-gate.py`; a dispatch always runs);
 the caller gives the long suites separate jobs per lane. `scripts/ci-suite.sh`
 owns lane selection, per-lane time limits and independent failure collection;
 the upstream harness wrappers own nonempty-suite validation. Execution logs and the resolved
