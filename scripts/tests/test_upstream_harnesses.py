@@ -94,6 +94,39 @@ class UpstreamHarnessTests(unittest.TestCase):
         self.assertEqual(self.run_wrapper("js", "complete").returncode, 0)
         self.assertEqual(self.run_wrapper("js", "interrupted").returncode, 2)
 
+    def test_jstests_passes_the_engine_build_info(self):
+        # Upstream jstests.py exits 1 before running anything unless it finds
+        # config/autoconf.mk above the shell or gets --xul-info=ABI:OS:DEBUG;
+        # NightMonkey's shell lives in build/bin, outside the objdir.
+        harness = self.firefox / "js/src/tests/jstests.py"
+        harness.write_text(
+            "import sys\n"
+            "info = [a.split('=', 1)[1] for a in sys.argv if a.startswith('--xul-info=')]\n"
+            "if not info:\n"
+            "    print(\"Can't find config/autoconf.mk on a directory containing the JS shell\")\n"
+            "    sys.exit(1)\n"
+            "print('XUL-INFO ' + info[0])\n"
+            "print('TEST-PASS | example.js')\n"
+            "print('NIGHT-JSTESTS completed=1 passed=1 failed=0 timeout=0 skipped=0')\n"
+        )
+        result = self.run_wrapper("js", "")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # What obj-nightmonkey-sm/config/autoconf.mk records for
+        # spidermonkey/mozconfig: TARGET_XPCOM_ABI, OS_TARGET, MOZ_DEBUG.
+        self.assertIn("XUL-INFO wasm32-gcc3:WASI:false\n", result.stdout)
+
+    def test_jstests_build_info_matches_the_mozconfig(self):
+        # The --xul-info constant describes this build; change both together.
+        repo = Path(__file__).resolve().parents[2]
+        options = [line.split(None, 1)[1].strip()
+                   for line in (repo / "spidermonkey/mozconfig").read_text().splitlines()
+                   if line.startswith("ac_add_options ")]
+        self.assertIn("--target=wasm32-unknown-wasi", options)
+        self.assertFalse([o for o in options if o.startswith("--enable-debug")
+                          and o != "--enable-debug-symbols"], options)
+        self.assertIn("xul_info=wasm32-gcc3:WASI:false\n",
+                      (repo / "scripts/run-jstests.sh").read_text())
+
     def test_jit_rejects_jstests_output(self):
         self.assertEqual(self.run_wrapper("jit", "TEST-PASS | example.js").returncode, 2)
 
