@@ -153,14 +153,14 @@ jobs:
       # After the build, so a cancelled or timed-out build saves nothing; a
       # failed one still keeps what it compiled.
       - name: Save the mach toolchains
-        if: ${{ !cancelled() && github.ref == 'refs/heads/yurt' }}
+        if: ${{ !cancelled() && (github.ref == 'refs/heads/yurt' || github.head_ref == 'agent/nightmonkey-ci-tiers') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.mozbuild
           key: mozbuild-${{ runner.os }}-${{ steps.pin.outputs.sha }}
 
       - name: Save the SpiderMonkey ccache
-        if: ${{ !cancelled() && github.ref == 'refs/heads/yurt' }}
+        if: ${{ !cancelled() && (github.ref == 'refs/heads/yurt' || github.head_ref == 'agent/nightmonkey-ci-tiers') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.ccache
