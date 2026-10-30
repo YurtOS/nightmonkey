@@ -33,10 +33,19 @@ if [ "${NIGHT_INPROCESS_OFF:-0}" != 1 ]; then
   excludes+=(--exclude-file "$here/tests/jstests-excludes.txt")
 fi
 
+# jstests.py reads TARGET_XPCOM_ABI, OS_TARGET and MOZ_DEBUG from a
+# config/autoconf.mk above the shell to evaluate manifest conditions
+# (winWidget, Android, is64Bit, isDebugBuild); without one it exits before
+# running anything. The shell here is build/bin, outside the objdir, so pass
+# the values the objdir records for spidermonkey/mozconfig: wasm32 target
+# (toolchain.configure's "<cpu>-gcc3"), OS_TARGET WASI, not a debug build.
+xul_info=wasm32-gcc3:WASI:false
+
 log=$(mktemp)
 trap 'rm -f "$log"' EXIT
 python3 -u "$here/scripts/run-jstests-checked.py" "$firefox/js/src/tests/jstests.py" \
   --format=automation \
+  --xul-info="$xul_info" \
   "${excludes[@]}" \
   --wpt=disabled \
   "$build/bin/inproc-shell.sh" "$@" 2>&1 | tee "$log"

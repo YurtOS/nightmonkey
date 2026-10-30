@@ -115,6 +115,18 @@ class UpstreamHarnessTests(unittest.TestCase):
         # spidermonkey/mozconfig: TARGET_XPCOM_ABI, OS_TARGET, MOZ_DEBUG.
         self.assertIn("XUL-INFO wasm32-gcc3:WASI:false\n", result.stdout)
 
+    def test_jstests_build_info_matches_the_mozconfig(self):
+        # The --xul-info constant describes this build; change both together.
+        repo = Path(__file__).resolve().parents[2]
+        options = [line.split(None, 1)[1].strip()
+                   for line in (repo / "spidermonkey/mozconfig").read_text().splitlines()
+                   if line.startswith("ac_add_options ")]
+        self.assertIn("--target=wasm32-unknown-wasi", options)
+        self.assertFalse([o for o in options if o.startswith("--enable-debug")
+                          and o != "--enable-debug-symbols"], options)
+        self.assertIn("xul_info=wasm32-gcc3:WASI:false\n",
+                      (repo / "scripts/run-jstests.sh").read_text())
+
     def test_jit_rejects_jstests_output(self):
         self.assertEqual(self.run_wrapper("jit", "TEST-PASS | example.js").returncode, 2)
 
