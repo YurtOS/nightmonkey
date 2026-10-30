@@ -108,7 +108,8 @@ class CheckEngineSourceTests(unittest.TestCase):
 
     def test_unpinned_action_is_rejected(self):
         line = next(l for l in self.workflow.splitlines() if "uses: actions/upload-artifact@" in l)
-        workflow = self.mutate(line, line.split("@")[0] + "@v4")
+        # Every copy of the line (engine.yml uploads logs and shard inputs).
+        workflow = self.mutate(line, line.split("@")[0] + "@v4", count=self.workflow.count(line))
         self.assert_rejected(self.check(workflow), "full commit SHA")
 
     def test_missing_manifest_copy_is_rejected(self):

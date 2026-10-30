@@ -1,16 +1,43 @@
 name: CI
 
+# Two tiers (YurtOS/yurt-sandbox#367). Every event runs the Rust, workflow
+# and script jobs and builds the engine (engine.yml's jit-test job: the
+# build, local and tier regressions). The jit-tests are tiered:
+#   pull request tier: the JIT_SUBSET path filters of engine.yml, both lanes,
+#     in the build job.
+#   merge tier: every jit-test, split over jit-shards.yml's four shard jobs.
+#     It runs on a push to yurt, in a merge queue (merge_group), on a
+#     workflow_dispatch, and on a pull request while it carries `ci:full`.
+# The `tier` job reads the label through the API when the run starts, not
+# from the event: a push's event carries the labels of the moment it was
+# sent, so a push a few seconds after labelling would take the pull request
+# tier and cancel the `labeled` run (yurt-playground#276). Adding the label
+# starts a run (the `labeled` type); while it is on, every push runs the
+# merge tier.
+#
+# Any other label starts a run too (the event cannot filter on the label).
+# That run gets a concurrency group of its own (its run id), so it cancels
+# nothing, and the tier job's `if:` skips it, which skips every job (they
+# all need the tier). Its skipped checks can show as the latest for the head
+# over an earlier red one; no check here is required, so nothing is bypassed,
+# but read the run list, not only the checks summary.
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
   push:
     branches: [yurt]
+  merge_group:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# Each push to yurt has a group of its own: a group holds one running and one
+# waiting run, and a newer waiting run replaces the older, so back-to-back
+# merges would drop the middle one's merge-tier result. So has a run started
+# by a label other than ci:full (see the top).
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{ github.event_name == 'push' && format('-{0}', github.sha) || '' }}${{ github.event.action == 'labeled' && github.event.label.name != 'ci:full' && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 defaults:
@@ -20,6 +47,7 @@ defaults:
 jobs:
   rust:
     name: Rust (${{ matrix.check }})
+    needs: tier
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
@@ -49,6 +77,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   workflows:
+    needs: tier
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -68,6 +97,7 @@ jobs:
           "$RUNNER_TEMP/actionlint" -color -shellcheck=
 
   scripts:
+    needs: tier
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -86,5 +116,48 @@ jobs:
       - name: Test opcode generation and regression harness
         run: python3 -m unittest discover -s scripts/tests -v
 
+  # Picks the jit-test tier (see the top). An API error fails the job, and
+  # with it the engine, never picks a tier.
+  tier:
+    # Not on a run started by a label other than ci:full (see the top).
+    if: github.event.action != 'labeled' || github.event.label.name == 'ci:full'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      # Read only: the pull request's labels.
+      pull-requests: read
+    outputs:
+      jit_tests: ${{ steps.tier.outputs.jit_tests }}
+    steps:
+      - name: Pick the jit-test tier
+        id: tier
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          jit_tests=sharded
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            labels=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR/labels" --jq '.[].name')
+            grep -qx 'ci:full' <<< "$labels" || jit_tests=subset
+          fi
+          echo "jit_tests=$jit_tests" >> "$GITHUB_OUTPUT"
+          if [ "$jit_tests" = subset ]; then
+            echo "### jit-tests: pull request subset (label the PR \`ci:full\` for all of them)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '### jit-tests: all, sharded (merge tier)' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   engine:
+    needs: tier
     uses: ./.github/workflows/engine.yml
+    with:
+      jit_tests: ${{ needs.tier.outputs.jit_tests }}
+
+  # The merge tier's jit-tests (see the top), from the engine job's build.
+  # On the pull request tier the whole job is skipped.
+  jit-shards:
+    needs: [tier, engine]
+    if: ${{ needs.tier.outputs.jit_tests == 'sharded' }}
+    uses: ./.github/workflows/jit-shards.yml

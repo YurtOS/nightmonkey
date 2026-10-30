@@ -122,7 +122,9 @@ rebuilding the engine.
 `.github/workflows/ci.yml` runs independent Rust fmt/check/test/Clippy jobs,
 workflow lint and script checks on PRs, pushes to `yurt` and manual dispatch.
 It calls `engine.yml` to build SpiderMonkey and Nightmonkey and run local
-regressions and jit-tests in both AOT and interpreter lanes. `jstests.yml`
+regressions and jit-tests in both AOT and interpreter lanes: on a pull request
+only the `JIT_SUBSET` paths, and all of them, in four shard jobs, on a push to
+`yurt`, a dispatch, or a pull request labelled `ci:full`. `jstests.yml`
 calls the same engine workflow nightly and manually with full jstests enabled;
 the caller gives the long suites separate jobs per lane. `scripts/ci-suite.sh`
 owns lane selection, per-lane time limits and independent failure collection;

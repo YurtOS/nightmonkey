@@ -73,11 +73,14 @@ class CMakeDistTests(unittest.TestCase):
         self.env["PATH"] = str(self.base / "path") + os.pathsep + os.environ["PATH"]
         self.builds = 0
 
-    def write_config(self, sysroot_option, bare=False, bare_cc=None):
-        """The real config's shape (macOS build, warnings trimmed)."""
+    def write_config(self, sysroot_option, bare=False, bare_cc=None, launcher=None):
+        """The real config's shape (macOS build, warnings trimmed). A launcher
+        (an engine built with CCACHE=ccache) prefixes both compilers."""
         absolute = str(self.producer / "clang/bin/clang")
         cxx = "clang" if bare else absolute
         cc = "clang" if (bare if bare_cc is None else bare_cc) else absolute
+        if launcher:
+            cxx, cc = f"{launcher} {cxx}", f"{launcher} {cc}"
         flags = " ".join(sysroot_option)
         config = {
             "ar": str(self.producer / "clang/bin/llvm-ar"),
@@ -159,6 +162,19 @@ class CMakeDistTests(unittest.TestCase):
             with self.subTest(line=line[:2]):
                 self.assertEqual(line[0], str(self.producer / "clang/bin/clang++"))
                 self.assertIn(expected, [line[i:i + 4] for i in range(len(line))])
+
+    def test_compiler_launcher_in_the_config_is_dropped(self):
+        # mach records CC/CXX with the ccache or sccache it built through; the
+        # compiler is the clang after it.
+        for launcher in ("/usr/bin/ccache", "/opt/sccache/bin/sccache"):
+            with self.subTest(launcher=launcher):
+                self.write_config(["--sysroot", str(self.producer_sysroot)], launcher=launcher)
+                build = self.configured()
+                self.assertEqual(self.compiler(build, "C"), str(self.producer / "clang/bin/clang"))
+                self.assertEqual(self.compiler(build, "CXX"), str(self.producer / "clang/bin/clang++"))
+                for line in self.command_lines(build):
+                    self.assertEqual(line[0], str(self.producer / "clang/bin/clang++"))
+                    self.assertNotIn(launcher, line)
 
     def test_provisioned_toolchain_and_sysroot_replace_the_config(self):
         spellings = {
