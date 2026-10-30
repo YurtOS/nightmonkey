@@ -3,11 +3,13 @@
     nightly-gate.py --event EVENT --head SHA --repo OWNER/NAME \
         --workflow FILE --branch BRANCH
 
-Writes run=true or run=false to $GITHUB_OUTPUT (stdout when unset). A
-scheduled run is skipped when the last completed scheduled run of the same
-workflow on BRANCH (any conclusion) was for HEAD: nothing changed since.
-Any other event always runs. When the runs API cannot be read the run goes
-ahead with a warning: an outage must not silently stop the testing.
+Writes run=true or run=false to $GITHUB_OUTPUT (stdout when unset). The
+base is the last completed scheduled run of the same workflow on BRANCH.
+A scheduled run whose HEAD is the base's head repeats the base's result in
+seconds: after a green base it skips (run=false); after a red one it exits 1
+with an error naming that run, so the red stays visible without a rebuild.
+Any other base conclusion (cancelled, timed out...), no base, an unreadable
+runs API, or a moved HEAD runs the suites; so does every other event.
 """
 
 import argparse
@@ -26,16 +28,25 @@ def decide(args):
         result = subprocess.run(["gh", "api", path], capture_output=True, text=True,
                                 check=True, timeout=60)
         runs = json.loads(result.stdout)["workflow_runs"]
-        last = runs[0]["head_sha"] if runs else None
+        base = runs[0] if runs else None
+        last = base["head_sha"] if base else None
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, IndexError) as error:
         detail = getattr(error, "stderr", "") or error
         print(f"::warning::cannot read the previous scheduled runs ({detail}); running")
         return True, "previous run unknown"
     if last is None:
         return True, "no previous completed scheduled run"
-    if last == args.head:
-        return False, f"{args.branch} is still at {args.head}, tested by the last scheduled run"
-    return True, f"{args.branch} moved from {last} to {args.head}"
+    if last != args.head:
+        return True, f"{args.branch} moved from {last} to {args.head}"
+    url = base.get("html_url", "the last scheduled run")
+    conclusion = base.get("conclusion")
+    if conclusion == "success":
+        return False, f"{args.branch} is still at {args.head}, green in {url}"
+    if conclusion == "failure":
+        print(f"::error::nothing changed since the red run {url} ({args.branch} is still at "
+              f"{args.head}); dispatch the workflow to retry")
+        sys.exit(1)
+    return True, f"{args.branch} is still at {args.head}, but {url} ended {conclusion}"
 
 
 def main():

@@ -16,9 +16,10 @@ concurrency:
 
 jobs:
   # Seconds, not hours: a scheduled run of a yurt that has not moved since
-  # the last completed scheduled run (any conclusion) tests nothing new, so
-  # it skips the build and both lanes. A dispatch always runs; an unreadable
-  # runs API runs too (scripts/nightly-gate.py).
+  # the last completed scheduled run repeats that run's result without a
+  # rebuild: green skips both lanes, red fails here naming the red run. Any
+  # other conclusion, no previous run or an unreadable runs API runs the
+  # suites; a dispatch always does (scripts/nightly-gate.py).
   gate:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
