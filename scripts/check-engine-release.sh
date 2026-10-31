@@ -206,7 +206,8 @@ for step in steps:
 # toolchain or testsrc as a word, however the path around it is spelled,
 # fails, a read or a comment included, and so does curl, wget, git clone or
 # fetch, gh release or api, download-artifact or the word repository anywhere
-# (a checkout of another repository, in a block or flow mapping). This over-flags on purpose: no shell is
+# (a checkout of another repository, in a block or flow mapping). This
+# over-flags on purpose: no shell is
 # parsed, so a new step that needs the release directories is added to
 # REQUIRED above, deliberately. Only full-line comments are ignored.
 DOWNLOADS = re.compile(r"\bcurl\b|\bwget\b|\bgit\b.*\b(?:clone|fetch)\b|\bgh\s+(?:release|api)\b|"
