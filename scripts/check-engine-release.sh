@@ -3,11 +3,11 @@
 # engine/ENGINE_RELEASE, verifying every digest first, and nothing else.
 # Comment lines in engine-release.yml are ignored.
 #
-# The three steps that carry this (fetch the release: download, verify every
+# The four steps that carry this (fetch the release: download, verify every
 # digest, extract; build NightMonkey against what was fetched; run the
-# jit-tests from the release's test sources) must each appear once, in that
-# order, with exactly the text in REQUIRED below: no added `if:`,
-# `continue-on-error:` or argument. Changing one of them means changing this
+# jit-tests, and with full_jstests the jstests, from the release's test
+# sources) must each appear once, in that order, with exactly the text in
+# REQUIRED below: no other `if:`, no `continue-on-error:`, no other argument. Changing one of them means changing this
 # script too. No other step may mention the release pin, a download, the
 # fetch script, cmake, or the source build (engine-src, mach, build-engine.sh,
 # build-spidermonkey.sh, QUEUE_PIN), not even in echo text. Every step that
@@ -51,6 +51,7 @@ REQUIRED = [
 '''),
     ("the jit-tests (from the fetched test sources)", r'''
 - name: jit-tests from the release test sources
+  if: ${{ !cancelled() && steps.build.outcome == 'success' }}
   env:
     JIT_TESTS: ${{ inputs.jit_tests }}
     NIGHT_FIREFOX_TESTS: ${{ runner.temp }}/testsrc
@@ -63,6 +64,14 @@ REQUIRED = [
         scripts/ci-suite.sh jit "$CI_LANE" -- "${paths[@]}" ;;
       *) echo "::error::unknown jit_tests input: $JIT_TESTS"; exit 1 ;;
     esac
+'''),
+    ("the jstests (from the fetched test sources, with the jstests bundle)", r'''
+- name: Full jstests
+  if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.full_jstests }}
+  timeout-minutes: 245
+  env:
+    NIGHT_FIREFOX_TESTS: ${{ runner.temp }}/testsrc
+  run: scripts/ci-suite.sh jstests "$CI_LANE"
 '''),
 ]
 TESTSRC = "NIGHT_FIREFOX_TESTS: ${{ runner.temp }}/testsrc"
@@ -137,7 +146,7 @@ for label, text in REQUIRED:
         err("%s: step '%s' must be exactly:\n%s\nbut is:\n%s" % (label, name, want, steps[at[0]]))
     found.append(at[0])
 if len(found) == len(REQUIRED) and found != sorted(found):
-    err("step order must be: fetch, build, jit-tests")
+    err("step order must be: fetch, build, jit-tests, jstests")
 
 required_names = {name_of(text.strip("\n")) for _, text in REQUIRED}
 for step in steps:

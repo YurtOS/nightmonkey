@@ -22,10 +22,13 @@
 #   testsrc/               the test-source bundle, plus the jstests bundle
 #                          (and its xul-info.txt) with --jstests true:
 #                          NIGHT_FIREFOX_TESTS
-# Every archive is listed before extraction: members must be regular files,
-# directories, or links whose target has no ".." and is not absolute, under
-# the archive's expected top level (spidermonkey/, js/ and xul-info.txt,
-# clang/, sysroot-wasm32-wasi/). Those directories must not exist yet.
+# Every archive is listed before extraction, and refused unless every member
+# is under its expected top level (spidermonkey/, js/ and xul-info.txt,
+# clang/, sysroot-wasm32-wasi/), which is itself a directory; no member sits
+# under a link; symlink targets are relative, without "..", and resolve under
+# the top level (clang++ -> clang-NN passes); hard-link targets are earlier
+# regular files of the same top level; and nothing else (devices, fifos)
+# appears. The output directories must not exist yet.
 # Prints, and appends to $GITHUB_OUTPUT when set: tag=, spidermonkey_dist=,
 # toolchain_root=, sysroot=, testsrc=.
 # Exit codes: 0 ok; 1 refused or failed (the message names the file); 2 usage.
@@ -145,18 +148,40 @@ check_members() {
   zstd -q -dc "$archive" | python3 -I -c '
 import posixpath, sys, tarfile
 name_, tops = sys.argv[1], sys.argv[2:]
-seen = set()
+seen, files, links = set(), set(), set()
+def fail(why):
+    sys.exit("%s: %s" % (name_, why))
 for m in tarfile.open(fileobj=sys.stdin.buffer, mode="r|"):
     parts = [x for x in m.name.split("/") if x not in ("", ".")]
     if not parts or m.name.startswith("/") or ".." in parts or parts[0] not in tops:
-        sys.exit("%s: member %r is outside %s" % (name_, m.name, tops))
-    if m.issym() or m.islnk():
-        lp = m.linkname.split("/")
-        if m.linkname.startswith("/") or ".." in lp:
-            sys.exit("%s: link %r -> %r may leave the archive" % (name_, m.name, m.linkname))
-    elif not (m.isfile() or m.isdir()):
-        sys.exit("%s: member %r is not a file, directory or link" % (name_, m.name))
-    seen.add(parts[0])
+        fail("member %r is outside %s" % (m.name, tops))
+    name, top = "/".join(parts), parts[0]
+    # The top level itself is a directory (xul-info.txt, a file, the one
+    # exception): a link there would move everything under it.
+    if len(parts) == 1 and not (m.isdir() or (top == "xul-info.txt" and m.isfile())):
+        fail("top level %r must be a directory" % name)
+    # Nothing may sit under a link: on disk it would follow the link.
+    for k in range(1, len(parts)):
+        if "/".join(parts[:k]) in links:
+            fail("member %r is under a link (%s)" % (name, "/".join(parts[:k])))
+    if m.issym():
+        target = posixpath.normpath(posixpath.join(posixpath.dirname(name), m.linkname))
+        if (m.linkname.startswith("/") or ".." in m.linkname.split("/")
+                or not (target == top or target.startswith(top + "/"))):
+            fail("link %r -> %r may leave %s/" % (name, m.linkname, top))
+        links.add(name)
+    elif m.islnk():
+        # GNU tar resolves a hard-link target as an archive path (stripping a
+        # prefix through ../): it must be an earlier regular file of this top.
+        lp = [x for x in m.linkname.split("/") if x not in ("", ".")]
+        if (m.linkname.startswith("/") or ".." in lp or not lp or lp[0] != top
+                or "/".join(lp) not in files):
+            fail("hard link %r -> %r is not an earlier regular file of %s/" % (name, m.linkname, top))
+    elif m.isfile():
+        files.add(name)
+    elif not m.isdir():
+        fail("member %r is not a file, directory or link" % name)
+    seen.add(top)
 print(" ".join(sorted(seen)))
 ' "${archive##*/}" "$@"
 }

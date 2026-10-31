@@ -10,7 +10,11 @@ name: Engine release integration
 # build and the jit-test step; change them together.
 #
 # Transition: ci.yml runs this next to engine.yml (the source build at
-# engine/QUEUE_PIN), which stays until this job has been green on yurt.
+# engine/QUEUE_PIN), which stays until this job has been green on yurt. It
+# runs what engine.yml's job runs on its build (the guest tier contract, the
+# local and tier regressions, the jit-tests, the jstests when asked), except
+# the shard and jstests-shard uploads: the merge tier's full jit-tests run
+# here in-job instead of in jit-shards.yml.
 
 on:
   workflow_call:
@@ -106,7 +110,24 @@ jobs:
         timeout-minutes: 65
         run: scripts/ci-suite.sh local "$CI_LANE"
 
+      # The default pipeline is MIR (the lanes above run it with strict
+      # coverage); the baseline tier and MIR under its stress option get the
+      # regression tests as tiers of their own.
+      - name: Tier regressions (baseline, MIR stress)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 65
+        run: |
+          set -euo pipefail
+          for opts in "--pipeline baseline --strict-coverage" \
+                      "--pipeline mir --mir-stress 3 --strict-coverage"; do
+            echo "::group::night tests: $opts"
+            NIGHT_INPROC_STRICT=1 NIGHT_OPTIONS="$opts" scripts/run-night-tests.sh build
+            echo "::endgroup::"
+          done
+
+      # As in engine.yml: after a failed regression step the jit-tests still run.
       - name: jit-tests from the release test sources
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
           JIT_TESTS: ${{ inputs.jit_tests }}
           NIGHT_FIREFOX_TESTS: ${{ runner.temp }}/testsrc

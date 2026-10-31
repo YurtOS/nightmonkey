@@ -140,7 +140,9 @@ in `engine/ENGINE_RELEASE`, with the sha256 of its `MANIFEST.json` and of each
 asset (engine, test sources, jstests, clang, WASI sysroot). CI's
 `engine-release.yml` job runs next to the source build until it has been
 green on `yurt`; then `engine.yml`, `engine/QUEUE_PIN` and
-`check-engine-source.sh` are removed.
+`check-engine-source.sh` are removed. It runs the same regression steps as
+the source build and the same jit-test tier: the pull request subset, or on
+the merge tier all jit-tests in its own job (the source build shards them).
 
 ```
 scripts/fetch-engine-release.sh --jstests false /path/to/release

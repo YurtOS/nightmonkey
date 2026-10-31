@@ -200,14 +200,16 @@ jobs:
   # engine/ENGINE_RELEASE (engine-release.yml), next to the source build and
   # with no condition between them, until it has been green on yurt; then
   # engine.yml, engine/QUEUE_PIN and check-engine-source.sh are removed.
-  # Both lanes, the pull request jit-test subset on every event: the full
-  # jit-tests stay with the source build's shards for now.
+  # Both lanes; the jit-tests of the tier the source build gets: the pull
+  # request subset, or on the merge tier all of them, run in this job (the
+  # source build's run in jit-shards.yml). That costs one long job per merge
+  # (about 95 min of jit-tests) for the transition.
   engine-release:
     needs: tier
     if: needs.tier.outputs.docs_only != 'true'
     uses: ./.github/workflows/engine-release.yml
     with:
-      jit_tests: subset
+      jit_tests: ${{ needs.tier.outputs.jit_tests == 'sharded' && 'full' || 'subset' }}
 
   # The merge tier's jit-tests (see the top), from the engine job's build.
   # On the pull request tier the whole job is skipped.
