@@ -39,7 +39,17 @@ fi
 # running anything. The shell here is build/bin, outside the objdir, so pass
 # the values the objdir records for spidermonkey/mozconfig: wasm32 target
 # (toolchain.configure's "<cpu>-gcc3"), OS_TARGET WASI, not a debug build.
+# An engine release's test sources (NIGHT_FIREFOX_TESTS, engine-release.yml)
+# carry the value read from the objdir that built them, in xul-info.txt at
+# their root: that one wins. It must be one line, ABI:OS:DEBUG.
 xul_info=wasm32-gcc3:WASI:false
+if [ -e "$firefox/xul-info.txt" ]; then
+  xul_info=$(cat "$firefox/xul-info.txt")
+  if [ "$(wc -l < "$firefox/xul-info.txt")" -ne 1 ] || ! [[ "$xul_info" =~ ^[^:[:space:]]+:[^:[:space:]]+:(true|false)$ ]]; then
+    echo "run-jstests: $firefox/xul-info.txt must be one line ABI:OS:true|false, got '$xul_info'" >&2
+    exit 2
+  fi
+fi
 
 log=$(mktemp)
 trap 'rm -f "$log"' EXIT

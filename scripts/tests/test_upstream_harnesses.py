@@ -146,5 +146,49 @@ class UpstreamHarnessTests(unittest.TestCase):
                 self.assertEqual(self.run_wrapper(suite, output, 7).returncode, 7)
 
 
+
+class JstestsXulInfoTests(unittest.TestCase):
+    """jstests.py takes --xul-info instead of reading config/autoconf.mk. The
+    jstests asset of an engine release ships xul-info.txt at its root (read
+    from the objdir that built it), and run-jstests.sh passes that; a Firefox
+    checkout (no xul-info.txt) keeps the value run-jstests.sh records for
+    spidermonkey/mozconfig."""
+
+    def setUp(self):
+        UpstreamHarnessTests.setUp(self)  # the same fixture, not its cases
+        (self.firefox / "js/src/tests/jstests.py").write_text(
+            'import os, sys\nopen(os.environ["ARGV_OUT"], "w").write("\\n".join(sys.argv[1:]))\n'
+            'print(os.environ["HARNESS_OUTPUT"])\n')
+        self.argv = self.root / "argv"
+
+    def run_js(self):
+        return subprocess.run(
+            ["bash", str(self.scripts / "run-jstests.sh"), str(self.firefox), str(self.build)],
+            env={**os.environ, "ARGV_OUT": str(self.argv),
+                 "HARNESS_OUTPUT": "TEST-PASS | example.js\nNIGHT-JSTESTS completed=1 passed=1 failed=0 timeout=0 skipped=0"},
+            capture_output=True, text=True, check=False)
+
+    def test_a_bundle_passes_its_xul_info(self):
+        (self.firefox / "xul-info.txt").write_text("wasm32-clang:WASI:false\n")
+        result = self.run_js()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        argv = self.argv.read_text().split("\n")
+        self.assertEqual([a for a in argv if a.startswith("--xul-info")], ["--xul-info=wasm32-clang:WASI:false"])
+
+    def test_a_checkout_keeps_the_recorded_value(self):
+        result = self.run_js()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        argv = self.argv.read_text().split("\n")
+        self.assertEqual([a for a in argv if a.startswith("--xul-info")], ["--xul-info=wasm32-gcc3:WASI:false"])
+
+    def test_an_unusable_xul_info_file_fails(self):
+        for text in ("", "a:b\n", "a:b:c:d\n", "wasm32-clang:WASI:false\nextra\n"):
+            with self.subTest(text=text):
+                (self.firefox / "xul-info.txt").write_text(text)
+                result = self.run_js()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("xul-info.txt", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
