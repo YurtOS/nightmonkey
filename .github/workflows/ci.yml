@@ -126,6 +126,8 @@ jobs:
           done
       - name: Check the engine source pin
         run: scripts/check-engine-source.sh
+      - name: Check the engine release pin
+        run: scripts/check-engine-release.sh
       - name: Test opcode generation and regression harness
         run: python3 -m unittest discover -s scripts/tests -v
 
@@ -193,6 +195,19 @@ jobs:
     uses: ./.github/workflows/engine.yml
     with:
       jit_tests: ${{ needs.tier.outputs.jit_tests }}
+
+  # The same build against the published engine release pinned in
+  # engine/ENGINE_RELEASE (engine-release.yml), next to the source build and
+  # with no condition between them, until it has been green on yurt; then
+  # engine.yml, engine/QUEUE_PIN and check-engine-source.sh are removed.
+  # Both lanes, the pull request jit-test subset on every event: the full
+  # jit-tests stay with the source build's shards for now.
+  engine-release:
+    needs: tier
+    if: needs.tier.outputs.docs_only != 'true'
+    uses: ./.github/workflows/engine-release.yml
+    with:
+      jit_tests: subset
 
   # The merge tier's jit-tests (see the top), from the engine job's build.
   # On the pull request tier the whole job is skipped.

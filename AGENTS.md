@@ -58,6 +58,16 @@ the script refuses to overwrite one, so move it aside before building again.
 CI also checks that the pin is on yurt-firefox `main`; this local recipe does
 not (`git -C /path/to/yurt-firefox merge-base --is-ancestor HEAD origin/main`).
 Do not assume a neighboring repository's engine build is ABI-compatible.
+
+A published engine release can stand in for the source build (README "Engine
+release"): `engine/ENGINE_RELEASE` pins its tag and digests,
+`scripts/fetch-engine-release.sh` fetches and verifies it, and
+`.github/workflows/engine-release.yml` builds and tests against it in CI, next
+to `engine.yml`. Bump it only with `scripts/update-engine-release.sh <tag>`;
+`scripts/check-engine-release.sh` guards the file and the workflow's fetch,
+build and jit-test steps (exact text, no `if:`), as `check-engine-source.sh`
+guards `engine.yml`. Leave `engine.yml`, `engine/QUEUE_PIN` and
+`check-engine-source.sh` alone until the fallback is removed.
 A packaged (relocatable) engine also needs `-DNIGHT_TOOLCHAIN_ROOT` and
 `-DNIGHT_SYSROOT` (README "Building"); `scripts/ci-suite.sh` reads the test
 sources from `NIGHT_FIREFOX_TESTS` (default `firefox/` in the
