@@ -148,9 +148,11 @@ class UpstreamHarnessTests(unittest.TestCase):
 
 
 class JstestsXulInfoTests(unittest.TestCase):
-    """A test-source bundle has no config/autoconf.mk for jstests.py to read; the
-    jstests asset ships xul-info.txt at its root, which run-jstests.sh passes
-    as --xul-info. A Firefox checkout (no xul-info.txt) runs as before."""
+    """jstests.py takes --xul-info instead of reading config/autoconf.mk. The
+    jstests asset of an engine release ships xul-info.txt at its root (read
+    from the objdir that built it), and run-jstests.sh passes that; a Firefox
+    checkout (no xul-info.txt) keeps the value run-jstests.sh records for
+    spidermonkey/mozconfig."""
 
     def setUp(self):
         UpstreamHarnessTests.setUp(self)  # the same fixture, not its cases
@@ -171,13 +173,21 @@ class JstestsXulInfoTests(unittest.TestCase):
         result = self.run_js()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         argv = self.argv.read_text().split("\n")
-        self.assertIn("--xul-info", argv)
-        self.assertEqual(argv[argv.index("--xul-info") + 1], "wasm32-clang:WASI:false")
+        self.assertEqual([a for a in argv if a.startswith("--xul-info")], ["--xul-info=wasm32-clang:WASI:false"])
 
-    def test_a_checkout_passes_none(self):
+    def test_a_checkout_keeps_the_recorded_value(self):
         result = self.run_js()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertNotIn("--xul-info", self.argv.read_text().split("\n"))
+        argv = self.argv.read_text().split("\n")
+        self.assertEqual([a for a in argv if a.startswith("--xul-info")], ["--xul-info=wasm32-gcc3:WASI:false"])
+
+    def test_an_unusable_xul_info_file_fails(self):
+        for text in ("", "a:b\n", "a:b:c:d\n", "wasm32-clang:WASI:false\nextra\n"):
+            with self.subTest(text=text):
+                (self.firefox / "xul-info.txt").write_text(text)
+                result = self.run_js()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("xul-info.txt", result.stderr)
 
 
 if __name__ == "__main__":
