@@ -52,6 +52,7 @@ REQUIRED = [
     ("the jit-tests (from the fetched test sources)", r'''
 - name: jit-tests from the release test sources
   if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+  timeout-minutes: 125
   env:
     JIT_TESTS: ${{ inputs.jit_tests }}
     NIGHT_FIREFOX_TESTS: ${{ runner.temp }}/testsrc

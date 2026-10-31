@@ -164,6 +164,12 @@ for m in tarfile.open(fileobj=sys.stdin.buffer, mode="r|"):
     for k in range(1, len(parts)):
         if "/".join(parts[:k]) in links:
             fail("member %r is under a link (%s)" % (name, "/".join(parts[:k])))
+    # Three conditions on a symlink target. ".." is the one that matters: a
+    # target like d/d/../.. under d -> . normalizes, as text, to a path under
+    # the top level, but tar resolves it on disk through d to outside. An
+    # absolute target, or a relative one without "..", always fails or always
+    # passes the "resolves under the top level" test, so those two are
+    # redundant with the ".." rule; they are kept as a second line.
     if m.issym():
         target = posixpath.normpath(posixpath.join(posixpath.dirname(name), m.linkname))
         if (m.linkname.startswith("/") or ".." in m.linkname.split("/")
