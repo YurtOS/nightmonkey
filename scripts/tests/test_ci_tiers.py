@@ -54,6 +54,19 @@ class ShardInputsTests(unittest.TestCase):
     def test_a_rerun_build_replaces_the_inputs(self):
         self.assertEqual(value(self.upload, "overwrite"), "true")
 
+    def test_the_inputs_are_uploaded_for_the_sharded_tier_only_and_kept_a_day(self):
+        self.assertEqual(value(self.upload, "if"),
+                         "${{ !cancelled() && steps.build.outcome == 'success' && inputs.jit_tests == 'sharded' }}")
+        self.assertEqual(value(self.package, "if"), value(self.upload, "if"))
+        self.assertEqual(value(self.upload, "retention-days"), "1")
+
+    def test_the_shards_run_the_release_test_sources_they_unpack(self):
+        shards = body("jit-shards.yml")
+        unpack = step(shards, "Unpack the shard inputs")
+        self.assertIn('tar -x -C "$RUNNER_TEMP/testsrc"', unpack)
+        run = step(shards, "jit-tests (shard ${{ matrix.shard }})")
+        self.assertIn('NIGHT_FIREFOX_TESTS="$RUNNER_TEMP/testsrc" \\', run)
+
     def test_the_inputs_are_the_shell_and_the_release_test_sources(self):
         self.assertIn("inputs.jit_tests == 'sharded'", self.package)
         self.assertIn('tar -C "$GITHUB_WORKSPACE" -cf "$RUNNER_TEMP/shard-inputs.tar" build/bin', self.package)

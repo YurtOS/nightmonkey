@@ -131,6 +131,14 @@ class WeeklyAotTests(unittest.TestCase):
         for text in (upload, download):
             self.assertNotIn("run_attempt", value(text, "name"))
 
+    def test_the_aot_shards_run_the_release_test_sources_they_unpack(self):
+        unpack = step(self.shard, "Unpack the jstests inputs")
+        self.assertIn('tar -x -C "$RUNNER_TEMP/testsrc"', unpack)
+        run = step(self.shard, "AOT jstests (shard ${{ matrix.shard }})")
+        self.assertIn('NIGHT_FIREFOX_TESTS="$RUNNER_TEMP/testsrc" \\', run)
+        upload = step(body("engine-release.yml"), "Upload the jstests inputs")
+        self.assertEqual(value(upload, "retention-days"), "7")
+
     def test_the_jstests_inputs_hold_the_shell_and_the_whole_test_tree(self):
         package = step(body("engine-release.yml"), "Package the jstests inputs")
         self.assertIn("if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.jstests_inputs }}",

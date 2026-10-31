@@ -187,6 +187,28 @@ class CheckEngineReleaseTests(unittest.TestCase):
                 wf = self.mutate("      - name: Prepare logs\n", f"      - name: Sneak\n        {line}\n      - name: Prepare logs\n")
                 self.assert_rejected(self.check(wf), "Sneak")
 
+    def test_no_other_step_brings_in_engine_bytes(self):
+        """Only the fetch step may download, clone or write the release
+        directories; ordinary steps may read the test sources."""
+        for label, lines in (
+                ("curl into RUNNER_TEMP", ['run: curl -fsSL https://example.invalid/e.tar | tar -x -C "$RUNNER_TEMP"']),
+                ("wget", ["run: wget -q https://example.invalid/e.tar"]),
+                ("git clone into testsrc", ['run: git clone https://github.com/YurtOS/yurt-firefox "$RUNNER_TEMP/testsrc"']),
+                ("a write to spidermonkey", ['run: cp -r somewhere "$RUNNER_TEMP/spidermonkey"']),
+                ("a write to the toolchain", ['run: ln -sf /usr/bin/clang "$RUNNER_TEMP/toolchain/clang/bin/clang"']),
+                ("a yurt-firefox checkout", ["uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1",
+                                             "with:", "  repository: YurtOS/yurt-firefox", "  path: engine"])):
+            with self.subTest(case=label):
+                body = "".join(f"        {l}\n" for l in lines)
+                wf = self.mutate("      - name: Prepare logs\n", f"      - name: Sneak\n{body}      - name: Prepare logs\n")
+                self.assert_rejected(self.check(wf), "Sneak")
+
+    def test_reading_the_test_sources_stays_allowed(self):
+        wf = self.mutate("      - name: Upload execution logs\n",
+                         "      - name: Count the tests\n        env:\n          NIGHT_FIREFOX_TESTS: ${{ runner.temp }}/testsrc\n"
+                         '        run: ls "$NIGHT_FIREFOX_TESTS"\n      - name: Upload execution logs\n')
+        self.assertEqual(self.check(wf).returncode, 0, self.check(wf).stderr)
+
     def test_job_level_if_and_unpinned_actions_are_rejected(self):
         self.assert_rejected(self.check(self.mutate("    runs-on: ubuntu-24.04\n", "    if: ${{ inputs.lane != 'x' }}\n    runs-on: ubuntu-24.04\n")),
                              "job-level if")
