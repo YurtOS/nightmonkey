@@ -146,5 +146,39 @@ class UpstreamHarnessTests(unittest.TestCase):
                 self.assertEqual(self.run_wrapper(suite, output, 7).returncode, 7)
 
 
+
+class JstestsXulInfoTests(unittest.TestCase):
+    """A test-source bundle has no config/autoconf.mk for jstests.py to read; the
+    jstests asset ships xul-info.txt at its root, which run-jstests.sh passes
+    as --xul-info. A Firefox checkout (no xul-info.txt) runs as before."""
+
+    def setUp(self):
+        UpstreamHarnessTests.setUp(self)  # the same fixture, not its cases
+        (self.firefox / "js/src/tests/jstests.py").write_text(
+            'import os, sys\nopen(os.environ["ARGV_OUT"], "w").write("\\n".join(sys.argv[1:]))\n'
+            'print(os.environ["HARNESS_OUTPUT"])\n')
+        self.argv = self.root / "argv"
+
+    def run_js(self):
+        return subprocess.run(
+            ["bash", str(self.scripts / "run-jstests.sh"), str(self.firefox), str(self.build)],
+            env={**os.environ, "ARGV_OUT": str(self.argv),
+                 "HARNESS_OUTPUT": "TEST-PASS | example.js\nNIGHT-JSTESTS completed=1 passed=1 failed=0 timeout=0 skipped=0"},
+            capture_output=True, text=True, check=False)
+
+    def test_a_bundle_passes_its_xul_info(self):
+        (self.firefox / "xul-info.txt").write_text("wasm32-clang:WASI:false\n")
+        result = self.run_js()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        argv = self.argv.read_text().split("\n")
+        self.assertIn("--xul-info", argv)
+        self.assertEqual(argv[argv.index("--xul-info") + 1], "wasm32-clang:WASI:false")
+
+    def test_a_checkout_passes_none(self):
+        result = self.run_js()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("--xul-info", self.argv.read_text().split("\n"))
+
+
 if __name__ == "__main__":
     unittest.main()
