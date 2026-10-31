@@ -54,7 +54,7 @@ def tar_zst(path, members):
             else:
                 i.size = len(data)
                 t.addfile(i, io.BytesIO(data))
-    subprocess.run(["zstd", "-q", "-o", str(path)], input=buf.getvalue(), check=True)
+    subprocess.run(["zstd", "-q", "-f", "-o", str(path)], input=buf.getvalue(), check=True)
 
 
 def sha(path):
@@ -106,6 +106,7 @@ class ReleaseFixture(unittest.TestCase):
         self.make_release(ARCHIVES)
         self.dest = self.t / "runner"
         (self.dest / "nightmonkey-logs").mkdir(parents=True)
+        self.dest = self.dest.resolve()
 
     def make_release(self, archives, tag=TAG):
         d = self.t / "assets" / tag
