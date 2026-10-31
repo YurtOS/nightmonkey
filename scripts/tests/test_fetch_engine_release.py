@@ -51,6 +51,9 @@ def tar_zst(path, members):
             elif kind == "sym":
                 i.type, i.linkname = tarfile.SYMTYPE, data
                 t.addfile(i)
+            elif kind == "hard":
+                i.type, i.linkname = tarfile.LNKTYPE, data
+                t.addfile(i)
             else:
                 i.size = len(data)
                 t.addfile(i, io.BytesIO(data))
@@ -178,15 +181,19 @@ class FetchTests(ReleaseFixture):
         self.assertEqual((self.dest / "testsrc/xul-info.txt").read_text(), "wasm32-clang:WASI:false\n")
 
     def test_a_changed_asset_fails_before_anything_is_extracted(self):
+        """A valid archive with a changed payload, its pin and MANIFEST.json
+        unchanged: only the asset's own digest check can tell."""
+        tops = {"wasm32-wasi": "spidermonkey", "testsrc": "js", "jstests": "js",
+                "toolchain-clang": "clang", "toolchain-sysroot": "sysroot-wasm32-wasi"}
         for kind in KINDS:
             with self.subTest(kind=kind):
                 self.setUp()
                 self.write_release()
-                with open(self.assets / f"{P}-{kind}.tar.zst", "ab") as f:
-                    f.write(b"x")
+                tar_zst(self.assets / f"{P}-{kind}.tar.zst", ARCHIVES[kind] + [F(tops[kind] + "/changed")])
                 r = self.fetch("true")
                 self.assertNotEqual(r.returncode, 0)
-                self.assertIn(f"{P}-{kind}.tar.zst", r.stderr)
+                self.assertIn(f"{P}-{kind}.tar.zst: sha256", r.stderr)
+                self.assertIn("is not ENGINE_RELEASE's", r.stderr)
                 self.assertEqual(self.extracted(), [])
 
     def test_a_changed_jstests_asset_only_matters_when_asked(self):
@@ -201,7 +208,8 @@ class FetchTests(ReleaseFixture):
         (self.assets / "MANIFEST.json").write_text(json.dumps(m) + "\n")
         r = self.fetch()
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("MANIFEST.json", r.stderr)
+        self.assertIn("MANIFEST.json: sha256", r.stderr)
+        self.assertEqual(self.extracted(), [])
         # A manifest whose digest is pinned but whose asset list disagrees
         # with ENGINE_RELEASE, or whose tag differs.
         for edit in ("m['release']['assets'][1]['sha256'] = '0' * 64", "m['release']['tag'] = 'engine-v147.0.4-2'"):
@@ -262,13 +270,64 @@ class FetchTests(ReleaseFixture):
         self.assertIn(f"{P}-testsrc.tar.zst: member 'other'", r.stderr)
         self.assertEqual(self.extracted(), [])
 
+    TOPS = {"wasm32-wasi": "spidermonkey", "testsrc": "js", "jstests": "js",
+            "toolchain-clang": "clang", "toolchain-sysroot": "sysroot-wasm32-wasi"}
+
+    def refused(self, kind, extra, message, replace=None):
+        """Release with `extra` members added to (or `replace` as) one archive;
+        fetch must refuse it naming the archive and `message`, extracting nothing."""
+        self.setUp()
+        members = replace if replace is not None else ARCHIVES[kind] + extra
+        self.make_release(dict(ARCHIVES, **{kind: members}))
+        self.write_release()
+        r = self.fetch("true")
+        self.assertNotEqual(r.returncode, 0, f"{kind}: {extra}")
+        self.assertIn(f"{P}-{kind}.tar.zst: ", r.stderr)
+        self.assertIn(message, r.stderr)
+        self.assertEqual(self.extracted(), [])
+        self.assertFalse((self.dest / "escape").exists())
+        self.assertFalse((self.dest / "outside-marker").exists())
+
     def test_an_escaping_member_in_any_archive_fails(self):
-        self.make_release(dict(ARCHIVES, testsrc=ARCHIVES["testsrc"] + [F("../escape")]))
+        for kind, top in self.TOPS.items():
+            with self.subTest(kind=kind):
+                self.refused(kind, [F("../escape")], "is outside")
+            with self.subTest(kind=kind, member="top/../x"):
+                self.refused(kind, [F(top + "/../escape")], "is outside")
+
+    def test_links_must_stay_under_their_top_level(self):
+        for kind, top in self.TOPS.items():
+            for label, extra, msg in (
+                    ("link to the top itself", [(top + "/up", "sym", ".", 0o777), F(top + "/up/x")], "under a link"),
+                    ("a member under a link", [(top + "/d", "sym", "sub", 0o777), D(top + "/sub"), F(top + "/d/x")], "under a link"),
+                    ("link up a level", [(top + "/up", "sym", "../x", 0o777)], "may leave"),
+                    ("absolute link", [(top + "/abs", "sym", "/etc/passwd", 0o777)], "may leave"),
+                    ("hard link to a non-member", [(top + "/h", "hard", "preexisting.json", 0o644)], "earlier regular file"),
+                    ("hard link to a directory", [(top + "/h", "hard", top, 0o644)], "earlier regular file"),
+                    ("hard link to another top", [(top + "/h", "hard", "xul-info.txt", 0o644)], "earlier regular file")):
+                with self.subTest(kind=kind, case=label):
+                    (self.dest / "preexisting.json").write_text("{}")
+                    self.refused(kind, extra, msg)
+
+    def test_the_top_level_itself_must_be_a_directory(self):
+        # spidermonkey -> . would let spidermonkey/outside-marker land in <dest>.
+        self.refused("wasm32-wasi", None, "top level",
+                     replace=[("spidermonkey", "sym", ".", 0o777), F("spidermonkey/outside-marker"),
+                              F("spidermonkey/include-private/js-build-config.json")])
+
+    def test_an_empty_archive_has_no_top_level(self):
+        for kind in ("wasm32-wasi", "toolchain-clang", "toolchain-sysroot"):
+            with self.subTest(kind=kind):
+                self.refused(kind, None, "top level is ''", replace=[])
+
+    def test_sibling_links_and_earlier_hard_links_pass(self):
+        clang = [D("clang"), D("clang/bin"), F("clang/bin/clang-19", b"#!/bin/sh\n", 0o755),
+                 ("clang/bin/clang", "sym", "clang-19", 0o777), ("clang/bin/clang++", "hard", "clang/bin/clang-19", 0o755)]
+        self.make_release(dict(ARCHIVES, **{"toolchain-clang": clang}))
         self.write_release()
         r = self.fetch()
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn(f"{P}-testsrc.tar.zst", r.stderr)
-        self.assertFalse((self.t / "escape").exists())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(os.access(self.dest / "toolchain/clang/bin/clang++", os.X_OK))
 
     def test_existing_outputs_are_refused(self):
         self.write_release()

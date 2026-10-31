@@ -120,6 +120,22 @@ class CheckEngineReleaseTests(unittest.TestCase):
                                                     "      - name: Fetch the engine release\n        if: ${{ inputs.lane == 'x' }}\n")),
                              "Fetch the engine release")
 
+    def test_the_jstests_step_is_exact(self):
+        jstests_if = "        if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.full_jstests }}\n"
+        self.assert_rejected(self.check(self.mutate(jstests_if, "        if: false\n")), "Full jstests")
+        self.assert_rejected(self.check(self.mutate('run: scripts/ci-suite.sh jstests "$CI_LANE"', 'run: "true"')), "Full jstests")
+        wf = self.workflow
+        at = wf.index("      - name: Full jstests\n")
+        end = wf.index("\n      - ", at + 1)
+        self.assert_rejected(self.check(wf[:at] + wf[end + 1:]), "Full jstests")
+        step = wf[at:end].replace("${{ runner.temp }}/testsrc", "firefox")
+        self.assert_rejected(self.check(wf[:at] + step + wf[end:]), "Full jstests")
+
+    def test_the_jit_tests_run_after_a_failed_regression_step(self):
+        jit_if = "        if: ${{ !cancelled() && steps.build.outcome == 'success' }}\n        env:\n          JIT_TESTS:"
+        self.assert_rejected(self.check(self.mutate(jit_if, "        env:\n          JIT_TESTS:")),
+                             "jit-tests from the release test sources")
+
     def test_the_build_uses_the_release_paths(self):
         self.assert_rejected(
             self.check(self.mutate('-DSPIDERMONKEY_DIST="$RUNNER_TEMP/spidermonkey"',
@@ -168,6 +184,36 @@ class CheckEngineReleaseTests(unittest.TestCase):
     def test_comment_lines_are_ignored(self):
         wf = self.mutate("      - name: Prepare logs\n", "      # gh release download latest; engine/ENGINE_RELEASE\n      - name: Prepare logs\n")
         self.assertEqual(self.check(wf).returncode, 0)
+
+
+def step_text(workflow, name):
+    lines = workflow.splitlines()
+    start = next(i for i, l in enumerate(lines) if l.strip() == f"- name: {name}")
+    out = [lines[start]]
+    for l in lines[start + 1:]:
+        if l.strip() and len(l) - len(l.lstrip()) <= len(lines[start]) - len(lines[start].lstrip()):
+            break
+        out.append(l)
+    return "\n".join(out).rstrip()
+
+
+class ParityTests(unittest.TestCase):
+    """The release job runs what the source-build job runs on the build it
+    makes, so removing the fallback loses no coverage."""
+
+    def test_the_regression_steps_are_the_source_builds(self):
+        source = (REPO / ".github/workflows/engine.yml").read_text()
+        release = (REPO / ".github/workflows/engine-release.yml").read_text()
+        for name in ("Guest tier options contract", "Local regressions", "Tier regressions (baseline, MIR stress)"):
+            with self.subTest(step=name):
+                self.assertEqual(step_text(release, name), step_text(source, name))
+
+    def test_ci_gives_the_release_job_the_full_jit_tests_on_the_merge_tier(self):
+        import re
+        ci = (REPO / ".github/workflows/ci.yml").read_text()
+        m = re.search(r"^  engine-release:\n((?:    .*\n|\n)*)", ci + "\n", re.M)
+        self.assertIsNotNone(m)
+        self.assertIn("      jit_tests: ${{ needs.tier.outputs.jit_tests == 'sharded' && 'full' || 'subset' }}\n", m.group(1))
 
 
 class CallersTests(unittest.TestCase):
