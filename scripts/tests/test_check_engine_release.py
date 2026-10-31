@@ -145,14 +145,17 @@ class CheckEngineReleaseTests(unittest.TestCase):
                              "Build NightMonkey against the release")
 
     def test_the_lanes_use_the_release_test_sources(self):
-        # The jstests step is not one of the exact-text steps; the rule still
-        # holds for it.
-        wf = self.workflow
-        at = wf.index("      - name: Full jstests\n")
-        end = wf.index("\n      - ", at + 1)
-        step = wf[at:end].replace("          NIGHT_FIREFOX_TESTS: ${{ runner.temp }}/testsrc\n", "")
-        self.assertNotIn("NIGHT_FIREFOX_TESTS", step)
-        self.assert_rejected(self.check(wf[:at] + step + wf[end:]), "runs jit-tests or jstests without")
+        # Any other step that runs jit-tests or jstests takes them from the
+        # release too.
+        for cmd in ('scripts/ci-suite.sh jstests "$CI_LANE" -- non262/', 'scripts/ci-suite.sh jit "$CI_LANE" -- warp/'):
+            with self.subTest(cmd=cmd):
+                wf = self.mutate("      - name: Upload execution logs\n",
+                                 f"      - name: More tests\n        run: {cmd}\n      - name: Upload execution logs\n")
+                self.assert_rejected(self.check(wf), "runs jit-tests or jstests without")
+                wf = self.mutate("      - name: Upload execution logs\n",
+                                 f"      - name: More tests\n        env:\n          NIGHT_FIREFOX_TESTS: ${{{{ runner.temp }}}}/testsrc\n"
+                                 f"        run: {cmd}\n      - name: Upload execution logs\n")
+                self.assertEqual(self.check(wf).returncode, 0)
 
     def test_the_fetch_precedes_the_build(self):
         wf = self.workflow
