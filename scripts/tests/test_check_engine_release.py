@@ -24,6 +24,9 @@ def release_file(tag=TAG, digests=None, extra=""):
     return "\n".join(lines) + "\n" + extra
 
 
+CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"
+
+
 class CheckEngineReleaseTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="engine release ")
@@ -224,11 +227,15 @@ class CheckEngineReleaseTests(unittest.TestCase):
         ["uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1", "with:", "  repository: 'yurtos/yurt-firefox'"],
         ["uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1", "with:", "  repository: some/other-repo"],
         ["uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1", "with:", '  "repository": YurtOS/yurt-firefox'],
+        # Anywhere in the step, any spelling: flow mapping, quotes, case, spacing.
+        ["uses: %s" % CHECKOUT, "with: {repository: YurtOS/yurt-firefox, path: engine}"],
+        ["uses: %s" % CHECKOUT, "with:", "  'Repository': yurtos/yurt-firefox"],
+        ["uses: %s" % CHECKOUT, "with:", '  REPOSITORY: "YurtOS/Yurt-Firefox"'],
+        ["uses: %s" % CHECKOUT, "with:", "  repository : YurtOS/yurt-firefox"],
+        ["uses: %s" % CHECKOUT, 'with: {"repository": "YurtOS/yurt-firefox"}'],
+        ["run: CURL -fsSL https://example.invalid/e.tar"],
+        ['run: ls "$RUNNER_TEMP/SpiderMonkey"'],
     )
-
-    def sneak(self, lines, name="Sneak"):
-        body = "".join(f"        {l}\n" for l in lines)
-        return self.mutate("      - name: Prepare logs\n", f"      - name: {name}\n{body}      - name: Prepare logs\n")
 
     def test_every_probe_is_refused(self):
         for lines in self.PROBES:
