@@ -99,9 +99,11 @@ jobs:
       - name: Record the engine release
         env:
           TAG: ${{ steps.release.outputs.tag }}
+          JIT_TESTS: ${{ inputs.jit_tests }}
         run: |
           echo "Engine release: YurtOS/yurt-firefox $TAG" | tee "$RUNNER_TEMP/nightmonkey-logs/engine.txt"
           echo "Engine release: YurtOS/yurt-firefox $TAG" >> "$GITHUB_STEP_SUMMARY"
+          echo "### jit-tests: $JIT_TESTS (the pull request subset is \`$JIT_SUBSET\`; label a PR \`ci:full\` for all)" >> "$GITHUB_STEP_SUMMARY"
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:

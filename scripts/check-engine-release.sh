@@ -10,7 +10,10 @@
 # REQUIRED below: no other `if:`, no `continue-on-error:`, no other argument. Changing one of them means changing this
 # script too. No other step may mention the release pin, a download, the
 # fetch script, cmake, or the source build (engine-src, mach, build-engine.sh,
-# build-spidermonkey.sh, QUEUE_PIN), not even in echo text. Every step that
+# build-spidermonkey.sh, QUEUE_PIN), not even in echo text; download or
+# clone anything (curl, wget, git clone) or check out YurtOS/yurt-firefox;
+# or touch $RUNNER_TEMP/{spidermonkey,toolchain,testsrc} other than to read
+# the test sources. Every step that
 # runs jit-tests or jstests takes them from the release
 # (NIGHT_FIREFOX_TESTS). The job may not carry `if:` or `continue-on-error:`,
 # every action is pinned to a full commit SHA, nothing references the
@@ -160,6 +163,20 @@ for step in steps:
     if hits:
         err("step '%s' mentions the release pin, a download, cmake or the source build (%s); only the "
             "required steps may, even in echo text" % (name_of(step), hits[0]))
+    # Engine bytes come only from the fetch step: no other step downloads,
+    # clones or checks out yurt-firefox, or touches the release directories,
+    # except to read the test sources (NIGHT_FIREFOX_TESTS, the tar that
+    # packages them for the shards).
+    for l in body_lines(step):
+        t = l.strip()
+        if re.search(r"\bcurl\b|\bwget\b|\bgit\s+clone\b|repository:\s*YurtOS/yurt-firefox\b", t):
+            err("step '%s' downloads, clones or checks out engine sources (%s); only the fetch step "
+                "brings in the engine" % (name_of(step), t))
+        if re.search(r"(?:\$RUNNER_TEMP|\$\{RUNNER_TEMP\}|\$\{\{\s*runner\.temp\s*\}\})/(?:spidermonkey|toolchain|testsrc)\b", t) \
+                and t != TESTSRC and not re.fullmatch(
+                    r'tar -C "\$RUNNER_TEMP/testsrc" -rf "\$RUNNER_TEMP/[\w-]+\.tar" js( xul-info\.txt)?', t):
+            err("step '%s' touches the fetched engine, toolchain or test sources (%s); only the fetch "
+                "step writes them, others may only read the test sources" % (name_of(step), t))
     if re.search(r"ci-suite\.sh (jit|jstests)\b", step) and TESTSRC not in body_lines(step) and \
             ("    " + TESTSRC) not in step.split("\n"):
         err("step '%s' runs jit-tests or jstests without %s" % (name_of(step), TESTSRC))
