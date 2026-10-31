@@ -162,10 +162,12 @@ class CheckEngineReleaseTests(unittest.TestCase):
                 wf = self.mutate("      - name: Upload execution logs\n",
                                  f"      - name: More tests\n        run: {cmd}\n      - name: Upload execution logs\n")
                 self.assert_rejected(self.check(wf), "runs jit-tests or jstests without")
+                # With the test root it is still refused: a step that mentions
+                # the release directories must be one of the allowlisted steps.
                 wf = self.mutate("      - name: Upload execution logs\n",
                                  f"      - name: More tests\n        env:\n          NIGHT_FIREFOX_TESTS: ${{{{ runner.temp }}}}/testsrc\n"
                                  f"        run: {cmd}\n      - name: Upload execution logs\n")
-                self.assertEqual(self.check(wf).returncode, 0)
+                self.assert_rejected(self.check(wf), "More tests")
 
     def test_the_fetch_precedes_the_build(self):
         wf = self.workflow
@@ -187,54 +189,66 @@ class CheckEngineReleaseTests(unittest.TestCase):
                 wf = self.mutate("      - name: Prepare logs\n", f"      - name: Sneak\n        {line}\n      - name: Prepare logs\n")
                 self.assert_rejected(self.check(wf), "Sneak")
 
-    def test_no_other_step_brings_in_engine_bytes(self):
-        """Only the fetch step may download, clone or write the release
-        directories; ordinary steps may read the test sources."""
-        for label, lines in (
-                ("curl into RUNNER_TEMP", ['run: curl -fsSL https://example.invalid/e.tar | tar -x -C "$RUNNER_TEMP"']),
-                ("wget", ["run: wget -q https://example.invalid/e.tar"]),
-                ("git clone into testsrc", ['run: git clone https://github.com/YurtOS/yurt-firefox "$RUNNER_TEMP/testsrc"']),
-                ("a write to spidermonkey", ['run: cp -r somewhere "$RUNNER_TEMP/spidermonkey"']),
-                ("a write to the toolchain", ['run: ln -sf /usr/bin/clang "$RUNNER_TEMP/toolchain/clang/bin/clang"']),
-                ("a yurt-firefox checkout", ["uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1",
-                                             "with:", "  repository: YurtOS/yurt-firefox", "  path: engine"])):
-            with self.subTest(case=label):
-                body = "".join(f"        {l}\n" for l in lines)
-                wf = self.mutate("      - name: Prepare logs\n", f"      - name: Sneak\n{body}      - name: Prepare logs\n")
-                self.assert_rejected(self.check(wf), "Sneak")
+    def sneak(self, lines, name="Sneak"):
+        body = "".join(f"        {l}\n" for l in lines)
+        return self.mutate("      - name: Prepare logs\n", f"      - name: {name}\n{body}      - name: Prepare logs\n")
+
+    PROBES = (
+        # reviewers' probes (round 3)
+        ['run: cp -r "cache #1/." "$RUNNER_TEMP/testsrc"'],
+        ['run: echo "# x"; cp -r cache/. "$RUNNER_TEMP/testsrc"'],
+        ["env:", "  D: ${{ runner.temp }}/spidermonkey", 'run: cp -r out "$D"'],
+        ['run: d="$RUNNER_TEMP/spidermonkey"; cp -r out "$d"'],
+        ["run: |", "  cp -r out \\", '    "$RUNNER_TEMP/toolchain"'],
+        ['run: echo "a # b" > "$RUNNER_TEMP/testsrc/x"'],
+        ['run: tar --extract -f x.tar -C "$RUNNER_TEMP/testsrc"'],
+        ['run: zstd -d -o "$RUNNER_TEMP/spidermonkey/lib/libjs_static.a" x.zst'],
+        # earlier probes
+        ['run: cp -r src "$RUNNER_TEMP"/testsrc'],
+        ['run: cp -r src "$RUNNER_TEMP/testsrc"'],
+        ["run: cp -r src ${RUNNER_TEMP}/spidermonkey"],
+        ["run: cp -r src ${{ runner.temp }}//toolchain"],
+        ['run: echo x > "$RUNNER_TEMP/toolchain/f"'],
+        ['run: zstd -dc x.tar.zst | tar -x -C "$RUNNER_TEMP/testsrc"'],
+        ['run: curl -fsSL https://example.invalid/e.tar | tar -x -C "$RUNNER_TEMP"'],
+        ['run: curl -fsSL -o "$RUNNER_TEMP/e.tar.zst" https://example.invalid/e'],
+        ["run: wget -q https://example.invalid/e.tar"],
+        ["run: git clone https://github.com/YurtOS/yurt-firefox engine"],
+        ["run: git -C engine fetch origin main"],
+        ["run: gh release download engine-v1-1 -R YurtOS/yurt-firefox"],
+        ["run: gh api repos/YurtOS/yurt-firefox/releases"],
+        ["uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2",
+         "with:", "  name: x", "  path: elsewhere"],
+        ["uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1", "with:", "  repository: YurtOS/yurt-firefox"],
+        ["uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1", "with:", '  repository: "YurtOS/yurt-firefox"'],
+        ["uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1", "with:", "  repository: 'yurtos/yurt-firefox'"],
+        ["uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1", "with:", "  repository: some/other-repo"],
+    )
 
     def sneak(self, lines, name="Sneak"):
         body = "".join(f"        {l}\n" for l in lines)
         return self.mutate("      - name: Prepare logs\n", f"      - name: {name}\n{body}      - name: Prepare logs\n")
 
-    def test_quoted_and_braced_forms_are_caught(self):
-        checkout = "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"
-        for label, lines in (
-                ("double-quoted repository", [checkout, "with:", '  repository: "YurtOS/yurt-firefox"']),
-                ("single-quoted repository", [checkout, "with:", "  repository: 'YurtOS/yurt-firefox'"]),
-                ("lowercase repository", [checkout, "with:", "  repository: yurtos/yurt-firefox"]),
-                ("quote before the slash", ['run: cp -r src "$RUNNER_TEMP"/testsrc']),
-                ("quoted path", ['run: cp -r src "$RUNNER_TEMP/testsrc"']),
-                ("braced variable", ["run: cp -r src ${RUNNER_TEMP}/spidermonkey"]),
-                ("a redirect", ['run: echo x > "$RUNNER_TEMP/toolchain/f"']),
-                ("an extract", ['run: zstd -dc x.tar.zst | tar -x -C "$RUNNER_TEMP/testsrc"']),
-                ("curl -o", ['run: curl -fsSL -o "$RUNNER_TEMP/e.tar.zst" https://example.invalid/e']),
-                ("gh release download", ["run: gh release download engine-v1-1 -R YurtOS/yurt-firefox"]),
-                ("download-artifact into a release dir", [
-                    "uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2",
-                    "with:", "  name: x", "  path: ${{ runner.temp }}/spidermonkey"])):
-            with self.subTest(case=label):
+    def test_every_probe_is_refused(self):
+        for lines in self.PROBES:
+            with self.subTest(probe=lines):
                 self.assert_rejected(self.check(self.sneak(lines)), "Sneak")
 
-    def test_reads_and_comments_are_not_writes(self):
-        for label, lines in (
-                ("ls the test sources", ['run: ls "$RUNNER_TEMP/testsrc"']),
-                ("cat xul-info", ['run: cat "${RUNNER_TEMP}/testsrc/xul-info.txt"']),
-                ("du the engine", ["run: du -sh ${{ runner.temp }}/spidermonkey"]),
-                ("an inline comment", ["run: echo ok # curl is not needed"])):
-            with self.subTest(case=label):
-                r = self.check(self.sneak(lines, name="Harmless"))
-                self.assertEqual(r.returncode, 0, r.stderr)
+    def test_reads_and_comments_are_over_flagged_by_design(self):
+        """Only the allowlisted steps may mention the release directories, a
+        read included, and a mention in a comment counts: a new step that
+        needs them is added to the allowlist deliberately."""
+        for lines in (['run: ls "$RUNNER_TEMP/testsrc"'], ["run: echo ok # curl is not needed"],
+                      ["env:", "  NIGHT_FIREFOX_TESTS: ${{ runner.temp }}/testsrc", 'run: ls "$NIGHT_FIREFOX_TESTS"']):
+            with self.subTest(lines=lines):
+                self.assert_rejected(self.check(self.sneak(lines, name="Harmless")), "Harmless")
+
+    def test_the_packaging_steps_are_exact(self):
+        for name, old, new in (("Package the shard inputs", '-rf "$RUNNER_TEMP/shard-inputs.tar" js\n',
+                                '-rf "$RUNNER_TEMP/shard-inputs.tar" js && cp -r x "$RUNNER_TEMP/testsrc"\n'),
+                               ("Package the jstests inputs", "js xul-info.txt\n", "js xul-info.txt ../spidermonkey\n")):
+            with self.subTest(step=name):
+                self.assert_rejected(self.check(self.mutate(old, new)), name)
 
     def test_other_jobs_are_not_the_engine_job(self):
         docs = ("\n  docs:\n    runs-on: ubuntu-24.04\n    steps:\n"
@@ -243,12 +257,6 @@ class CheckEngineReleaseTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         # The same download in the engine job still fails.
         self.assert_rejected(self.check(self.sneak(["run: curl -fsSL https://example.invalid/docs"])), "Sneak")
-
-    def test_reading_the_test_sources_stays_allowed(self):
-        wf = self.mutate("      - name: Upload execution logs\n",
-                         "      - name: Count the tests\n        env:\n          NIGHT_FIREFOX_TESTS: ${{ runner.temp }}/testsrc\n"
-                         '        run: ls "$NIGHT_FIREFOX_TESTS"\n      - name: Upload execution logs\n')
-        self.assertEqual(self.check(wf).returncode, 0, self.check(wf).stderr)
 
     def test_job_level_if_and_unpinned_actions_are_rejected(self):
         self.assert_rejected(self.check(self.mutate("    runs-on: ubuntu-24.04\n", "    if: ${{ inputs.lane != 'x' }}\n    runs-on: ubuntu-24.04\n")),
