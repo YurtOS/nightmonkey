@@ -105,11 +105,23 @@ for l in lines:
         err("engine-release.yml has a job-level %s: %s" % (m.group(1), l.strip()))
 
 steps = []
+step_jobs = []  # the job (`  <name>:` under jobs:) each step belongs to
+
+
+def job_at(k):
+    for j in range(k, -1, -1):
+        m = re.match(r"^  ([\w-]+):\s*$", lines[j])
+        if m:
+            return m.group(1)
+    return None
+
+
 i = 0
 while i < len(lines):
     if lines[i].strip() != "steps:":
         i += 1
         continue
+    job = job_at(i)
     i += 1
     if i >= len(lines) or not lines[i].lstrip().startswith("- "):
         continue
@@ -121,6 +133,7 @@ while i < len(lines):
             body.append(lines[i][item:])
             i += 1
         steps.append("\n".join(body))
+        step_jobs.append(job)
 if not steps:
     err("engine-release.yml has no steps")
 
@@ -163,23 +176,47 @@ for step in steps:
     if hits:
         err("step '%s' mentions the release pin, a download, cmake or the source build (%s); only the "
             "required steps may, even in echo text" % (name_of(step), hits[0]))
-    # Engine bytes come only from the fetch step: no other step downloads,
-    # clones or checks out yurt-firefox, or touches the release directories,
-    # except to read the test sources (NIGHT_FIREFOX_TESTS, the tar that
-    # packages them for the shards).
-    for l in body_lines(step):
-        t = l.strip()
-        if re.search(r"\bcurl\b|\bwget\b|\bgit\s+clone\b|repository:\s*YurtOS/yurt-firefox\b", t):
-            err("step '%s' downloads, clones or checks out engine sources (%s); only the fetch step "
-                "brings in the engine" % (name_of(step), t))
-        if re.search(r"(?:\$RUNNER_TEMP|\$\{RUNNER_TEMP\}|\$\{\{\s*runner\.temp\s*\}\})/(?:spidermonkey|toolchain|testsrc)\b", t) \
-                and t != TESTSRC and not re.fullmatch(
-                    r'tar -C "\$RUNNER_TEMP/testsrc" -rf "\$RUNNER_TEMP/[\w-]+\.tar" js( xul-info\.txt)?', t):
-            err("step '%s' touches the fetched engine, toolchain or test sources (%s); only the fetch "
-                "step writes them, others may only read the test sources" % (name_of(step), t))
     if re.search(r"ci-suite\.sh (jit|jstests)\b", step) and TESTSRC not in body_lines(step) and \
             ("    " + TESTSRC) not in step.split("\n"):
         err("step '%s' runs jit-tests or jstests without %s" % (name_of(step), TESTSRC))
+
+# Engine bytes come only from the fetch step. In the job(s) that run it, no
+# other step downloads, clones or checks out yurt-firefox, or writes the
+# release directories; reading them is fine. Simple, conservative text
+# matching (accidental changes, not sabotage): quotes are dropped and
+# ${RUNNER_TEMP} / ${{ runner.temp }} read as $RUNNER_TEMP, and a shell
+# comment (" #" onwards) is ignored before matching.
+RELEASE_DIR = r"\$RUNNER_TEMP/+(?:spidermonkey|toolchain|testsrc)\b"
+WRITES = [
+    r"\b(?:cp|mv|rsync|ln|unzip|install|touch|rm|tee|mkdir|curl|wget)\b",  # a command that writes
+    r"\btar\b[^|;&]*\s-?[A-Za-z]*x",  # tar extracting
+    r">",  # a redirect
+    r"^(?:-\s+)?path:",  # an action's path: (download-artifact, checkout)
+]
+ALLOWED_READS = {TESTSRC, 'NIGHT_FIREFOX_TESTS: $RUNNER_TEMP/testsrc'}
+
+
+def normalized(line):
+    t = line.strip().replace('"', "").replace("'", "")
+    t = re.sub(r"\$\{\{\s*runner\.temp\s*\}\}|\$\{RUNNER_TEMP\}", "$RUNNER_TEMP", t)
+    return re.sub(r"\s#.*$", "", t)
+
+
+engine_jobs = {step_jobs[k] for k, s in enumerate(steps) if name_of(s) == "Fetch the engine release"}
+for k, step in enumerate(steps):
+    if step_jobs[k] not in engine_jobs or name_of(step) in required_names:
+        continue
+    for l in body_lines(step):
+        t = normalized(l)
+        if re.search(r"\bcurl\b|\bwget\b|\bgit\s+clone\b|\bgh\s+release\b", t) or \
+                re.search(r"repository:\s*yurtos/yurt-firefox\b", t, re.I):
+            err("step '%s' downloads, clones or checks out engine sources (%s); only the fetch step "
+                "brings in the engine" % (name_of(step), l.strip()))
+        if re.search(RELEASE_DIR, t) and t not in ALLOWED_READS and \
+                not re.fullmatch(r"tar -C \$RUNNER_TEMP/testsrc -rf \$RUNNER_TEMP/[\w-]+\.tar js( xul-info\.txt)?", t) and \
+                any(re.search(w, t) for w in WRITES):
+            err("step '%s' writes the fetched engine, toolchain or test sources (%s); only the fetch "
+                "step does, others may only read them" % (name_of(step), l.strip()))
 
 KEYS = ["tag", "manifest", "wasm32-wasi", "testsrc", "jstests", "toolchain-clang", "toolchain-sysroot"]
 try:
