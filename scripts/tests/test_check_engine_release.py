@@ -223,6 +223,7 @@ class CheckEngineReleaseTests(unittest.TestCase):
         ["uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1", "with:", '  repository: "YurtOS/yurt-firefox"'],
         ["uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1", "with:", "  repository: 'yurtos/yurt-firefox'"],
         ["uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1", "with:", "  repository: some/other-repo"],
+        ["uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1", "with:", '  "repository": YurtOS/yurt-firefox'],
     )
 
     def sneak(self, lines, name="Sneak"):
