@@ -203,8 +203,7 @@ for step in steps:
 # Engine bytes come only from the fetch step. In the job that runs it (other
 # jobs are not checked), only the steps pinned above may MENTION the release
 # directories at all: any line of another step that names spidermonkey,
-# toolchain or testsrc as a word (after dropping quote characters, reading
-# ${RUNNER_TEMP} and ${{ runner.temp }} as $RUNNER_TEMP and collapsing //)
+# toolchain or testsrc as a word, however the path around it is spelled,
 # fails, a read or a comment included, and so does curl, wget, git clone or
 # fetch, gh release or api, download-artifact or a repository: key (a
 # checkout of another repository). This over-flags on purpose: no shell is
@@ -216,9 +215,8 @@ RELEASE_WORD = re.compile(r"\b(?:spidermonkey|toolchain|testsrc)\b", re.I)
 
 
 def normalized(line):
-    t = line.replace('"', "").replace("'", "")
-    t = re.sub(r"\$\{\{\s*runner\.temp\s*\}\}|\$\{RUNNER_TEMP\}", "$RUNNER_TEMP", t)
-    return re.sub(r"/{2,}", "/", t)
+    # Quote characters dropped, so a quoted `"repository":` key matches too.
+    return line.replace('"', "").replace("'", "")
 
 
 engine_jobs = {step_jobs[k] for k, s in enumerate(steps) if name_of(s) == "Fetch the engine release"}
