@@ -177,7 +177,8 @@ class CallersTests(unittest.TestCase):
         self.assertIn("    uses: ./.github/workflows/engine-release.yml\n", ci)
         import re
         m = re.search(r"^  engine-release:\n((?:    .*\n|\n)*)", ci + "\n", re.M)
-        self.assertIsNotNone(m, "ci.yml has no engine-release job")
+        if m is None:
+            self.fail("ci.yml has no engine-release job")
         job = m.group(1)
         self.assertIn("    needs: tier\n", job)
         self.assertIn("    uses: ./.github/workflows/engine-release.yml\n", job)
