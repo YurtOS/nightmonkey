@@ -35,7 +35,7 @@ class CheckEngineReleaseTests(unittest.TestCase):
         (self.root / "engine").mkdir()
         self.workflow = (REPO / ".github/workflows/engine-release.yml").read_text()
 
-    def check(self, workflow=None, release=release_file()):
+    def check(self, workflow=None, release: "str | None" = release_file()):
         (self.root / ".github/workflows/engine-release.yml").write_text(self.workflow if workflow is None else workflow)
         f = self.root / "engine/ENGINE_RELEASE"
         if release is None:

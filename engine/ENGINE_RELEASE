@@ -1,14 +1,10 @@
 # The YurtOS/yurt-firefox engine release CI builds against
 # (engine-release.yml). Written by scripts/update-engine-release.sh;
 # checked by scripts/check-engine-release.sh.
-#
-# PENDING: the first release (engine-v147.0.4-1) is not published yet. Until
-# this file is regenerated from it, check-engine-release.sh and the
-# engine-release job fail on purpose.
-tag=PENDING
-manifest=PENDING
-wasm32-wasi=PENDING
-testsrc=PENDING
-jstests=PENDING
-toolchain-clang=PENDING
-toolchain-sysroot=PENDING
+tag=engine-v147.0.4-1
+manifest=bfa6b2dc1905a91ebe0c4a7d71245ff39881c3db20ce595934b1727c285cfa60
+wasm32-wasi=705447ad25cb0aa256204d41e10ec280d6a2be1dccff359b59abd7f3de45eb32
+testsrc=5db2a3e3d428f03da0be673e1b61dfa9e7e7d4e3b6cc861ae5c1d75be3f361de
+jstests=74af59f68890abdb7d14efc8a1605b0ee5a91f05a74e970bdf1cf5d013f6a3ed
+toolchain-clang=e32e6653cf7ce1bc157c123c3d9558b06972539da26185758926a5ac82a88400
+toolchain-sysroot=b443b084f761225c45e60ee89de18068f35f534088a5b82c69112b3b2d5147b2
