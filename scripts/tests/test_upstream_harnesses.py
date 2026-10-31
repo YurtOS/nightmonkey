@@ -116,17 +116,14 @@ class UpstreamHarnessTests(unittest.TestCase):
         # spidermonkey/mozconfig: TARGET_XPCOM_ABI, OS_TARGET, MOZ_DEBUG.
         self.assertIn("XUL-INFO wasm32-gcc3:WASI:false\n", result.stdout)
 
-    def test_jstests_build_info_matches_the_mozconfig(self):
-        # The --xul-info constant describes this build; change both together.
+    def test_the_default_xul_info_is_the_release_bundles(self):
+        # The default (for a Firefox checkout) is what the engine release's
+        # jstests bundle records in xul-info.txt (engine-v147.0.4-1:
+        # wasm32-gcc3:WASI:false, from the objdir of yurt-firefox's
+        # mozconfig); a bundle's own xul-info.txt wins over it.
         repo = Path(__file__).resolve().parents[2]
-        options = [line.split(None, 1)[1].strip()
-                   for line in (repo / "spidermonkey/mozconfig").read_text().splitlines()
-                   if line.startswith("ac_add_options ")]
-        self.assertIn("--target=wasm32-unknown-wasi", options)
-        self.assertFalse([o for o in options if o.startswith("--enable-debug")
-                          and o != "--enable-debug-symbols"], options)
-        self.assertIn("xul_info=wasm32-gcc3:WASI:false\n",
-                      (repo / "scripts/run-jstests.sh").read_text())
+        self.assertIn("xul_info=wasm32-gcc3:WASI:false\n", (repo / "scripts/run-jstests.sh").read_text())
+        self.assertNotIn("spidermonkey/mozconfig", (repo / "scripts/run-jstests.sh").read_text())
 
     def test_jit_rejects_jstests_output(self):
         self.assertEqual(self.run_wrapper("jit", "TEST-PASS | example.js").returncode, 2)

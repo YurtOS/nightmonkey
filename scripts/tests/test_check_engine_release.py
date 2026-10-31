@@ -106,8 +106,11 @@ class CheckEngineReleaseTests(unittest.TestCase):
     def test_the_fetch_step_must_download_the_jstests_asset_when_asked(self):
         self.assert_rejected(self.check(self.mutate('--jstests "$FULL_JSTESTS"', "--jstests false")),
                              "Fetch the engine release")
-        self.assert_rejected(self.check(self.mutate("FULL_JSTESTS: ${{ inputs.full_jstests }}", "FULL_JSTESTS: false")),
-                             "Fetch the engine release")
+        self.assert_rejected(self.check(self.mutate("FULL_JSTESTS: ${{ inputs.full_jstests || inputs.jstests_inputs }}",
+                                                    "FULL_JSTESTS: false")), "Fetch the engine release")
+        # The jstests inputs for jstests-aot.yml's shards need the jstests asset too.
+        self.assert_rejected(self.check(self.mutate("FULL_JSTESTS: ${{ inputs.full_jstests || inputs.jstests_inputs }}",
+                                                    "FULL_JSTESTS: ${{ inputs.full_jstests }}")), "Fetch the engine release")
 
     def test_the_fetch_step_text_is_exact(self):
         self.assert_rejected(
@@ -138,7 +141,8 @@ class CheckEngineReleaseTests(unittest.TestCase):
                 self.assert_rejected(self.check(self.mutate(timeout, new)), "jit-tests from the release test sources")
 
     def test_the_jit_tests_run_after_a_failed_regression_step(self):
-        jit_if = "        if: ${{ !cancelled() && steps.build.outcome == 'success' }}\n        timeout-minutes: 125\n"
+        jit_if = ("        if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.jit_tests != 'sharded'"
+                  " && inputs.jit_tests != 'none' }}\n        timeout-minutes: 125\n")
         self.assert_rejected(self.check(self.mutate(jit_if, "        timeout-minutes: 125\n")),
                              "jit-tests from the release test sources")
 
@@ -206,52 +210,73 @@ def step_text(workflow, name):
     return "\n".join(out).rstrip()
 
 
-class ParityTests(unittest.TestCase):
-    """The release job runs what the source-build job runs on the build it
-    makes, so removing the fallback loses no coverage."""
+class RegressionStepsTests(unittest.TestCase):
+    """The release job is the only engine job: it runs the regression steps
+    the source build ran (engine.yml, removed), on the build it makes."""
 
-    def test_the_regression_steps_are_the_source_builds(self):
-        source = (REPO / ".github/workflows/engine.yml").read_text()
+    def test_the_regression_steps(self):
         release = (REPO / ".github/workflows/engine-release.yml").read_text()
-        for name in ("Guest tier options contract", "Local regressions", "Tier regressions (baseline, MIR stress)"):
+        for name, command in (("Guest tier options contract", "run: python3 scripts/test-guest-tier-options.py build"),
+                              ("Local regressions", 'run: scripts/ci-suite.sh local "$CI_LANE"'),
+                              ("Tier regressions (baseline, MIR stress)", "scripts/run-night-tests.sh build")):
             with self.subTest(step=name):
-                self.assertEqual(step_text(release, name), step_text(source, name))
+                text = step_text(release, name)
+                self.assertIn("if: ${{ !cancelled() && steps.build.outcome == 'success' }}", text)
+                self.assertIn(command, text)
 
-    def test_ci_gives_the_release_job_the_full_jit_tests_on_the_merge_tier(self):
-        import re
-        ci = (REPO / ".github/workflows/ci.yml").read_text()
-        m = re.search(r"^  engine-release:\n((?:    .*\n|\n)*)", ci + "\n", re.M)
-        self.assertIsNotNone(m)
-        self.assertIn("      jit_tests: ${{ needs.tier.outputs.jit_tests == 'sharded' && 'full' || 'subset' }}\n", m.group(1))
+
+def ci_job(ci, name):
+    import re
+    m = re.search(rf"^  {name}:\n((?:    .*\n|\n)*)", ci + "\n", re.M)
+    if m is None:
+        raise AssertionError(f"ci.yml has no {name} job")
+    return m.group(1)
 
 
 class CallersTests(unittest.TestCase):
-    def test_ci_runs_both_engine_jobs_side_by_side(self):
-        ci = (REPO / ".github/workflows/ci.yml").read_text()
-        self.assertIn("    uses: ./.github/workflows/engine.yml\n", ci)
-        self.assertIn("    uses: ./.github/workflows/engine-release.yml\n", ci)
+    """The engine comes only from the release: every caller uses
+    engine-release.yml, and the source build is gone."""
+
+    WORKFLOWS = REPO / ".github/workflows"
+
+    def test_ci_has_one_engine_job_on_the_release(self):
         import re
-        m = re.search(r"^  engine-release:\n((?:    .*\n|\n)*)", ci + "\n", re.M)
-        if m is None:
-            self.fail("ci.yml has no engine-release job")
-        job = m.group(1)
+        ci = (self.WORKFLOWS / "ci.yml").read_text()
+        job = ci_job(ci, "engine")
         self.assertIn("    needs: tier\n", job)
         self.assertIn("    uses: ./.github/workflows/engine-release.yml\n", job)
-        # The same docs-only skip as the source-build job, and no other condition.
+        self.assertIn("      jit_tests: ${{ needs.tier.outputs.jit_tests }}\n", job)
         self.assertEqual(re.findall(r"^    if: (.*)$", job, re.M), ["needs.tier.outputs.docs_only != 'true'"])
+        self.assertNotIn("\n  engine-release:\n", ci)
+        self.assertIn("    needs: [tier, engine]\n", ci_job(ci, "jit-shards"))
 
-    def test_ci_checks_the_release_pin(self):
-        ci = (REPO / ".github/workflows/ci.yml").read_text()
+    def test_ci_checks_the_release_pin_only(self):
+        ci = (self.WORKFLOWS / "ci.yml").read_text()
         self.assertIn("run: scripts/check-engine-release.sh\n", ci)
+        self.assertNotIn("check-engine-source", ci)
 
-    def test_the_nightly_keeps_the_source_build_until_the_fallback_is_removed(self):
-        jstests = (REPO / ".github/workflows/jstests.yml").read_text()
-        self.assertIn("uses: ./.github/workflows/engine.yml\n", jstests)
+    def test_the_jstests_workflows_use_the_release(self):
+        nightly = (self.WORKFLOWS / "jstests.yml").read_text()
+        self.assertIn("    uses: ./.github/workflows/engine-release.yml\n", nightly)
+        self.assertIn("      full_jstests: true\n", nightly)
+        weekly = (self.WORKFLOWS / "jstests-aot.yml").read_text()
+        self.assertIn("    uses: ./.github/workflows/engine-release.yml\n", weekly)
+        self.assertIn("      jstests_inputs: true\n", weekly)
 
-    def test_the_source_build_files_are_untouched_in_place(self):
-        self.assertTrue((REPO / "engine/QUEUE_PIN").is_file())
-        self.assertTrue((REPO / ".github/workflows/engine.yml").is_file())
-        self.assertTrue((REPO / "scripts/check-engine-source.sh").is_file())
+    def test_no_workflow_calls_the_source_build(self):
+        for wf in sorted(self.WORKFLOWS.glob("*.yml")):
+            with self.subTest(workflow=wf.name):
+                text = "\n".join(l for l in wf.read_text().splitlines() if not l.lstrip().startswith("#"))
+                self.assertNotIn("engine.yml", text.replace("engine-release.yml", ""))
+                for word in ("QUEUE_PIN", "check-engine-source", "build-engine.sh", "engine-src", "SM_OBJDIR"):
+                    self.assertNotIn(word, text)
+
+    def test_the_source_build_files_are_gone(self):
+        for path in (".github/workflows/engine.yml", "engine/QUEUE_PIN", "scripts/check-engine-source.sh",
+                     "scripts/tests/test_check_engine_source.py", "spidermonkey/mozconfig",
+                     "scripts/build-spidermonkey.sh"):
+            with self.subTest(path=path):
+                self.assertFalse((REPO / path).exists(), path)
 
 
 if __name__ == "__main__":
