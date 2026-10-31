@@ -9,12 +9,11 @@ name: Engine release integration
 # test-source bundles. scripts/check-engine-release.sh guards the fetch, the
 # build and the jit-test step; change them together.
 #
-# Transition: ci.yml runs this next to engine.yml (the source build at
-# engine/QUEUE_PIN), which stays until this job has been green on yurt. It
-# runs what engine.yml's job runs on its build (the guest tier contract, the
-# local and tier regressions, the jit-tests, the jstests when asked), except
-# the shard and jstests-shard uploads: the merge tier's full jit-tests run
-# here in-job instead of in jit-shards.yml.
+# It is the only engine job: ci.yml (every event), jstests.yml (nightly,
+# interpreter lane, full jstests) and jstests-aot.yml (weekly, AOT lane:
+# jit_tests none, jstests_inputs for its shards) call it. To move to another
+# release, run scripts/update-engine-release.sh <tag> (README "Engine
+# release").
 
 on:
   workflow_call:
@@ -26,12 +25,21 @@ on:
         description: 'aot, interpreter, or both'
         type: string
         default: both
-      # full: every jit-test; subset: only JIT_SUBSET (engine.yml's pull
-      # request subset).
+      # full: every jit-test in this job (the nightly jstests runs).
+      # subset: only JIT_SUBSET below (the pull request tier).
+      # sharded: every jit-test, in jit-shards.yml's jobs, which take this
+      #   job's build (the merge tier: push to yurt, dispatch, `ci:full`).
+      # none: no jit-tests (the weekly AOT jstests, whose shards take this
+      #   job's build; the merge tier runs the AOT jit-tests on every push).
       jit_tests:
-        description: 'full or subset'
+        description: 'full, subset, sharded, or none'
         type: string
         default: full
+      # Upload the built shell and the release's test sources with the
+      # jstests bundle merged in, for jstests-aot.yml's shard jobs.
+      jstests_inputs:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -41,7 +49,14 @@ defaults:
     shell: bash
 
 env:
-  # engine.yml's pull request subset (see there).
+  # The pull request subset of jit-tests (jit_test.py path filters, matched as
+  # substrings of the path under js/src/jit-test/tests). Chosen from the
+  # per-test times of the full AOT lane in run 40547142771: warp/ (Warp
+  # specialisation: CacheIR-driven inlining, bailouts), baseline/ (the
+  # baseline tier) and sunspider/ (whole benchmark programs), 339 files,
+  # about 560 s of test time, about 2.5 min on the 4-core runner, against
+  # 11,100 s (46 min) for all 8,571. Every one passed in each of the 15 green
+  # runs of 2026-10-20..28.
   JIT_SUBSET: warp/ baseline/ sunspider/
 
 jobs:
@@ -78,15 +93,17 @@ jobs:
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
-          FULL_JSTESTS: ${{ inputs.full_jstests }}
+          FULL_JSTESTS: ${{ inputs.full_jstests || inputs.jstests_inputs }}
         run: scripts/fetch-engine-release.sh --jstests "$FULL_JSTESTS" "$RUNNER_TEMP"
 
       - name: Record the engine release
         env:
           TAG: ${{ steps.release.outputs.tag }}
+          JIT_TESTS: ${{ inputs.jit_tests }}
         run: |
           echo "Engine release: YurtOS/yurt-firefox $TAG" | tee "$RUNNER_TEMP/nightmonkey-logs/engine.txt"
           echo "Engine release: YurtOS/yurt-firefox $TAG" >> "$GITHUB_STEP_SUMMARY"
+          echo "### jit-tests: $JIT_TESTS (the pull request subset is \`$JIT_SUBSET\`; label a PR \`ci:full\` for all)" >> "$GITHUB_STEP_SUMMARY"
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
@@ -125,9 +142,9 @@ jobs:
             echo "::endgroup::"
           done
 
-      # As in engine.yml: after a failed regression step the jit-tests still run.
+      # After a failed regression step the jit-tests still run.
       - name: jit-tests from the release test sources
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.jit_tests != 'sharded' && inputs.jit_tests != 'none' }}
         timeout-minutes: 125
         env:
           JIT_TESTS: ${{ inputs.jit_tests }}
@@ -142,8 +159,61 @@ jobs:
             *) echo "::error::unknown jit_tests input: $JIT_TESTS"; exit 1 ;;
           esac
 
-      # The jstests asset was fetched only for this (full_jstests), into the
-      # same test-source root; its xul-info.txt reaches run-jstests.sh there.
+      # The shards' inputs: the built shell (build/bin is self-contained:
+      # inproc-shell.sh runs js-inproc under wasm-jit-runner, both next to
+      # it) and the release's test sources. A tar, because an artifact does
+      # not keep the executable bit.
+      - name: Package the shard inputs
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.jit_tests == 'sharded' }}
+        run: |
+          set -euo pipefail
+          tar -C "$GITHUB_WORKSPACE" -cf "$RUNNER_TEMP/shard-inputs.tar" build/bin
+          tar -C "$RUNNER_TEMP/testsrc" -rf "$RUNNER_TEMP/shard-inputs.tar" js
+          zstd -q -T0 --rm "$RUNNER_TEMP/shard-inputs.tar"
+          ls -la "$RUNNER_TEMP/shard-inputs.tar.zst"
+
+      - name: Upload the shard inputs
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.jit_tests == 'sharded' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightmonkey-shard-inputs-${{ inputs.lane }}
+          path: ${{ runner.temp }}/shard-inputs.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+          # One name for every attempt: "Re-run failed jobs" reruns a failed
+          # shard but not this job, so the shard must find this attempt's
+          # upload; a rerun of this job replaces it.
+          overwrite: true
+
+      # The jstests shards' inputs (jstests-aot.yml): the built shell, as for
+      # the jit-test shards, and the release test sources with the jstests
+      # bundle merged in (test262, non262, the harness and its lib) and its
+      # xul-info.txt, which run-jstests.sh reads from the test root.
+      - name: Package the jstests inputs
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.jstests_inputs }}
+        run: |
+          set -euo pipefail
+          tar -C "$GITHUB_WORKSPACE" -cf "$RUNNER_TEMP/jstests-inputs.tar" build/bin
+          tar -C "$RUNNER_TEMP/testsrc" -rf "$RUNNER_TEMP/jstests-inputs.tar" js xul-info.txt
+          zstd -q -T0 --rm "$RUNNER_TEMP/jstests-inputs.tar"
+          ls -la "$RUNNER_TEMP/jstests-inputs.tar.zst"
+
+      - name: Upload the jstests inputs
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.jstests_inputs }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightmonkey-jstests-inputs-${{ inputs.lane }}
+          path: ${{ runner.temp }}/jstests-inputs.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          # A week: "Re-run failed jobs" on the weekly run can come days later.
+          retention-days: 7
+          # One name for every attempt, as for the jit-test shard inputs.
+          overwrite: true
+
+      # The jstests asset was fetched for this (full_jstests), into the same
+      # test-source root; its xul-info.txt reaches run-jstests.sh there.
       - name: Full jstests
         if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.full_jstests }}
         timeout-minutes: 245

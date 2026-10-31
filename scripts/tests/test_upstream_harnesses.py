@@ -112,21 +112,18 @@ class UpstreamHarnessTests(unittest.TestCase):
         )
         result = self.run_wrapper("js", "")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        # What obj-nightmonkey-sm/config/autoconf.mk records for
-        # spidermonkey/mozconfig: TARGET_XPCOM_ABI, OS_TARGET, MOZ_DEBUG.
+        # What the engine release's objdir records (config/autoconf.mk):
+        # TARGET_XPCOM_ABI, OS_TARGET, MOZ_DEBUG.
         self.assertIn("XUL-INFO wasm32-gcc3:WASI:false\n", result.stdout)
 
-    def test_jstests_build_info_matches_the_mozconfig(self):
-        # The --xul-info constant describes this build; change both together.
+    def test_the_default_xul_info_is_the_release_bundles(self):
+        # The default (for a Firefox checkout) is what the engine release's
+        # jstests bundle records in xul-info.txt (engine-v147.0.4-1:
+        # wasm32-gcc3:WASI:false, from the objdir of yurt-firefox's
+        # mozconfig); a bundle's own xul-info.txt wins over it.
         repo = Path(__file__).resolve().parents[2]
-        options = [line.split(None, 1)[1].strip()
-                   for line in (repo / "spidermonkey/mozconfig").read_text().splitlines()
-                   if line.startswith("ac_add_options ")]
-        self.assertIn("--target=wasm32-unknown-wasi", options)
-        self.assertFalse([o for o in options if o.startswith("--enable-debug")
-                          and o != "--enable-debug-symbols"], options)
-        self.assertIn("xul_info=wasm32-gcc3:WASI:false\n",
-                      (repo / "scripts/run-jstests.sh").read_text())
+        self.assertIn("xul_info=wasm32-gcc3:WASI:false\n", (repo / "scripts/run-jstests.sh").read_text())
+        self.assertNotIn("spidermonkey/mozconfig", (repo / "scripts/run-jstests.sh").read_text())
 
     def test_jit_rejects_jstests_output(self):
         self.assertEqual(self.run_wrapper("jit", "TEST-PASS | example.js").returncode, 2)
@@ -152,7 +149,7 @@ class JstestsXulInfoTests(unittest.TestCase):
     jstests asset of an engine release ships xul-info.txt at its root (read
     from the objdir that built it), and run-jstests.sh passes that; a Firefox
     checkout (no xul-info.txt) keeps the value run-jstests.sh records for
-    spidermonkey/mozconfig."""
+    the engine release."""
 
     def setUp(self):
         UpstreamHarnessTests.setUp(self)  # the same fixture, not its cases

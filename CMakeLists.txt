@@ -1,10 +1,14 @@
 # NightMonkey: an AOT compiler from JavaScript to Wasm, layered on top of
-# SpiderMonkey. This build consumes the dist/ directory of a SpiderMonkey
-# build made with --enable-external-compiler-hooks (spidermonkey/mozconfig):
+# SpiderMonkey. This build consumes a SpiderMonkey build made with
+# --enable-external-compiler-hooks: the spidermonkey/ directory of a
+# YurtOS/yurt-firefox engine release (scripts/fetch-engine-release.sh), with
 # its private headers, the compile flags libjs was built with
-# (include-private/js-build-config.json) and the archives under lib/.
+# (include-private/js-build-config.json) and the archives under lib/, built
+# with the release's clang and WASI sysroot.
 #
-#   cmake -S . -B build -DSPIDERMONKEY_DIST=/path/to/firefox/obj-nightmonkey-sm/dist
+#   cmake -S . -B build -DSPIDERMONKEY_DIST=/path/to/release/spidermonkey \
+#     -DNIGHT_TOOLCHAIN_ROOT=/path/to/release/toolchain/clang \
+#     -DNIGHT_SYSROOT=/path/to/release/toolchain/sysroot-wasm32-wasi
 #   cmake --build build
 #
 # Produces, under build/bin:
@@ -45,7 +49,7 @@ set(NIGHT_TOOLCHAIN_ROOT "" CACHE PATH
 set(NIGHT_SYSROOT "" CACHE PATH "WASI sysroot that replaces the engine config's sysroot option")
 
 if(NOT SPIDERMONKEY_DIST)
-  message(FATAL_ERROR "SPIDERMONKEY_DIST is required: the dist/ directory of a SpiderMonkey build made with --enable-external-compiler-hooks (see spidermonkey/mozconfig)")
+  message(FATAL_ERROR "SPIDERMONKEY_DIST is required: the dist/ directory of a SpiderMonkey build made with --enable-external-compiler-hooks (an engine release's spidermonkey/ directory: see scripts/fetch-engine-release.sh)")
 endif()
 get_filename_component(SPIDERMONKEY_DIST "${SPIDERMONKEY_DIST}" ABSOLUTE)
 set(SM_CONFIG_JSON "${SPIDERMONKEY_DIST}/include-private/js-build-config.json")

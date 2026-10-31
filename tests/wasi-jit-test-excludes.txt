@@ -1,5 +1,5 @@
 # jit-tests that cannot run on the wasm32-wasi shell NightMonkey builds
-# (spidermonkey/mozconfig: no shared memory or Atomics, no Intl, no
+# (the engine release's configuration: no shared memory or Atomics, no Intl, no
 # threads, a small native stack). Applied to BOTH lanes by
 # scripts/run-jit-tests.sh; independent of the AOT tier. One path per line,
 # relative to js/src/jit-test/tests; the comment is the skip condition the
@@ -66,7 +66,7 @@ wasm/atomicity.js
 # Bare-engine observers of the external-compiler hooks (YurtOS/firefox#3): they
 # assert that no external tier is installed. This is not a WASI limit: the
 # NightMonkey shell installs its hook table in both lanes, so they cannot pass
-# in this shell at all. They run against the bare engine in YurtOS/firefox CI;
+# in this shell at all. They run against the bare engine in YurtOS/yurt-firefox CI;
 # here every compiled test runs with the hook table installed.
 external-compiler/assign-slot-policy.js
 external-compiler/object-fuse-notifications.js

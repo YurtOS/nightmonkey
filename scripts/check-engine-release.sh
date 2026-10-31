@@ -3,12 +3,15 @@
 # engine/ENGINE_RELEASE, verifying every digest first, and nothing else.
 # Comment lines in engine-release.yml are ignored.
 #
-# The four steps that carry this (fetch the release: download, verify every
-# digest, extract; build NightMonkey against what was fetched; run the
-# jit-tests, and with full_jstests the jstests, from the release's test
-# sources) must each appear once, in that order, with exactly the text in
-# REQUIRED below: no other `if:`, no `continue-on-error:`, no other argument. Changing one of them means changing this
-# script too. No other step may mention the release pin, a download, the
+# The steps that carry this (fetch the release: download, verify every digest,
+# extract; build NightMonkey against what was fetched; run the jit-tests from
+# the release's test sources; package them for the jit-test and jstests
+# shards; run the jstests with full_jstests) must each appear once, in that
+# order, with exactly the text in REQUIRED below: no other `if:`, no
+# `continue-on-error:`, no other argument; changing one of them means changing
+# this script too. In the engine job, no other step may mention the release
+# directories or download anything (see below; this over-flags on purpose).
+# No other step may mention the release pin, a download, the
 # fetch script, cmake, or the source build (engine-src, mach, build-engine.sh,
 # build-spidermonkey.sh, QUEUE_PIN), not even in echo text. Every step that
 # runs jit-tests or jstests takes them from the release
@@ -18,8 +21,9 @@
 # engine-v<version>-<n> (never a floating one, `latest` or the PENDING
 # placeholder) and a full sha256 for MANIFEST.json and each asset.
 #
-# Like check-engine-source.sh, this blocks accidental regressions, not
-# deliberate sabotage by someone who can edit this repository.
+# This blocks accidental regressions, not deliberate sabotage by someone who
+# can edit this repository, guard included. The source build it replaced
+# (engine.yml, engine/QUEUE_PIN) is gone; the ban on its words keeps it out.
 #
 #   scripts/check-engine-release.sh
 set -euo pipefail
@@ -38,7 +42,7 @@ REQUIRED = [
   id: release
   env:
     GH_TOKEN: ${{ github.token }}
-    FULL_JSTESTS: ${{ inputs.full_jstests }}
+    FULL_JSTESTS: ${{ inputs.full_jstests || inputs.jstests_inputs }}
   run: scripts/fetch-engine-release.sh --jstests "$FULL_JSTESTS" "$RUNNER_TEMP"
 '''),
     ("the build (against the fetched engine and toolchain)", r'''
@@ -51,7 +55,7 @@ REQUIRED = [
 '''),
     ("the jit-tests (from the fetched test sources)", r'''
 - name: jit-tests from the release test sources
-  if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+  if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.jit_tests != 'sharded' && inputs.jit_tests != 'none' }}
   timeout-minutes: 125
   env:
     JIT_TESTS: ${{ inputs.jit_tests }}
@@ -65,6 +69,26 @@ REQUIRED = [
         scripts/ci-suite.sh jit "$CI_LANE" -- "${paths[@]}" ;;
       *) echo "::error::unknown jit_tests input: $JIT_TESTS"; exit 1 ;;
     esac
+'''),
+    ("the shard inputs (the built shell and the fetched test sources)", r'''
+- name: Package the shard inputs
+  if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.jit_tests == 'sharded' }}
+  run: |
+    set -euo pipefail
+    tar -C "$GITHUB_WORKSPACE" -cf "$RUNNER_TEMP/shard-inputs.tar" build/bin
+    tar -C "$RUNNER_TEMP/testsrc" -rf "$RUNNER_TEMP/shard-inputs.tar" js
+    zstd -q -T0 --rm "$RUNNER_TEMP/shard-inputs.tar"
+    ls -la "$RUNNER_TEMP/shard-inputs.tar.zst"
+'''),
+    ("the jstests inputs (the built shell, the fetched test sources and xul-info.txt)", r'''
+- name: Package the jstests inputs
+  if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.jstests_inputs }}
+  run: |
+    set -euo pipefail
+    tar -C "$GITHUB_WORKSPACE" -cf "$RUNNER_TEMP/jstests-inputs.tar" build/bin
+    tar -C "$RUNNER_TEMP/testsrc" -rf "$RUNNER_TEMP/jstests-inputs.tar" js xul-info.txt
+    zstd -q -T0 --rm "$RUNNER_TEMP/jstests-inputs.tar"
+    ls -la "$RUNNER_TEMP/jstests-inputs.tar.zst"
 '''),
     ("the jstests (from the fetched test sources, with the jstests bundle)", r'''
 - name: Full jstests
@@ -101,11 +125,23 @@ for l in lines:
         err("engine-release.yml has a job-level %s: %s" % (m.group(1), l.strip()))
 
 steps = []
+step_jobs = []  # the job (`  <name>:` under jobs:) each step belongs to
+
+
+def job_at(k):
+    for j in range(k, -1, -1):
+        m = re.match(r"^  ([\w-]+):\s*$", lines[j])
+        if m:
+            return m.group(1)
+    return None
+
+
 i = 0
 while i < len(lines):
     if lines[i].strip() != "steps:":
         i += 1
         continue
+    job = job_at(i)
     i += 1
     if i >= len(lines) or not lines[i].lstrip().startswith("- "):
         continue
@@ -117,6 +153,7 @@ while i < len(lines):
             body.append(lines[i][item:])
             i += 1
         steps.append("\n".join(body))
+        step_jobs.append(job)
 if not steps:
     err("engine-release.yml has no steps")
 
@@ -147,7 +184,7 @@ for label, text in REQUIRED:
         err("%s: step '%s' must be exactly:\n%s\nbut is:\n%s" % (label, name, want, steps[at[0]]))
     found.append(at[0])
 if len(found) == len(REQUIRED) and found != sorted(found):
-    err("step order must be: fetch, build, jit-tests, jstests")
+    err("step order must be: fetch, build, jit-tests, shard inputs, jstests inputs, jstests")
 
 required_names = {name_of(text.strip("\n")) for _, text in REQUIRED}
 for step in steps:
@@ -162,6 +199,39 @@ for step in steps:
     if re.search(r"ci-suite\.sh (jit|jstests)\b", step) and TESTSRC not in body_lines(step) and \
             ("    " + TESTSRC) not in step.split("\n"):
         err("step '%s' runs jit-tests or jstests without %s" % (name_of(step), TESTSRC))
+
+# Engine bytes come only from the fetch step. In the job that runs it (other
+# jobs are not checked), only the steps pinned above may MENTION the release
+# directories at all: any line of another step that names spidermonkey,
+# toolchain or testsrc as a word, however the path around it is spelled,
+# fails, a read or a comment included, and so does curl, wget, git clone or
+# fetch, gh release or api, download-artifact or the word repository anywhere
+# (a checkout of another repository, in a block or flow mapping). This
+# over-flags on purpose: no shell is
+# parsed, so a new step that needs the release directories is added to
+# REQUIRED above, deliberately. Only full-line comments are ignored.
+DOWNLOADS = re.compile(r"\bcurl\b|\bwget\b|\bgit\b.*\b(?:clone|fetch)\b|\bgh\s+(?:release|api)\b|"
+                       r"download-artifact|\brepository\b", re.I)
+RELEASE_WORD = re.compile(r"\b(?:spidermonkey|toolchain|testsrc)\b", re.I)
+
+
+def normalized(line):
+    # Quote characters dropped, so a quoted `"repository":` key matches too.
+    return line.replace('"', "").replace("'", "")
+
+
+engine_jobs = {step_jobs[k] for k, s in enumerate(steps) if name_of(s) == "Fetch the engine release"}
+for k, step in enumerate(steps):
+    if step_jobs[k] not in engine_jobs or name_of(step) in required_names:
+        continue
+    for l in body_lines(step):
+        t = normalized(l)
+        if DOWNLOADS.search(t):
+            err("step '%s' downloads, clones or checks out something (%s); in the engine job only the "
+                "fetch step brings anything in" % (name_of(step), l.strip()))
+        if RELEASE_WORD.search(t):
+            err("step '%s' mentions the release directories (%s); only the pinned steps may, even to "
+                "read them: add a step that needs them to REQUIRED in this guard" % (name_of(step), l.strip()))
 
 KEYS = ["tag", "manifest", "wasm32-wasi", "testsrc", "jstests", "toolchain-clang", "toolchain-sysroot"]
 try:

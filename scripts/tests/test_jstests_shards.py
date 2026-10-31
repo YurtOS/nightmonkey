@@ -77,6 +77,8 @@ class NightlyTests(unittest.TestCase):
         self.assertEqual(jobs(text), ["gate", "interpreter"])
         self.assertNotIn("lane: aot", text)
         self.assertIn("lane: interpreter", job(text, "interpreter"))
+        self.assertIn("uses: ./.github/workflows/engine-release.yml", job(text, "interpreter"))
+        self.assertIn("full_jstests: true", job(text, "interpreter"))
 
 
 class WeeklyAotTests(unittest.TestCase):
@@ -101,7 +103,7 @@ class WeeklyAotTests(unittest.TestCase):
 
     def test_one_aot_build_without_jit_tests_that_packages_the_jstests(self):
         engine = job(self.text, "engine")
-        self.assertIn("uses: ./.github/workflows/engine.yml", engine)
+        self.assertIn("uses: ./.github/workflows/engine-release.yml", engine)
         self.assertIn("lane: aot", engine)
         self.assertIn("jit_tests: none", engine)
         self.assertIn("jstests_inputs: true", engine)
@@ -119,7 +121,7 @@ class WeeklyAotTests(unittest.TestCase):
         self.assertIn('scripts/ci-suite.sh jstests aot -- --total-chunks="$SHARDS" --this-chunk="$SHARD"', run)
 
     def test_the_shard_downloads_what_the_engine_uploads(self):
-        upload = step(body("engine.yml"), "Upload the jstests inputs")
+        upload = step(body("engine-release.yml"), "Upload the jstests inputs")
         download = step(self.shard, "Download the jstests inputs")
         self.assertEqual(value(upload, "name"), "nightmonkey-jstests-inputs-${{ inputs.lane }}")
         self.assertEqual(value(download, "name"), "nightmonkey-jstests-inputs-aot")
@@ -129,15 +131,25 @@ class WeeklyAotTests(unittest.TestCase):
         for text in (upload, download):
             self.assertNotIn("run_attempt", value(text, "name"))
 
+    def test_the_aot_shards_run_the_release_test_sources_they_unpack(self):
+        unpack = step(self.shard, "Unpack the jstests inputs")
+        self.assertIn('tar -x -C "$RUNNER_TEMP/testsrc"', unpack)
+        run = step(self.shard, "AOT jstests (shard ${{ matrix.shard }})")
+        self.assertIn('NIGHT_FIREFOX_TESTS="$RUNNER_TEMP/testsrc" \\', run)
+        upload = step(body("engine-release.yml"), "Upload the jstests inputs")
+        self.assertEqual(value(upload, "retention-days"), "7")
+
     def test_the_jstests_inputs_hold_the_shell_and_the_whole_test_tree(self):
-        package = step(body("engine.yml"), "Package the jstests inputs")
+        package = step(body("engine-release.yml"), "Package the jstests inputs")
         self.assertIn("if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.jstests_inputs }}",
                       package)
         self.assertIn("build/bin", package)
-        self.assertRegex(package, r"\bjs/src/tests\b(?!/)")
+        # The release test sources with the jstests bundle merged in, and its
+        # xul-info.txt, which run-jstests.sh reads from the test root.
+        self.assertIn('tar -C "$RUNNER_TEMP/testsrc" -rf "$RUNNER_TEMP/jstests-inputs.tar" js xul-info.txt', package)
 
     def test_engine_can_skip_the_jit_tests(self):
-        jit = step(body("engine.yml"), "jit-tests (${{ inputs.jit_tests == 'subset' && 'pull request subset' || 'all' }})")
+        jit = step(body("engine-release.yml"), "jit-tests from the release test sources")
         self.assertIn("inputs.jit_tests != 'none'", jit)
 
     def test_the_shard_limits_nest(self):

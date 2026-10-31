@@ -39,35 +39,26 @@ reproducible host Rust commands.
 ```sh
 cd /path/to/nightmonkey
 cargo build --workspace --locked
-git clone https://github.com/YurtOS/yurt-firefox /path/to/yurt-firefox
-git -C /path/to/yurt-firefox checkout "$(cat /path/to/nightmonkey/engine/QUEUE_PIN)"
-/path/to/yurt-firefox/scripts/build-engine.sh --workdir /path/to/firefox
-cmake -S . -B build -DSPIDERMONKEY_DIST=/path/to/firefox/obj-nightmonkey-sm/dist
+scripts/fetch-engine-release.sh --jstests false /path/to/release
+cmake -S . -B build -DSPIDERMONKEY_DIST=/path/to/release/spidermonkey \
+  -DNIGHT_TOOLCHAIN_ROOT=/path/to/release/toolchain/clang \
+  -DNIGHT_SYSROOT=/path/to/release/toolchain/sysroot-wasm32-wasi
 cmake --build build
 ```
 
-The engine is the pinned Firefox tag plus YurtOS/yurt-firefox's patch queue,
-built by its `scripts/build-engine.sh` at the commit in `engine/QUEUE_PIN`
-(Linux only for a full build; `--dry-run` only fetches and patches the tree,
-and `scripts/build-spidermonkey.sh /path/to/firefox` rebuilds it). The patched
-tree is also the jit-test/jstests source. Integrated builds need its private
-headers and libraries, the WASI sysroot, CMake and the `wasm32-wasip1` Rust
-target; `.github/workflows/engine.yml` has the bootstrap steps. Record the
-`build-manifest.json` build-engine.sh writes next to the tree when reproducing;
-the script refuses to overwrite one, so move it aside before building again.
-CI also checks that the pin is on yurt-firefox `main`; this local recipe does
-not (`git -C /path/to/yurt-firefox merge-base --is-ancestor HEAD origin/main`).
-Do not assume a neighboring repository's engine build is ABI-compatible.
-
-A published engine release can stand in for the source build (README "Engine
-release"): `engine/ENGINE_RELEASE` pins its tag and digests,
-`scripts/fetch-engine-release.sh` fetches and verifies it, and
-`.github/workflows/engine-release.yml` builds and tests against it in CI, next
-to `engine.yml`. Bump it only with `scripts/update-engine-release.sh <tag>`;
-`scripts/check-engine-release.sh` guards the file and the workflow's fetch,
-build and jit-test steps (exact text, no `if:`), as `check-engine-source.sh`
-guards `engine.yml`. Leave `engine.yml`, `engine/QUEUE_PIN` and
-`check-engine-source.sh` alone until the fallback is removed.
+The engine is a published YurtOS/yurt-firefox release (the pinned Firefox
+tag plus its patch queue, built and accepted against NightMonkey there),
+pinned in `engine/ENGINE_RELEASE` by tag and digests (README "Building").
+`scripts/fetch-engine-release.sh` downloads it, checks every digest before
+extracting anything, and leaves the engine (`spidermonkey/`), the clang
+toolchain and WASI sysroot (`toolchain/`) and the jit-test sources
+(`testsrc/`, plus the jstests with `--jstests true`). Point the harnesses at
+the test sources with `NIGHT_FIREFOX_TESTS`. Bump the release only with
+`scripts/update-engine-release.sh <tag>`; `scripts/check-engine-release.sh`
+guards the file and the workflow's fetch, build and test steps (exact text,
+no `if:`). There is no source-build path here any more: changing the engine
+is a YurtOS/yurt-firefox change and a new release. Do not assume a
+neighboring repository's engine build is ABI-compatible.
 A packaged (relocatable) engine also needs `-DNIGHT_TOOLCHAIN_ROOT` and
 `-DNIGHT_SYSROOT` (README "Building"); `scripts/ci-suite.sh` reads the test
 sources from `NIGHT_FIREFOX_TESTS` (default `firefox/` in the
@@ -131,7 +122,7 @@ rebuilding the engine.
 
 `.github/workflows/ci.yml` runs independent Rust fmt/check/test/Clippy jobs,
 workflow lint and script checks on PRs, pushes to `yurt` and manual dispatch.
-It calls `engine.yml` to build SpiderMonkey and Nightmonkey and run local
+It calls `engine-release.yml` to fetch the engine release, build Nightmonkey and run local
 regressions and jit-tests in both AOT and interpreter lanes: on a pull request
 only the `JIT_SUBSET` paths, and all of them, in four shard jobs, on a push to
 `yurt`, a dispatch, or a pull request labelled `ci:full`. `jstests.yml`

@@ -1,13 +1,13 @@
 name: jit-test shards
 
 # The merge tier's jit-tests (see ci.yml): every jit-test, split
-# over SHARDS jobs. Called by ci.yml after engine.yml ran with
+# over SHARDS jobs. Called by ci.yml after engine-release.yml ran with
 # `jit_tests: sharded`, which uploads the inputs: the built shell (build/bin)
-# and the jit-test sources of the patched tree. Each shard runs its slice in
-# every requested lane; together the slices are the whole list (jit_test.py
+# and the engine release's test sources. Each shard runs its slice in every
+# requested lane; together the slices are the whole list (jit_test.py
 # --total-chunks takes contiguous slices of the sorted list, after the
-# excludes). A separate workflow so that engine.yml keeps the one job
-# scripts/check-engine-source.sh guards.
+# excludes). A separate workflow so that engine-release.yml keeps the one
+# job scripts/check-engine-release.sh guards.
 
 on:
   workflow_call:
