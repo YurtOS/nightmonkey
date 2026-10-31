@@ -95,7 +95,7 @@ class CheckEngineReleaseTests(unittest.TestCase):
 
     def test_unknown_and_duplicate_keys_are_rejected(self):
         self.assert_rejected(self.check(release=release_file(extra="extra=" + "7" * 64 + "\n")), "extra")
-        self.assert_rejected(self.check(release=release_file(extra="testsrc=" + "3" * 64 + "\n")), "testsrc")
+        self.assert_rejected(self.check(release=release_file(extra="testsrc=" + "3" * 64 + "\n")), "testsrc appears 2 times")
         self.assert_rejected(self.check(release=release_file(extra="tag=" + TAG + "\n")), "tag")
 
     def test_missing_release_file_is_rejected(self):
@@ -113,9 +113,9 @@ class CheckEngineReleaseTests(unittest.TestCase):
         self.assert_rejected(
             self.check(self.mutate("scripts/fetch-engine-release.sh", "scripts/fetch-engine-release.sh --no-verify")),
             "Fetch the engine release")
-        self.assert_rejected(self.check(self.mutate("      - name: Fetch the engine release\n",
-                                                    "      - name: Fetch the engine release\n        continue-on-error: true\n")),
-                             "continue-on-error")
+        self.assert_rejected(self.check(self.mutate("      - name: Local regressions\n",
+                                                    "      - name: Local regressions\n        continue-on-error: true\n")),
+                             "uses continue-on-error")
         self.assert_rejected(self.check(self.mutate("      - name: Fetch the engine release\n",
                                                     "      - name: Fetch the engine release\n        if: ${{ inputs.lane == 'x' }}\n")),
                              "Fetch the engine release")
@@ -129,8 +129,14 @@ class CheckEngineReleaseTests(unittest.TestCase):
                              "Build NightMonkey against the release")
 
     def test_the_lanes_use_the_release_test_sources(self):
-        self.assert_rejected(self.check(self.mutate("NIGHT_FIREFOX_TESTS: ${{ runner.temp }}/testsrc", "NIGHT_FIREFOX_TESTS: firefox", count=2)),
-                             "NIGHT_FIREFOX_TESTS")
+        # The jstests step is not one of the exact-text steps; the rule still
+        # holds for it.
+        wf = self.workflow
+        at = wf.index("      - name: Full jstests\n")
+        end = wf.index("\n      - ", at + 1)
+        step = wf[at:end].replace("          NIGHT_FIREFOX_TESTS: ${{ runner.temp }}/testsrc\n", "")
+        self.assertNotIn("NIGHT_FIREFOX_TESTS", step)
+        self.assert_rejected(self.check(wf[:at] + step + wf[end:]), "runs jit-tests or jstests without")
 
     def test_the_fetch_precedes_the_build(self):
         wf = self.workflow

@@ -254,6 +254,14 @@ class FetchTests(ReleaseFixture):
                 self.assertNotEqual(r.returncode, 0, label)
                 self.assertIn(f"{P}-toolchain-clang.tar.zst", r.stderr)
 
+    def test_a_member_outside_the_expected_top_level_fails(self):
+        self.make_release(dict(ARCHIVES, testsrc=ARCHIVES["testsrc"] + [D("other"), F("other/file")]))
+        self.write_release()
+        r = self.fetch()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn(f"{P}-testsrc.tar.zst: member 'other'", r.stderr)
+        self.assertEqual(self.extracted(), [])
+
     def test_an_escaping_member_in_any_archive_fails(self):
         self.make_release(dict(ARCHIVES, testsrc=ARCHIVES["testsrc"] + [F("../escape")]))
         self.write_release()
@@ -316,7 +324,7 @@ class UpdateTests(ReleaseFixture):
         (self.assets / "MANIFEST.json").write_text(json.dumps(m) + "\n")
         r = self.update(TAG)
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("jstests", r.stderr)
+        self.assertIn(f"no sha256 for {P}-jstests.tar.zst", r.stderr)
 
 
 if __name__ == "__main__":
