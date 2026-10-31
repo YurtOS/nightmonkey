@@ -301,6 +301,11 @@ class FetchTests(ReleaseFixture):
                     ("link to the top itself", [(top + "/up", "sym", ".", 0o777), F(top + "/up/x")], "under a link"),
                     ("a member under a link", [(top + "/d", "sym", "sub", 0o777), D(top + "/sub"), F(top + "/d/x")], "under a link"),
                     ("link up a level", [(top + "/up", "sym", "../x", 0o777)], "may leave"),
+                    # Normalized as text, esc names top/a; on disk tar resolves
+                    # it through d (-> .) to outside top: only the ".." rule
+                    # catches it.
+                    ("nested .. through a dot link", [D(top + "/a"), (top + "/a/d", "sym", ".", 0o777),
+                                                     (top + "/a/esc", "sym", "d/d/../..", 0o777)], "may leave"),
                     ("absolute link", [(top + "/abs", "sym", "/etc/passwd", 0o777)], "may leave"),
                     ("hard link to a non-member", [(top + "/h", "hard", "preexisting.json", 0o644)], "earlier regular file"),
                     ("hard link to a directory", [(top + "/h", "hard", top, 0o644)], "earlier regular file"),

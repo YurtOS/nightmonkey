@@ -131,9 +131,15 @@ class CheckEngineReleaseTests(unittest.TestCase):
         step = wf[at:end].replace("${{ runner.temp }}/testsrc", "firefox")
         self.assert_rejected(self.check(wf[:at] + step + wf[end:]), "Full jstests")
 
+    def test_the_jit_tests_have_engine_ymls_timeout(self):
+        timeout = "        timeout-minutes: 125\n        env:\n          JIT_TESTS:"
+        for new in ("        env:\n          JIT_TESTS:", "        timeout-minutes: 300\n        env:\n          JIT_TESTS:"):
+            with self.subTest(new=new):
+                self.assert_rejected(self.check(self.mutate(timeout, new)), "jit-tests from the release test sources")
+
     def test_the_jit_tests_run_after_a_failed_regression_step(self):
-        jit_if = "        if: ${{ !cancelled() && steps.build.outcome == 'success' }}\n        env:\n          JIT_TESTS:"
-        self.assert_rejected(self.check(self.mutate(jit_if, "        env:\n          JIT_TESTS:")),
+        jit_if = "        if: ${{ !cancelled() && steps.build.outcome == 'success' }}\n        timeout-minutes: 125\n"
+        self.assert_rejected(self.check(self.mutate(jit_if, "        timeout-minutes: 125\n")),
                              "jit-tests from the release test sources")
 
     def test_the_build_uses_the_release_paths(self):
