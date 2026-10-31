@@ -1,0 +1,161 @@
+name: Engine release integration
+
+# NightMonkey built against a published YurtOS/yurt-firefox engine release
+# instead of building Firefox: the release pinned in engine/ENGINE_RELEASE
+# (tag and sha256 of MANIFEST.json and every asset) is downloaded, every
+# digest is verified before anything is extracted, and NightMonkey is built
+# against the engine archive with the release's own clang and WASI sysroot;
+# the jit-tests (and with full_jstests the jstests) come from the release's
+# test-source bundles. scripts/check-engine-release.sh guards the fetch, the
+# build and the jit-test step; change them together.
+#
+# Transition: ci.yml runs this next to engine.yml (the source build at
+# engine/QUEUE_PIN), which stays until this job has been green on yurt. It
+# runs what engine.yml's job runs on its build (the guest tier contract, the
+# local and tier regressions, the jit-tests, the jstests when asked), except
+# the shard and jstests-shard uploads: the merge tier's full jit-tests run
+# here in-job instead of in jit-shards.yml.
+
+on:
+  workflow_call:
+    inputs:
+      full_jstests:
+        type: boolean
+        default: false
+      lane:
+        description: 'aot, interpreter, or both'
+        type: string
+        default: both
+      # full: every jit-test; subset: only JIT_SUBSET (engine.yml's pull
+      # request subset).
+      jit_tests:
+        description: 'full or subset'
+        type: string
+        default: full
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # engine.yml's pull request subset (see there).
+  JIT_SUBSET: warp/ baseline/ sunspider/
+
+jobs:
+  jit-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      CI_LANE: ${{ inputs.lane }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust from rust-toolchain.toml
+        run: |
+          rustup show
+          rustup target add wasm32-wasip1
+          rustup component add rust-src
+      - name: Prepare logs
+        run: mkdir -p "$RUNNER_TEMP/nightmonkey-logs"
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip python3-venv build-essential zstd
+
+      # gh wants a token even for a public repository; the job's read-only
+      # one. Every digest is checked before anything is extracted.
+      - name: Fetch the engine release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FULL_JSTESTS: ${{ inputs.full_jstests }}
+        run: scripts/fetch-engine-release.sh --jstests "$FULL_JSTESTS" "$RUNNER_TEMP"
+
+      - name: Record the engine release
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          echo "Engine release: YurtOS/yurt-firefox $TAG" | tee "$RUNNER_TEMP/nightmonkey-logs/engine.txt"
+          echo "Engine release: YurtOS/yurt-firefox $TAG" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: . -> build/cargo
+          key: engine-release-ubuntu-24.04
+          save-if: ${{ github.ref == 'refs/heads/yurt' }}
+
+      - name: Build NightMonkey against the release
+        id: build
+        run: |
+          cmake -S . -B build -DSPIDERMONKEY_DIST="$RUNNER_TEMP/spidermonkey" -DNIGHT_TOOLCHAIN_ROOT="$RUNNER_TEMP/toolchain/clang" -DNIGHT_SYSROOT="$RUNNER_TEMP/toolchain/sysroot-wasm32-wasi"
+          cmake --build build
+          test -x build/bin/inproc-shell.sh
+
+      - name: Guest tier options contract
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: python3 scripts/test-guest-tier-options.py build
+
+      - name: Local regressions
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 65
+        run: scripts/ci-suite.sh local "$CI_LANE"
+
+      # The default pipeline is MIR (the lanes above run it with strict
+      # coverage); the baseline tier and MIR under its stress option get the
+      # regression tests as tiers of their own.
+      - name: Tier regressions (baseline, MIR stress)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 65
+        run: |
+          set -euo pipefail
+          for opts in "--pipeline baseline --strict-coverage" \
+                      "--pipeline mir --mir-stress 3 --strict-coverage"; do
+            echo "::group::night tests: $opts"
+            NIGHT_INPROC_STRICT=1 NIGHT_OPTIONS="$opts" scripts/run-night-tests.sh build
+            echo "::endgroup::"
+          done
+
+      # As in engine.yml: after a failed regression step the jit-tests still run.
+      - name: jit-tests from the release test sources
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 125
+        env:
+          JIT_TESTS: ${{ inputs.jit_tests }}
+          NIGHT_FIREFOX_TESTS: ${{ runner.temp }}/testsrc
+        run: |
+          set -euo pipefail
+          case "$JIT_TESTS" in
+            full) scripts/ci-suite.sh jit "$CI_LANE" ;;
+            subset)
+              read -ra paths <<< "$JIT_SUBSET"
+              scripts/ci-suite.sh jit "$CI_LANE" -- "${paths[@]}" ;;
+            *) echo "::error::unknown jit_tests input: $JIT_TESTS"; exit 1 ;;
+          esac
+
+      # The jstests asset was fetched only for this (full_jstests), into the
+      # same test-source root; its xul-info.txt reaches run-jstests.sh there.
+      - name: Full jstests
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.full_jstests }}
+        timeout-minutes: 245
+        env:
+          NIGHT_FIREFOX_TESTS: ${{ runner.temp }}/testsrc
+        run: scripts/ci-suite.sh jstests "$CI_LANE"
+
+      - name: Upload execution logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightmonkey-execution-release-${{ inputs.lane }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nightmonkey-logs
+          if-no-files-found: error
+          retention-days: 7

@@ -133,6 +133,40 @@ overwrite an existing `build-manifest.json`; move it aside before building
 again. CI also checks that the pin is on yurt-firefox `main`; this recipe does
 not.
 
+### Engine release
+
+Instead of building Firefox, use a published engine release: the tag pinned
+in `engine/ENGINE_RELEASE`, with the sha256 of its `MANIFEST.json` and of each
+asset (engine, test sources, jstests, clang, WASI sysroot). CI's
+`engine-release.yml` job runs next to the source build until it has been
+green on `yurt`; then `engine.yml`, `engine/QUEUE_PIN` and
+`check-engine-source.sh` are removed. It runs the same regression steps as
+the source build and the same jit-test tier: the pull request subset, or on
+the merge tier all jit-tests in its own job (the source build shards them).
+
+```
+scripts/fetch-engine-release.sh --jstests false /path/to/release
+cmake -S . -B build -DSPIDERMONKEY_DIST=/path/to/release/spidermonkey \
+  -DNIGHT_TOOLCHAIN_ROOT=/path/to/release/toolchain/clang \
+  -DNIGHT_SYSROOT=/path/to/release/toolchain/sysroot-wasm32-wasi
+cmake --build build
+NIGHT_FIREFOX_TESTS=/path/to/release/testsrc scripts/ci-suite.sh jit both
+```
+
+`fetch-engine-release.sh` downloads with `gh release download` and checks
+every digest before extracting anything; `--jstests true` adds the jstests
+bundle (and its `xul-info.txt`, which `run-jstests.sh` passes to jstests.py)
+to the test sources.
+
+To move to a new release (`engine-v<version>-<n>`, published by
+yurt-firefox's `release.yml`): run `scripts/update-engine-release.sh <tag>`,
+which writes `engine/ENGINE_RELEASE` from the release's `MANIFEST.json` after
+checking every asset's digest against its `.sha256`; review the digests in the
+diff; if the Firefox version changed, regenerate the opcode table from the
+release's `include-private/vm/Opcodes.h` with `scripts/gen_opcodes.py` (below);
+and let CI run both engine jobs. `scripts/check-engine-release.sh` refuses a
+floating tag, `latest`, the `PENDING` placeholder or a missing digest.
+
 `dist/include-private/` mirrors `js/src` (source and generated headers) and
 records the compile flags libjs was built with in `js-build-config.json`;
 `dist/lib/` holds `libjsshell.a`, `libjs_static.a`, `libjsrust.a` and
