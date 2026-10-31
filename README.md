@@ -93,13 +93,13 @@ interpreted.
 | `runtime/` | The night runtime: `NightRuntime.cpp` is the `night_runtime_*` C ABI generated code calls, in front of the engine halves it forwards to -- `NightOps.cpp` (bytecode ops), `NightInlineCaches.cpp` (property-cache populate and replay), `NightInlineHeap.cpp` (inline allocation, write barriers, and the baked-layout asserts), `NightGenerator.cpp`, `NightRegExp.cpp`. `NightEntry.cpp` is the other direction: entering compiled bodies. `NightHooks.cpp` is the engine's external compiler hook table (see `docs/INTEGRATION.md`). Plus the value stack and snapshot registration/activation/capture. Built against SpiderMonkey's private headers. |
 | `shell/` | `nightshell.cpp`: the NightMonkey wasm shell, SpiderMonkey's shell (`libjsshell`) with the hooks installed and the `--night-snapshot` / `--night-inprocess` flows. |
 | `guest/` | `night-guest`: the compiler and snapshot reader as one wasm staticlib for the in-process lane. |
-| `spidermonkey/` | The mozconfig that builds SpiderMonkey the way NightMonkey needs it. |
-| `scripts/` | `build-spidermonkey.sh`, `run-jit-tests.sh`, `run-jstests.sh`, and the harness shell wrapper template. |
+| `scripts/` | `fetch-engine-release.sh` and `update-engine-release.sh` (the engine release), `run-jit-tests.sh`, `run-jstests.sh`, and the harness shell wrapper template. |
+| `engine/` | `ENGINE_RELEASE`: the YurtOS/yurt-firefox engine release NightMonkey builds against (tag and digests). |
 | `tests/` | The jit-test and jstests exclusion lists for the AOT lane, and `tests/jit-test/night/`, NightMonkey's own regression tests (run by `scripts/run-night-tests.sh`, also under the baseline and MIR-stress tiers in CI). |
 | `snapshot/` | Snapshot/live-heap reader crate (`night-snapshot`): parses the registration block and walks the script graph into a `Source`. |
 | `nightmonkey/` | The `nightmonkey` binary: snapshot in, AOT-compiled module out. The optional `wizen` Cargo feature also accepts programs and drives wizer as a library. |
 | `wasm-jit-runner/` | Wasmtime-based host for the in-process flow: reserves table slots and installs the guest-assembled module (the testing counterpart of Yurt's JIT mount ABI). |
-| `configs/` | Benchmark-lane mozconfigs for the SpiderMonkey tree (`mozconfig-native`/`-ion`/`-wasm`/`-weval`); the NightMonkey build itself uses `spidermonkey/mozconfig`. |
+| `configs/` | Benchmark-lane mozconfigs for the SpiderMonkey tree (`mozconfig-native`/`-ion`/`-wasm`/`-weval`); the NightMonkey build itself uses the engine release, built by YurtOS/yurt-firefox's `mozconfig`. |
 | `docs/` | `DESIGN.md`, `INTEGRATION.md` (the SpiderMonkey hook surface), `BASELINE.md`, `MIR.md` and `MIR-MEMORY.md` (the tiers, imported from upstream), `TODO`. |
 | `tools/` | Profiling, benchmarking, and visualization helpers (`opprof.py`, `pairab.sh`, ...). |
 
@@ -111,71 +111,47 @@ which adds the per-object/per-script words and the hook table the tier plugs
 into, exports the engine's private headers, and builds the shell as a static
 library (`docs/INTEGRATION.md`).
 
-Step 1 -- build SpiderMonkey (wasm32-wasi, wizer-capable shell, hooks on).
-The engine is the pinned Firefox tag plus the patch queue in
-[YurtOS/yurt-firefox](https://github.com/YurtOS/yurt-firefox), at the commit in
-`engine/QUEUE_PIN`:
-
-```
-git clone https://github.com/YurtOS/yurt-firefox /path/to/yurt-firefox
-git -C /path/to/yurt-firefox checkout "$(cat /path/to/nightmonkey/engine/QUEUE_PIN)"
-/path/to/yurt-firefox/scripts/build-engine.sh --workdir /path/to/firefox
-# -> /path/to/firefox/obj-nightmonkey-sm/dist, /path/to/build-manifest.json
-```
-
-build-engine.sh fetches the tag, applies the queue, bootstraps the toolchains
-and runs `./mach build` with the queue's `mozconfig` (identical to
-`spidermonkey/mozconfig`; CI checks this). A full build is Linux only;
-`--dry-run` stops after patching the tree, and
-`scripts/build-spidermonkey.sh /path/to/firefox` rebuilds a patched tree with
-`MOZCONFIG=spidermonkey/mozconfig ./mach build`. build-engine.sh refuses to
-overwrite an existing `build-manifest.json`; move it aside before building
-again. CI also checks that the pin is on yurt-firefox `main`; this recipe does
-not.
-
-### Engine release
-
-Instead of building Firefox, use a published engine release: the tag pinned
-in `engine/ENGINE_RELEASE`, with the sha256 of its `MANIFEST.json` and of each
-asset (engine, test sources, jstests, clang, WASI sysroot). CI's
-`engine-release.yml` job runs next to the source build until it has been
-green on `yurt`; then `engine.yml`, `engine/QUEUE_PIN` and
-`check-engine-source.sh` are removed. It runs the same regression steps as
-the source build and the same jit-test tier: the pull request subset, or on
-the merge tier all jit-tests in its own job (the source build shards them).
+Step 1 -- get the engine (wasm32-wasi, wizer-capable shell, hooks on). It is
+a published release of [YurtOS/yurt-firefox](https://github.com/YurtOS/yurt-firefox)
+(the pinned Firefox tag plus its patch queue, built and accepted against
+NightMonkey there), pinned in `engine/ENGINE_RELEASE` by tag and by the
+sha256 of its `MANIFEST.json` and of each asset (engine, test sources,
+jstests, clang, WASI sysroot):
 
 ```
 scripts/fetch-engine-release.sh --jstests false /path/to/release
-cmake -S . -B build -DSPIDERMONKEY_DIST=/path/to/release/spidermonkey \
-  -DNIGHT_TOOLCHAIN_ROOT=/path/to/release/toolchain/clang \
-  -DNIGHT_SYSROOT=/path/to/release/toolchain/sysroot-wasm32-wasi
-cmake --build build
-NIGHT_FIREFOX_TESTS=/path/to/release/testsrc scripts/ci-suite.sh jit both
+# -> /path/to/release/spidermonkey (SPIDERMONKEY_DIST),
+#    /path/to/release/toolchain/{clang,sysroot-wasm32-wasi}, /path/to/release/testsrc
 ```
 
-`fetch-engine-release.sh` downloads with `gh release download` and checks
-every digest before extracting anything; `--jstests true` adds the jstests
-bundle (and its `xul-info.txt`, which `run-jstests.sh` passes to jstests.py)
-to the test sources.
+`fetch-engine-release.sh` downloads with `gh release download` (needs `gh`,
+`zstd` and Python 3) and checks every digest before extracting anything;
+`--jstests true` adds the jstests bundle (and its `xul-info.txt`, which
+`run-jstests.sh` passes to jstests.py) to the test sources. Building the
+engine itself is YurtOS/yurt-firefox's business (its `scripts/build-engine.sh`).
 
 To move to a new release (`engine-v<version>-<n>`, published by
 yurt-firefox's `release.yml`): run `scripts/update-engine-release.sh <tag>`,
 which writes `engine/ENGINE_RELEASE` from the release's `MANIFEST.json` after
 checking every asset's digest against its `.sha256`; review the digests in the
 diff; if the Firefox version changed, regenerate the opcode table from the
-release's `include-private/vm/Opcodes.h` with `scripts/gen_opcodes.py` (below);
-and let CI run both engine jobs. `scripts/check-engine-release.sh` refuses a
-floating tag, `latest`, the `PENDING` placeholder or a missing digest.
+release's `spidermonkey/include-private/vm/Opcodes.h` with
+`scripts/gen_opcodes.py` (below); and let CI run. `scripts/check-engine-release.sh`
+refuses a floating tag, `latest`, the `PENDING` placeholder or a missing
+digest, and holds CI's fetch, build and test steps to exact text.
 
-`dist/include-private/` mirrors `js/src` (source and generated headers) and
-records the compile flags libjs was built with in `js-build-config.json`;
-`dist/lib/` holds `libjsshell.a`, `libjs_static.a`, `libjsrust.a` and
+`spidermonkey/include-private/` mirrors `js/src` (source and generated
+headers) and records the compile flags libjs was built with in
+`js-build-config.json` (its compiler is a bare `clang`/`clang++`, so the
+build takes the release's toolchain); `spidermonkey/lib/` holds `libjsshell.a`, `libjs_static.a`, `libjsrust.a` and
 `libpure_virtual.a`.
 
 Step 2 -- build NightMonkey against it:
 
 ```
-cmake -S . -B build -DSPIDERMONKEY_DIST=/path/to/firefox/obj-nightmonkey-sm/dist
+cmake -S . -B build -DSPIDERMONKEY_DIST=/path/to/release/spidermonkey \
+  -DNIGHT_TOOLCHAIN_ROOT=/path/to/release/toolchain/clang \
+  -DNIGHT_SYSROOT=/path/to/release/toolchain/sysroot-wasm32-wasi
 cmake --build build
 # -> build/bin/js               (the NightMonkey wasm32-wasi shell)
 # -> build/bin/js-inproc        (the same, with the in-process compiler)
@@ -215,7 +191,7 @@ feature-guard any per-version differences. The CMake build checks that
 the selected table is what the engine being built against generates:
 
 ```
-scripts/gen_opcodes.py check ff147 /path/to/firefox/obj-nightmonkey-sm/dist/include-private/vm/Opcodes.h
+scripts/gen_opcodes.py check ff147 /path/to/release/spidermonkey/include-private/vm/Opcodes.h
 ```
 
 so an engine whose bytecode differs from the table, in shape or in
@@ -234,26 +210,24 @@ that forward it (`snapshot`, `nightmonkey`, `guest`), add its arm to
 
 CI (`.github/workflows/ci.yml`) runs Rust formatting, check, tests and Clippy,
 workflow lint and script regressions on pull requests and pushes to `yurt`.
-Its reusable engine workflow (`.github/workflows/engine.yml`) builds both
-trees and runs local regressions and jit-tests in both AOT and interpreter
-lanes. The jit-tests are tiered: a pull request runs a small subset
-(`JIT_SUBSET` in engine.yml), and a push to `yurt`, a manual dispatch or a
+Its reusable engine workflow (`.github/workflows/engine-release.yml`)
+fetches the engine release, builds NightMonkey against it and runs local
+regressions and jit-tests in both AOT and interpreter lanes. The jit-tests
+are tiered: a pull request runs a small subset (`JIT_SUBSET` in
+engine-release.yml), and a push to `yurt`, a manual dispatch or a
 pull request labelled `ci:full` runs all of them, split over four shard jobs
-(`scripts/ci-suite.sh jit both -- --total-chunks=4 --this-chunk=N`). The
-SpiderMonkey build uses ccache; caches are saved only from `yurt`. Full
+(`scripts/ci-suite.sh jit both -- --total-chunks=4 --this-chunk=N`). Full
 jstests run nightly at 02:23 UTC and through manual dispatch of
 `Full jstests`, with separate jobs for the two lanes. Existing exclusion
 lists apply; the shipping snapshot flow is not a hosted gate (run
 `scripts/snapshot-roundtrip.sh` against a build, see Flow 1). Execution
-logs, the engine queue pin and the engine's `build-manifest.json` are retained
-for seven days.
+logs and the engine release tag are retained for seven days.
 
 ## Prerequisites
 
-- The patched SpiderMonkey tree from YurtOS/yurt-firefox at `engine/QUEUE_PIN`
-  (Step 1 above). Its `scripts/build-engine.sh` bootstraps the JS shell
-  toolchains and the wasm32-wasi sysroot into `~/.mozbuild`; see
-  `.github/workflows/engine.yml` for the CI steps.
+- The engine release pinned in `engine/ENGINE_RELEASE` (Step 1 above), with
+  its clang toolchain and wasm32-wasi sysroot; `gh`, `zstd` and Python 3 to
+  fetch it. See `.github/workflows/engine-release.yml` for the CI steps.
 - Rust 1.98.1 (pinned in `rust-toolchain.toml`) with the `wasm32-wasip1` target
   (`rustup target add wasm32-wasip1`), CMake 3.20+.
 - `wasmtime` on `$PATH` or at `$HOME/bin/wasmtime`, to run compiled modules.

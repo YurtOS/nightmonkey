@@ -2,8 +2,10 @@ name: AOT jstests
 
 # Weekly, and on dispatch: every jstest in the AOT lane (each test compiled
 # in-process), about 3.5 h of tests at 4.2 tests/s (run 41086602517), split
-# over SHARDS jobs. One engine build (engine.yml with `jit_tests: none`)
-# uploads the built shell and js/src/tests; each shard runs its slice
+# over SHARDS jobs. One build against the engine release (engine-release.yml
+# with `jit_tests: none` and `jstests_inputs`) uploads the built shell and
+# the release's test sources with the jstests bundle (js/src/tests whole,
+# and xul-info.txt); each shard runs its slice
 # (jstests.py --this-chunk; run-jstests-checked.py sorts the test walk so
 # the slices partition one list). The nightly jstests.yml runs the
 # interpreter lane.
@@ -66,7 +68,7 @@ jobs:
   engine:
     needs: gate
     if: ${{ needs.gate.outputs.run == 'true' }}
-    uses: ./.github/workflows/engine.yml
+    uses: ./.github/workflows/engine-release.yml
     with:
       lane: aot
       jit_tests: none

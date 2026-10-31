@@ -36,12 +36,13 @@ fi
 # jstests.py reads TARGET_XPCOM_ABI, OS_TARGET and MOZ_DEBUG from a
 # config/autoconf.mk above the shell to evaluate manifest conditions
 # (winWidget, Android, is64Bit, isDebugBuild); without one it exits before
-# running anything. The shell here is build/bin, outside the objdir, so pass
-# the values the objdir records for spidermonkey/mozconfig: wasm32 target
-# (toolchain.configure's "<cpu>-gcc3"), OS_TARGET WASI, not a debug build.
-# An engine release's test sources (NIGHT_FIREFOX_TESTS, engine-release.yml)
-# carry the value read from the objdir that built them, in xul-info.txt at
-# their root: that one wins. It must be one line, ABI:OS:DEBUG.
+# running anything. The shell here is build/bin, outside any objdir, so pass
+# them. An engine release's test sources (NIGHT_FIREFOX_TESTS,
+# engine-release.yml) carry the value read from the objdir that built the
+# engine, in xul-info.txt at their root: that one wins. It must be one line,
+# ABI:OS:DEBUG. The default, for a Firefox checkout, is the value the
+# release records (engine-v147.0.4-1): wasm32 target (toolchain.configure's
+# "<cpu>-gcc3"), OS_TARGET WASI, not a debug build.
 xul_info=wasm32-gcc3:WASI:false
 if [ -e "$firefox/xul-info.txt" ]; then
   xul_info=$(cat "$firefox/xul-info.txt")

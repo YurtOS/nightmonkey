@@ -1,4 +1,4 @@
-"""Static checks of the CI tier wiring (ci.yml, engine.yml, jit-shards.yml)."""
+"""Static checks of the CI tier wiring (ci.yml, engine-release.yml, jit-shards.yml)."""
 
 import json
 import os

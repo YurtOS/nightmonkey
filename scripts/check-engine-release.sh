@@ -18,8 +18,9 @@
 # engine-v<version>-<n> (never a floating one, `latest` or the PENDING
 # placeholder) and a full sha256 for MANIFEST.json and each asset.
 #
-# Like check-engine-source.sh, this blocks accidental regressions, not
-# deliberate sabotage by someone who can edit this repository.
+# This blocks accidental regressions, not deliberate sabotage by someone who
+# can edit this repository, guard included. The source build it replaced
+# (engine.yml, engine/QUEUE_PIN) is gone; the ban on its words keeps it out.
 #
 #   scripts/check-engine-release.sh
 set -euo pipefail
@@ -38,7 +39,7 @@ REQUIRED = [
   id: release
   env:
     GH_TOKEN: ${{ github.token }}
-    FULL_JSTESTS: ${{ inputs.full_jstests }}
+    FULL_JSTESTS: ${{ inputs.full_jstests || inputs.jstests_inputs }}
   run: scripts/fetch-engine-release.sh --jstests "$FULL_JSTESTS" "$RUNNER_TEMP"
 '''),
     ("the build (against the fetched engine and toolchain)", r'''
@@ -51,7 +52,7 @@ REQUIRED = [
 '''),
     ("the jit-tests (from the fetched test sources)", r'''
 - name: jit-tests from the release test sources
-  if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+  if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.jit_tests != 'sharded' && inputs.jit_tests != 'none' }}
   timeout-minutes: 125
   env:
     JIT_TESTS: ${{ inputs.jit_tests }}

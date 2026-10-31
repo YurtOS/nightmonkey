@@ -112,8 +112,8 @@ class UpstreamHarnessTests(unittest.TestCase):
         )
         result = self.run_wrapper("js", "")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        # What obj-nightmonkey-sm/config/autoconf.mk records for
-        # spidermonkey/mozconfig: TARGET_XPCOM_ABI, OS_TARGET, MOZ_DEBUG.
+        # What the engine release's objdir records (config/autoconf.mk):
+        # TARGET_XPCOM_ABI, OS_TARGET, MOZ_DEBUG.
         self.assertIn("XUL-INFO wasm32-gcc3:WASI:false\n", result.stdout)
 
     def test_the_default_xul_info_is_the_release_bundles(self):
@@ -149,7 +149,7 @@ class JstestsXulInfoTests(unittest.TestCase):
     jstests asset of an engine release ships xul-info.txt at its root (read
     from the objdir that built it), and run-jstests.sh passes that; a Firefox
     checkout (no xul-info.txt) keeps the value run-jstests.sh records for
-    spidermonkey/mozconfig."""
+    the engine release."""
 
     def setUp(self):
         UpstreamHarnessTests.setUp(self)  # the same fixture, not its cases

@@ -51,7 +51,7 @@ jobs:
   interpreter:
     needs: gate
     if: ${{ needs.gate.outputs.run == 'true' }}
-    uses: ./.github/workflows/engine.yml
+    uses: ./.github/workflows/engine-release.yml
     with:
       lane: interpreter
       full_jstests: true
