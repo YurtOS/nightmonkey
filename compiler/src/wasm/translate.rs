@@ -4358,6 +4358,7 @@ mod tests {
     /// ([index i32, kind i32, gen, arg]): the frame offsets of the stores
     /// of `i64.load offset=16 D` (the value) and of the boxed
     /// `i32.load offset=4 D` (the kind), for each descriptor address `D`.
+    #[cfg(feature = "ff159")]
     fn resume_value_stores(body: &waffle::FunctionBody) -> Vec<(u32, u32)> {
         use waffle::ValueDef;
         let def = |v: Value| body.values[body.resolve_alias(v)].clone();
