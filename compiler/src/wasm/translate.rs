@@ -4418,6 +4418,35 @@ mod tests {
         types.map(|(name, ty, gc)| (name, 0xFFFF_FF80 | ty, gc))
     }
 
+    /// The resume sentinel staged as a generator frame's `this` must be a
+    /// magic nothing else can put there: not one `this` legitimately holds
+    /// (`JS_UNINITIALIZED_LEXICAL` in a derived constructor,
+    /// `JS_IS_CONSTRUCTING` for `new`) and not `JS_GENERIC_MAGIC`, which
+    /// the runtime returns as a failure value. 159 has no
+    /// `JS_GENERATOR_CLOSING`; `JS_ION_BAILOUT` is created only by Ion,
+    /// which the wasm32 engine does not have.
+    #[cfg(feature = "ff159")]
+    #[test]
+    fn resume_sentinel_is_a_magic_no_value_carries() {
+        // 159's JSWhyMagic, in order (js/public/Value.h).
+        let why = [
+            "UNINITIALIZED_LEXICAL",
+            "ELEMENTS_HOLE",
+            "NO_ITER_VALUE",
+            "ARG_POISON",
+            "SERIALIZE_NO_NODE",
+            "IS_CONSTRUCTING",
+            "HASH_KEY_EMPTY",
+            "ION_ERROR",
+            "ION_BAILOUT",
+            "OPTIMIZED_OUT",
+            "MISSING_ARGUMENTS",
+            "INTERRUPT_REGEXP",
+            "GENERIC_MAGIC",
+        ];
+        assert_eq!(why[MAGIC_RESUME_THIS as usize], "ION_BAILOUT");
+    }
+
     /// Each tag the compiler emits is the engine's.
     #[test]
     fn value_tags_are_the_engines() {
