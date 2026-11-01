@@ -5041,6 +5041,8 @@ mod tests {
         loads: usize,
         /// Native guards (see below).
         guards: usize,
+        /// Offset-12 loads from an exempt table address (see below).
+        exempt: usize,
     }
 
     /// Every load of an object's elements pointer (`OBJ_ELEMENTS_OFFSET`)
@@ -5049,12 +5051,15 @@ mod tests {
     /// `ProxyDataLayout` has its often-null `expando` there, and the
     /// elements header read below it traps.
     ///
-    /// The object of a load is the boxed value its address unboxes
-    /// (`i32.wrap_i64`). An offset-12 load from a table address (a
-    /// constant, a loaded base plus a hashed index) is not an elements
-    /// load; an address that may still be an object pointer (`or(obj, 0)`,
-    /// a block parameter, ...) cannot be identified and is reported, so a
-    /// rewrite the oracle does not recognize fails loudly.
+    /// Every `i32.load` whose effective offset is `OBJ_ELEMENTS_OFFSET` (its
+    /// immediate, or its immediate plus `K` when the address is
+    /// `add(x, K)` for a constant `K`) is examined. Its address must be
+    /// `i32.wrap_i64` of a boxed value (the object), or one of two exempt
+    /// table forms, else it is reported as unidentified:
+    /// - a constant (a call cell's `CALL_CELL_ADDR_PLACEHOLDER` address);
+    /// - an append-cache row as `append_row` emits it: `add(base, mul(index,
+    ///   stride))`, `base` a constant or a load from a constant, `stride` a
+    ///   constant.
     ///
     /// A native guard is a block ending in `br_if` on a test of the
     /// object: its shape's native bit (`and(flags, SHAPE_IS_NATIVE_BIT)`,
@@ -5067,11 +5072,24 @@ mod tests {
     /// dominates the load's block, so every path to the load took the
     /// success edge.
     ///
+    /// Covered: the elements loads in the lowerings the fixtures below
+    /// exercise (`js.setelem`'s dense overwrite through `dense_slot` and its
+    /// append arm, the push arm). Not covered (no fixture lowers them):
+    /// `pop_arm`, `elem_addr` (LoadElem / StoreElem), `init_elem_inline`,
+    /// the arguments/array length arm (strings.rs), the for-in elements
+    /// check (iteration.rs), `LengthArray` and `StoreElem`'s own read
+    /// (inst_access.rs).
+    ///
     /// Mutation evidence (each turns the setelem and/or push test red):
     /// `check_native` deleted from either arm; computed without a branch;
     /// branched on `eqz` (inverted); moved after the elements load; deleted
-    /// with the load's address rewritten as `or(obj, 0)`; the class test
-    /// against a constant, or against the object's own class.
+    /// with the load's address rewritten as `or(obj, 0)` or `and(obj, -1)`;
+    /// the class test against a constant, or against the object's own
+    /// class; an extra elements read through `and(obj, 0xFFFFFFF8)` before
+    /// the guard; an extra unguarded read through the prototype
+    /// (`load(load(load(obj)))`); the real load moved before the guard
+    /// through `and(obj, -1)` with a dead guarded load left in its place; an
+    /// extra pre-guard `load(add(obj, 12), 0)`.
     fn element_safety(body: &waffle::FunctionBody, class_cells: &[(u32, u32)]) -> ElementSafety {
         use crate::wasm::mir::abi::{
             BASESHAPE_CLASP_OFFSET, OBJ_ELEMENTS_OFFSET, SHAPE_BASESHAPE_OFFSET,
@@ -5088,36 +5106,33 @@ mod tests {
             Some((Operator::I32WrapI64, a)) => Some(body.resolve_alias(a[0])),
             _ => None,
         };
-        // Whether an address may be an object pointer in disguise: an
-        // `i32.wrap_i64` or a block parameter, through the operators that
-        // keep a pointer's identity (`add`, `sub`, `or`, `select`). A
-        // hashed index (`mul`, `xor`, masks, shifts) or a loaded word is a
-        // table address, not the object.
-        fn from_object(body: &waffle::FunctionBody, v: Value, depth: u32) -> bool {
-            match &body.values[body.resolve_alias(v)] {
-                ValueDef::BlockParam(..) => true,
-                ValueDef::Operator(op, args, _) => match op {
-                    Operator::I32WrapI64 => true,
-                    Operator::I32Add
-                    | Operator::I32Sub
-                    | Operator::I32Or
-                    | Operator::TypedSelect { .. }
-                    | Operator::Select => {
-                        depth > 16
-                            || body.arg_pool[*args]
-                                .iter()
-                                .any(|&a| from_object(body, a, depth + 1))
-                    }
-                    _ => false,
-                },
-                _ => true,
-            }
-        }
         let load_at = |v: Value, off: u32| match args_of(v) {
             Some((Operator::I32Load { memory }, a)) if memory.offset == off => Some(a[0]),
             _ => None,
         };
-        let is_const = |v: Value, k: u32| matches!(args_of(v), Some((Operator::I32Const { value }, _)) if value == k);
+        let const_of = |v: Value| match args_of(v) {
+            Some((Operator::I32Const { value }, _)) => Some(value),
+            _ => None,
+        };
+        let is_const = |v: Value, k: u32| const_of(v) == Some(k);
+        // The exempt table addresses (see above).
+        let is_table = |v: Value| {
+            if const_of(v).is_some() {
+                return true;
+            }
+            let Some((Operator::I32Add, x)) = args_of(v) else {
+                return false;
+            };
+            let base_ok = |b: Value| {
+                const_of(b).is_some()
+                    || matches!(args_of(b), Some((Operator::I32Load { .. }, l)) if const_of(l[0]).is_some())
+            };
+            let row_ok = |r: Value| {
+                matches!(args_of(r), Some((Operator::I32Mul, m))
+                    if const_of(m[0]).is_some() || const_of(m[1]).is_some())
+            };
+            (base_ok(x[0]) && row_ok(x[1])) || (base_ok(x[1]) && row_ok(x[0]))
+        };
         let clasp_of = |x: Value| {
             load_at(x, BASESHAPE_CLASP_OFFSET)
                 .and_then(|base| load_at(base, SHAPE_BASESHAPE_OFFSET))
@@ -5193,13 +5208,35 @@ mod tests {
                 let Some((Operator::I32Load { memory }, a)) = args_of(v) else {
                     continue;
                 };
-                if memory.offset != OBJ_ELEMENTS_OFFSET {
-                    continue;
-                }
-                match root(a[0]) {
+                // The address whose word at `OBJ_ELEMENTS_OFFSET` this
+                // reads: the load's own, or `x` of an `add(x, K)` address
+                // that the immediate completes to that offset.
+                let addr = if memory.offset == OBJ_ELEMENTS_OFFSET {
+                    a[0]
+                } else {
+                    match args_of(a[0]) {
+                        Some((Operator::I32Add, x)) if !is_table(a[0]) => {
+                            match (const_of(x[0]), const_of(x[1])) {
+                                (_, Some(k))
+                                    if memory.offset.wrapping_add(k) == OBJ_ELEMENTS_OFFSET =>
+                                {
+                                    x[0]
+                                }
+                                (Some(k), _)
+                                    if memory.offset.wrapping_add(k) == OBJ_ELEMENTS_OFFSET =>
+                                {
+                                    x[1]
+                                }
+                                _ => continue,
+                            }
+                        }
+                        _ => continue,
+                    }
+                };
+                match root(addr) {
                     Some(o) => loads.push((b, v, o)),
-                    None if from_object(body, a[0], 0) => out.unguarded.push((b, v)),
-                    None => {}
+                    None if is_table(addr) => out.exempt += 1,
+                    None => out.unguarded.push((b, v)),
                 }
             }
         }
@@ -5233,7 +5270,9 @@ mod tests {
     /// behind `br_if clasp(obj) == <comparand>`.
     #[test]
     fn element_safety_class_arm() {
-        use crate::wasm::mir::abi::OBJ_ELEMENTS_OFFSET;
+        use crate::wasm::mir::abi::{
+            BASESHAPE_CLASP_OFFSET, OBJ_ELEMENTS_OFFSET, SHAPE_BASESHAPE_OFFSET, SHAPE_OFFSET,
+        };
         use waffle::{BlockTarget, Terminator};
         let (m, h) = module_with_helpers();
         let mem = h.mem;
@@ -5245,15 +5284,17 @@ mod tests {
             };
             b.add_op(blk, Operator::I32Load { memory }, &[addr], &[Type::I32])
         };
-        let body_with = |comparand: &str| {
+        // `comparand` for the class test; `eqz` wraps the condition in that
+        // many `eqz`s.
+        let body_with = |comparand: &str, eqz: usize| {
             let mut b = waffle::FunctionBody::new(&m, h.night_abi_sig2);
             let entry = b.entry;
             let (ok, fail) = (b.add_block(), b.add_block());
             let boxed = b.add_op(entry, Operator::I64Const { value: 0 }, &[], &[Type::I64]);
             let obj = b.add_op(entry, Operator::I32WrapI64, &[boxed], &[Type::I32]);
-            let shape = ld(&mut b, entry, obj, 0);
-            let base = ld(&mut b, entry, shape, 0);
-            let clasp = ld(&mut b, entry, base, 0);
+            let shape = ld(&mut b, entry, obj, SHAPE_OFFSET);
+            let base = ld(&mut b, entry, shape, SHAPE_BASESHAPE_OFFSET);
+            let clasp = ld(&mut b, entry, base, BASESHAPE_CLASP_OFFSET);
             let other = match comparand {
                 "cell" => {
                     let c = b.add_op(
@@ -5274,7 +5315,10 @@ mod tests {
                 ),
                 _ => clasp,
             };
-            let eq = b.add_op(entry, Operator::I32Eq, &[clasp, other], &[Type::I32]);
+            let mut eq = b.add_op(entry, Operator::I32Eq, &[clasp, other], &[Type::I32]);
+            for _ in 0..eqz {
+                eq = b.add_op(entry, Operator::I32Eqz, &[eq], &[Type::I32]);
+            }
             b.set_terminator(
                 entry,
                 Terminator::CondBr {
@@ -5294,12 +5338,19 @@ mod tests {
             b.set_terminator(fail, Terminator::Unreachable);
             b
         };
-        let r = element_safety(&body_with("cell"), &class_cells(&h));
-        assert_eq!((r.unguarded.len(), r.loads, r.guards), (0, 1, 1));
+        let found = |r: ElementSafety| (r.unguarded.len(), r.loads, r.guards);
+        let r = element_safety(&body_with("cell", 0), &class_cells(&h));
+        assert_eq!(found(r), (0, 1, 1));
         for wrong in ["const", "self"] {
-            let r = element_safety(&body_with(wrong), &class_cells(&h));
-            assert_eq!((r.unguarded.len(), r.loads, r.guards), (1, 1, 0), "{wrong}");
+            let r = element_safety(&body_with(wrong, 0), &class_cells(&h));
+            assert_eq!(found(r), (1, 1, 0), "{wrong}");
         }
+        // `eqz(eqz(t))` is `t`: still a guard on the true edge. One `eqz`
+        // flips it: the true edge (to the load) is then the failure edge.
+        let r = element_safety(&body_with("cell", 2), &class_cells(&h));
+        assert_eq!(found(r), (0, 1, 1));
+        let r = element_safety(&body_with("cell", 1), &class_cells(&h));
+        assert_eq!(found(r), (1, 1, 1));
     }
 
     /// `o[i] = v` (generic `js.setelem`): the dense overwrite and the
@@ -5326,6 +5377,8 @@ b9:
         // The dense overwrite (dense_slot) and the append arm, each behind
         // its own native-bit guard: fewer means the oracle lost track.
         assert!(r.loads >= 2 && r.guards >= 2, "{r:?}");
+        // The append arm's cache row.
+        assert_eq!(r.exempt, 1, "{r:?}");
     }
 
     /// `o.push(v)` (a `call` in a function naming `push`): the push arm
@@ -5352,6 +5405,8 @@ b9:
         assert_eq!(r.unguarded, vec![]);
         // The push arm's load behind its native-bit guard.
         assert!(r.loads >= 1 && r.guards >= 1, "{r:?}");
+        // The call cell and the append cache row.
+        assert_eq!(r.exempt, 2, "{r:?}");
     }
 
     /// The MIR fixtures that use only lowered ops lower to a valid module:
