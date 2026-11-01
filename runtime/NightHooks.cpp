@@ -142,7 +142,7 @@ static bool IsForeignGenerator(JSContext* cx, AbstractGeneratorObject* gen) {
   return IsNightResumable(gen);
 }
 
-static JS::ExternalEnterStatus ResumeGenerator(
+static JS::ExternalEnterStatus NightResumeGeneratorHook(
     JSContext* cx, JS::Handle<AbstractGeneratorObject*> gen,
     JS::HandleValue arg, JS::HandleValue resumeKind,
     JS::MutableHandleValue rval) {
@@ -179,7 +179,7 @@ JS::ExternalCompilerHooks js::night::gNightHooks = {
     /* enterScript */ EnterScript,
     /* enterCall */ EnterCall,
     /* isForeignGenerator */ IsForeignGenerator,
-    /* resumeGenerator */ ResumeGenerator,
+    /* resumeGenerator */ NightResumeGeneratorHook,
     /* traceRoots */ TraceRoots,
     /* sourceAssigned */ SourceAssigned,
     /* minConstructorThisSlots */ 0,

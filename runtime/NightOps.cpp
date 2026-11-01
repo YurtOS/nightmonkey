@@ -19,7 +19,12 @@
 #include "mozilla/Maybe.h"
 
 #include "jsapi.h"
-#include "jsnum.h"
+#include "runtime/NightEngineVersion.h"  // JSOP_SEMANTICS_VERSION
+#if JSOP_SEMANTICS_VERSION >= 2
+#  include "builtin/Number.h"
+#else
+#  include "jsnum.h"
+#endif
 
 #include "builtin/Eval.h"
 #include "builtin/ModuleObject.h"
@@ -621,7 +626,13 @@ static JSObject* AllocNSlots(JSContext* cx, HandleFunction callee, uint32_t n,
   if (!p) {
     p = &cx->global()->getObjectPrototype();
   }
+#if JSOP_SEMANTICS_VERSION >= 2
+  NewObjectOptions options;
+  options.allocKind = kind;
+  return NewPlainObjectWithProto(cx, p, options);
+#else
   return NewPlainObjectWithProtoAndAllocKind(cx, p, kind);
+#endif
 }
 
 // `night_runtime_construct`'s engine half: the compiled `new C()`.

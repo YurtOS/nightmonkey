@@ -87,8 +87,14 @@ using NightStringFlags = JSString;
 #endif
 
 static_assert(offsetof(JS::shadow::Object, shape) == 0, "SHAPE_OFFSET");
+// 159's ContextOptions is a byte shorter, which moves the state word.
+#if JSOP_SEMANTICS_VERSION >= 2
+static_assert(JSContext::offsetOfExternalCompilerState() == 140,
+              "CX_EXT_STATE_OFFSET");
+#else
 static_assert(JSContext::offsetOfExternalCompilerState() == 144,
               "CX_EXT_STATE_OFFSET");
+#endif
 static_assert(offsetof(js::nightrt::NightContextState, propIcBase) == 0,
               "CTX_PROPIC_BASE_OFFSET");
 static_assert(offsetof(NightShadowNativeObject, externalWord_) == 4,

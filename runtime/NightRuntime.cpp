@@ -12,14 +12,21 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>  // malloc/free (regex matcher table)
+#include <bit>       // std::countl_zero
 #include <string>    // std::string, std::u16string
 #include <string.h>  // memcpy
 #include <unordered_map>  // the add-placement memo
 #include <vector>    // std::vector
 
 #include "jsapi.h"   // JS_NewPlainObject, JS_DefineFunction
-#include "jsmath.h"  // js::math_sin_fdlibm_impl, js::ecmaPow (leaf Math arms)
-#include "jsnum.h"   // js::ToNumeric
+#include "runtime/NightEngineVersion.h"  // JSOP_SEMANTICS_VERSION
+#if JSOP_SEMANTICS_VERSION >= 2
+#  include "builtin/Math.h"    // js::math_sin_fdlibm_impl, js::ecmaPow
+#  include "builtin/Number.h"  // js::ToNumeric
+#else
+#  include "jsmath.h"  // js::math_sin_fdlibm_impl, js::ecmaPow (leaf Math arms)
+#  include "jsnum.h"   // js::ToNumeric
+#endif
 
 #include "builtin/Array.h"  // js::NewDenseCopiedArray (JSOp::Rest)
 #include "builtin/RegExp.h"  // js::RegExpBuiltinExec*FromJit, IsOptimizableRegExpObject
@@ -63,7 +70,6 @@
 #include "runtime/NightOpsInterp.h"  // js::night::NightDirectEval (baseline)
 #include "builtin/MapObject.h"         // MapObject::class_ (the inline map get)
 #include "runtime/NightRegionShape.h"   // Night_* region shape constants
-#include "runtime/NightEngineVersion.h"  // JSOP_SEMANTICS_VERSION
 #include "runtime/NightRegistration.h"  // js::night::gNightActivated
 #include "runtime/NightRuntimeData.h"  // js::night::NightRuntimeData (regex table)
 #include "runtime/NightRuntimeSlots.h"  // js::night::NightGet/SetHomeObject (isolated -inl TU)
@@ -1485,7 +1491,11 @@ static void BuildAtoms(uint32_t atom_ptr, uint32_t atom_len) {
 int32_t night_runtime_regex_ci_compare(uint32_t a_ptr, uint32_t b_ptr,
                                        uint32_t byte_len, uint32_t unicode) {
   JSContext* cx = CurrentNightContext();
+#if JSOP_SEMANTICS_VERSION >= 2
+  using MA = v8::internal::regexp::RegExpMacroAssembler;
+#else
   using MA = v8::internal::RegExpMacroAssembler;
+#endif
   js::irregexp::Isolate* iso = RtState(cx).cx->isolate;
   auto a = static_cast<v8::Address>(a_ptr);
   auto b = static_cast<v8::Address>(b_ptr);
@@ -3451,7 +3461,7 @@ uint32_t night_runtime_elem_grow(JSContext* cx, uint32_t top, uint64_t recv,
 // `guard.ctor`.
 static bool NightHasExactlyFields(js::NativeObject* obj, uint32_t w,
                                   uint32_t set) {
-  uint32_t span = set ? 32 - mozilla::CountLeadingZeroes32(set) : 0;
+  uint32_t span = set ? 32 - uint32_t(std::countl_zero(set)) : 0;
   return (w & ((1u << js::night::kCtorSetBits) - 1)) ==
              (set & ((1u << js::night::kCtorSetBits) - 1)) &&
          obj->slotSpan() == span;
@@ -3655,7 +3665,11 @@ int32_t night_runtime_method_arm(uint64_t recvBits, uint32_t cellAddr,
     }
     // The flag reshaped the holder; its properties are the same.
     prop = h->lookupPure(id);
+#if JSOP_SEMANTICS_VERSION >= 2
+    if (!prop || !fuse->tryOptimizeConstantProperty(id, *prop)) {
+#else
     if (!prop || !fuse->tryOptimizeConstantProperty(*prop)) {
+#endif
       return 0;
     }
   }
@@ -4443,7 +4457,13 @@ bool night_runtime_new_object(JSContext* cx, uint32_t top, uint32_t cell,
   if (nslots > js::gc::GetGCKindSlots(kind)) {
     kind = js::gc::GetGCObjectKind(std::min<size_t>(nslots, js::NativeObject::MAX_FIXED_SLOTS));
   }
+#if JSOP_SEMANTICS_VERSION >= 2
+  js::NewObjectOptions options;
+  options.allocKind = kind;
+  JSObject* obj = js::NewPlainObject(cx, options);
+#else
   JSObject* obj = js::NewPlainObjectWithAllocKind(cx, kind);
+#endif
   if (!obj) {
     return false;
   }
@@ -7895,15 +7915,39 @@ bool night_runtime_create_suppressed_error(JSContext* cx, uint32_t top,
 #endif
 }
 
-// `Resume`: `[gen, val, kind] -> [result]`, the way the JITs do it
-// (jit::InterpretResume): through the self-hosted InterpretGeneratorResume,
-// which runs in the interpreter (it is ForceInterpreter) and whose own
-// `Resume` re-enters a NightMonkey generator through the resume hook.
+// `Resume`: `[gen, val, kind] -> [result]`. The suspended generator `gen`
+// (the self-hosted callers check that) runs to its next suspend point or
+// completion.
+//
+// 147: the way its JITs do it (jit::InterpretResume), through the
+// self-hosted InterpretGeneratorResume, which runs in the interpreter (it
+// is ForceInterpreter) and whose own `Resume` re-enters a NightMonkey
+// generator through the resume hook.
+//
+// 159 has neither: js::ResumeGenerator runs it, in the generator's realm
+// (as the interpreter's `Resume` enters it), and itself hands a generator
+// compiled here to the resume hook.
 bool night_runtime_resume(JSContext* cx, uint32_t top, uint64_t gen,
                           uint64_t val, uint64_t kind) {
   SetNightTop(cx, top);
   js::GeneratorResumeKind rk =
       js::IntToResumeKind(JS::Value::fromRawBits(kind).toInt32());
+#if JSOP_SEMANTICS_VERSION >= 2
+  JS::Rooted<js::AbstractGeneratorObject*> genObj(
+      cx, &JS::Value::fromRawBits(gen)
+               .toObject()
+               .as<js::AbstractGeneratorObject>());
+  JS::RootedValue v(cx, JS::Value::fromRawBits(val));
+  JS::RootedValue res(cx);
+  {
+    js::AutoRealm ar(cx, genObj);
+    if (!js::ResumeGenerator(cx, genObj, v, rk, &res)) {
+      return false;
+    }
+  }
+  WriteNightOut(top, res.get().asRawBits());
+  return true;
+#else
   JSAtom* kindAtom = js::ResumeKindToAtom(cx, rk);
   js::FixedInvokeArgs<3> args(cx);
   args[0].set(JS::Value::fromRawBits(gen));
@@ -7916,6 +7960,7 @@ bool night_runtime_resume(JSContext* cx, uint32_t top, uint64_t gen,
   }
   WriteNightOut(top, res.get().asRawBits());
   return true;
+#endif
 }
 
 // ===========================================================================
