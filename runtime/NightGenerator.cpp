@@ -243,6 +243,16 @@ bool NightAsyncReject(JSContext* cx, uint64_t genBits, uint64_t reasonBits,
 
 // `JSOp::CanSkipAwait`: whether awaiting `value` can skip the suspension.
 bool NightCanSkipAwait(JSContext* cx, uint64_t valBits, uint64_t* out) {
+#if JSOP_SEMANTICS_VERSION >= 2
+  // 159's js::CanSkipAwait requires its caller to have established that the
+  // awaiting frame is the first frame of its activation (the interpreter's
+  // and the JITs' CanSkipAwait op do) and then inspects cx->activation(). A
+  // compiled frame is on no activation at all: the precondition never holds,
+  // and cx->activation() can be null here (a body resumed from a promise
+  // job). Never skip: the await takes the standard enqueue path.
+  *out = JS::BooleanValue(false).asRawBits();
+  return true;
+#endif
   RootedValue val(cx, JS::Value::fromRawBits(valBits));
   bool canSkip = false;
   if (!CanSkipAwait(cx, val, &canSkip)) {
