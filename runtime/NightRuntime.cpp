@@ -3624,6 +3624,13 @@ int32_t night_runtime_method_arm(uint64_t recvBits, uint32_t cellAddr,
     return 0;
   }
   JS::PropertyKey id = (*RtNames(cx).ids)[atomId].get();
+#if JSOP_SEMANTICS_VERSION >= 2
+  // 159's object fuses do not track indexed properties (an index-like atom
+  // is an int key), and tryOptimizeConstantProperty release-asserts it.
+  if (!js::ObjectFuse::tracksPropertyKey(id)) {
+    return 0;
+  }
+#endif
   JSObject* proto = rv.toObject().staticPrototype();
   js::NativeObject* holder = nullptr;
   mozilla::Maybe<js::PropertyInfo> prop;
