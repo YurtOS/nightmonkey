@@ -30,7 +30,8 @@ SOURCE = Path(__file__).resolve().parents[2]
 # A fixture engine table. The opcode check test generates a matching ff147
 # table for it in a copy of the source tree (the real Opcodes.h is not
 # available here).
-OPCODES_H = """#define FOR_EACH_OPCODE(MACRO) \\
+OPCODES_H = """#define JSOP_SEMANTICS_VERSION 1
+#define FOR_EACH_OPCODE(MACRO) \\
   MACRO(Undefined, undefined, NULL, 1, 0, 1, JOF_BYTE) \\
   MACRO(Pop, pop, NULL, 1, 1, 0, JOF_BYTE)
 #define FOR_EACH_TRAILING_UNUSED_OPCODE(MACRO)
