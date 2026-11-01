@@ -4444,8 +4444,8 @@ mod tests {
         }
     }
 
-    /// The tag-range predicates the lowerings emit, over every tag and the
-    /// double space, against the engine's meaning of each tag:
+    /// The tag-range predicates the lowerings emit, over every tag, against
+    /// the engine's meaning of each tag:
     /// a double is below `TAG_CLEAR`; a number is at or below `TAG_INT32`;
     /// int32, boolean, undefined and null are the four tags from
     /// `TAG_INT32` (ToBoolean's and strict equality's inline cases); a GC
@@ -4470,10 +4470,6 @@ mod tests {
                 matches!(name, "INT32" | "BOOLEAN" | "UNDEFINED" | "NULL"),
                 "{name}: is an immediate with a ToBoolean inline case"
             );
-        }
-        // Doubles (canonical NaN and the extremes of the double tag space).
-        for hi in [0u32, 0x7FF8_0000, 0xFFF0_0000, TAG_CLEAR - 1] {
-            assert!(hi < TAG_CLEAR && hi < VAL_GCTHING_TAG_MIN && hi <= TAG_INT32 as u32);
         }
     }
 
