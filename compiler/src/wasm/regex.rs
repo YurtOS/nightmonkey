@@ -1635,3 +1635,52 @@ fn emit_backref(cx: &mut Ctx, op: u8, w0: u32, target_off: u32) -> Result<(), St
     cx.set_pos(jp_pos);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use waffle::{MemoryData, SignatureData};
+
+    fn translate_program(bytecode: &[u8]) -> Result<FunctionBody, String> {
+        let mut m = Module::empty();
+        let mem = m.memories.push(MemoryData {
+            initial_pages: 1,
+            maximum_pages: None,
+            segments: Vec::new(),
+        });
+        let sig = m.signatures.push(SignatureData {
+            params: vec![Type::I32; 6],
+            returns: vec![Type::I32],
+        });
+        let inp = RegexTranslateInput {
+            bytecode,
+            wide: false,
+            total_regs: 2,
+            output_regs: 2,
+        };
+        translate(&m, sig, mem, None, &inp)
+    }
+
+    /// A one-instruction program in this decoder's ISA (147's
+    /// regexp-bytecodes.h: FAIL 12, SUCCEED 13) translates.
+    #[cfg(feature = "ff147")]
+    #[test]
+    fn one_instruction_programs_translate() {
+        for op in [BC_FAIL, BC_SUCCEED] {
+            assert!(translate_program(&[op, 0, 0, 0]).is_ok(), "op {op}");
+        }
+    }
+
+    /// 159 replaced the irregexp bytecode format (operand types and
+    /// layouts, renumbered ops: byte 13 is FAIL there, SUCCEED here), which
+    /// this decoder does not read: every program is declined (the regex
+    /// runs in the engine's interpreter), never decoded with the 147 ISA.
+    #[cfg(feature = "ff159")]
+    #[test]
+    fn programs_are_declined() {
+        for op in [12u8, 13] {
+            let r = translate_program(&[op, 0, 0, 0]);
+            assert!(r.is_err(), "op {op} translated");
+        }
+    }
+}
