@@ -5032,17 +5032,31 @@ mod tests {
     }
 
     /// Every load of an object's elements pointer (`OBJ_ELEMENTS_OFFSET`)
-    /// in `body` that is not dominated by a test of that object's shape's
-    /// native bit (`SHAPE_IS_NATIVE_BIT` of the immutable flags) or of its
-    /// class, as (block, load). A non-native object (a proxy) keeps other data at
+    /// in `body` that is not behind a native guard on that object, as
+    /// (block, load). A non-native object (a proxy) keeps other data at
     /// that offset: 159's `ProxyDataLayout` has its often-null `expando`
     /// there, and the elements header read below it traps.
+    ///
+    /// A native guard is a block ending in `br_if` on a test of the
+    /// object's shape's native bit (`and(flags, SHAPE_IS_NATIVE_BIT)`,
+    /// native when nonzero) or of its class (`clasp == k`, a native class:
+    /// native when true), or on `eqz` of either (polarity flipped). Its
+    /// success edge is the successor taken when the object is native; the
+    /// load is guarded when that successor has the guard block as its only
+    /// predecessor and dominates the load's block, so every path to the
+    /// load took the success edge and the failure edge cannot reach it.
+    ///
+    /// Mutation evidence (each turns the two tests below red): deleting
+    /// `check_native` from either arm; computing the test without branching
+    /// on it; branching on its negation (`eqz`, inverted polarity); moving
+    /// the check after the elements load. The previous oracle (any such
+    /// test in a dominating block) passed the second and third.
     fn unguarded_elements_loads(body: &waffle::FunctionBody) -> Vec<(waffle::Block, Value)> {
         use crate::wasm::mir::abi::{
             BASESHAPE_CLASP_OFFSET, OBJ_ELEMENTS_OFFSET, SHAPE_BASESHAPE_OFFSET,
             SHAPE_IMMUTABLE_FLAGS_OFFSET, SHAPE_IS_NATIVE_BIT, SHAPE_OFFSET,
         };
-        use waffle::ValueDef;
+        use waffle::{Terminator, ValueDef};
         let def = |v: Value| body.values[body.resolve_alias(v)].clone();
         // The boxed value an object pointer was unboxed from
         // (`i32.wrap_i64`); None for other pointers (cache rows, cells).
@@ -5059,58 +5073,84 @@ mod tests {
             _ => None,
         };
         let is_const = |v: Value, k: u32| matches!(def(v), ValueDef::Operator(Operator::I32Const { value }, _, _) if value == k);
-        // (block, position, object) of each native-bit test.
-        let mut checks = vec![];
+        // The object `v` is true exactly when native for, if it is a
+        // native-bit or class test.
+        let native_test = |v: Value| -> Option<Value> {
+            let ValueDef::Operator(op, args, _) = def(v) else {
+                return None;
+            };
+            let args = &body.arg_pool[args];
+            match op {
+                Operator::I32And if args.len() == 2 => [(args[0], args[1]), (args[1], args[0])]
+                    .into_iter()
+                    .find_map(|(x, k)| {
+                        if !is_const(k, SHAPE_IS_NATIVE_BIT) {
+                            return None;
+                        }
+                        load_at(x, SHAPE_IMMUTABLE_FLAGS_OFFSET)
+                            .and_then(|shape| load_at(shape, SHAPE_OFFSET))
+                            .and_then(root)
+                    }),
+                Operator::I32Eq if args.len() == 2 => {
+                    [args[0], args[1]].into_iter().find_map(|x| {
+                        load_at(x, BASESHAPE_CLASP_OFFSET)
+                            .and_then(|base| load_at(base, SHAPE_BASESHAPE_OFFSET))
+                            .and_then(|shape| load_at(shape, SHAPE_OFFSET))
+                            .and_then(root)
+                    })
+                }
+                _ => None,
+            }
+        };
+        // (object, success successor) of each native guard.
+        let mut guards = vec![];
         let mut loads = vec![];
         for (b, bd) in body.blocks.entries() {
-            for (i, &v) in bd.insts.iter().enumerate() {
-                let ValueDef::Operator(op, args, _) = def(v) else {
-                    continue;
+            if let Terminator::CondBr {
+                cond,
+                if_true,
+                if_false,
+            } = &bd.terminator
+            {
+                let (obj, native_if_true) = match native_test(*cond) {
+                    Some(o) => (Some(o), true),
+                    None => match def(*cond) {
+                        ValueDef::Operator(Operator::I32Eqz, args, _) => {
+                            (native_test(body.arg_pool[args][0]), false)
+                        }
+                        _ => (None, true),
+                    },
                 };
-                let args = &body.arg_pool[args];
-                match op {
-                    Operator::I32And if args.len() == 2 => {
-                        for (x, k) in [(args[0], args[1]), (args[1], args[0])] {
-                            if !is_const(k, SHAPE_IS_NATIVE_BIT) {
-                                continue;
-                            }
-                            let obj = load_at(x, SHAPE_IMMUTABLE_FLAGS_OFFSET)
-                                .and_then(|shape| load_at(shape, SHAPE_OFFSET));
-                            if let Some(o) = obj.and_then(root) {
-                                checks.push((b, i, o));
-                            }
+                let success = if native_if_true {
+                    if_true.block
+                } else {
+                    if_false.block
+                };
+                if let Some(o) = obj {
+                    if if_true.block != if_false.block && body.blocks[success].preds == [b] {
+                        guards.push((o, success));
+                    }
+                }
+            }
+            for &v in &bd.insts {
+                if let ValueDef::Operator(Operator::I32Load { memory }, args, _) = def(v) {
+                    if memory.offset == OBJ_ELEMENTS_OFFSET {
+                        if let Some(o) = root(body.arg_pool[args][0]) {
+                            loads.push((b, v, o));
                         }
                     }
-                    // A class test (`clasp == <a native class>`, as the
-                    // array and arguments arms do) proves native too.
-                    Operator::I32Eq if args.len() == 2 => {
-                        for x in [args[0], args[1]] {
-                            let obj = load_at(x, BASESHAPE_CLASP_OFFSET)
-                                .and_then(|base| load_at(base, SHAPE_BASESHAPE_OFFSET))
-                                .and_then(|shape| load_at(shape, SHAPE_OFFSET));
-                            if let Some(o) = obj.and_then(root) {
-                                checks.push((b, i, o));
-                            }
-                        }
-                    }
-                    Operator::I32Load { memory } if memory.offset == OBJ_ELEMENTS_OFFSET => {
-                        if let Some(o) = root(args[0]) {
-                            loads.push((b, i, v, o));
-                        }
-                    }
-                    _ => {}
                 }
             }
         }
         let cfg = waffle::cfg::CFGInfo::new(body);
         loads
             .into_iter()
-            .filter(|&(b, i, _, o)| {
-                !checks.iter().any(|&(cb, ci, co)| {
-                    co == o && ((cb == b && ci < i) || (cb != b && cfg.dominates(cb, b)))
-                })
+            .filter(|&(b, _, o)| {
+                !guards
+                    .iter()
+                    .any(|&(go, s)| go == o && (s == b || cfg.dominates(s, b)))
             })
-            .map(|(b, _, v, _)| (b, v))
+            .map(|(b, v, _)| (b, v))
             .collect()
     }
 
