@@ -200,6 +200,26 @@ class CMakeDistTests(unittest.TestCase):
                     self.assertIn("--target=wasm32-wasi", line)
                     self.assertNotIn(str(self.producer), " ".join(line))
 
+    def test_engine_version_selects_the_runtime_semantics_version(self):
+        # The C++ runtime is compiled for the bytecode semantics of the
+        # table NIGHT_ENGINE_VERSION selects (runtime/NightEngineVersion.h
+        # static_asserts it against the engine's own Opcodes.h).
+        self.package_config()
+        for version, semantics in (("ff147", 1), ("ff159", 2)):
+            with self.subTest(version=version):
+                build = self.configured(NIGHT_ENGINE_VERSION=version, **self.provisioned())
+                compiles = json.loads((build / "compile_commands.json").read_text())
+                runtime = [shlex.split(e["command"]) for e in compiles if "/runtime/" in e["file"]]
+                self.assertTrue(runtime, "no runtime compile lines")
+                for line in runtime:
+                    self.assertIn(f"-DNIGHT_JSOP_SEMANTICS_VERSION={semantics}", line)
+
+    def test_unknown_engine_version_fails_at_configure(self):
+        self.package_config()
+        _, result = self.configure(NIGHT_ENGINE_VERSION="ff999", **self.provisioned())
+        self.assertNotEqual(result.returncode, 0, "configured for an engine without a table")
+        self.assertIn("ff999", result.stderr)
+
     def test_package_config_without_toolchain_root_fails(self):
         for kind, write in (("package", self.package_config),
                             ("bare cc only", lambda: self.write_config([], bare_cc=True))):
