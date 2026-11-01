@@ -4178,8 +4178,174 @@ mod tests {
         waffle::wasmparser::validate(&bytes).expect("emitted module validates");
     }
 
+    /// Translate `s` with an empty analysis.
+    fn translate_plain(s: &Script) -> Outcome {
+        let (mut m, helpers) = module_with_helpers();
+        let source = Source {
+            objects: vec![],
+            global_object: None,
+            selfhosted: Vec::new(),
+            regex_programs: Vec::new(),
+        };
+        let mut atoms = AtomTable::new(Names::default());
+        let outcome = translate_script(
+            &mut m,
+            helpers,
+            &source,
+            &mut atoms,
+            0,
+            s,
+            &Options::default(),
+        )
+        .expect("translate");
+        if let Outcome::Compiled { sig, body, .. } = &outcome {
+            m.funcs
+                .push(waffle::FuncDecl::Body(*sig, "f".to_string(), body.clone()));
+            let bytes = m.to_wasm_bytes().expect("serialize");
+            waffle::wasmparser::validate(&bytes).expect("emitted module validates");
+        }
+        outcome
+    }
+
+    /// A resumed generator finds exactly the values its suspending op
+    /// defines pushed at the landing (147: value, generator, resume kind;
+    /// 159: value, resume kind): the resume protocol the lowerings stage
+    /// and the engine's table agree.
+    #[test]
+    fn resume_pushes_what_the_suspend_ops_define() {
+        for op in [JSOp::InitialYield, JSOp::Yield, JSOp::Await] {
+            assert_eq!(op.ndefs(), RESUME_VALUES, "{op:?}");
+        }
+    }
+
+    /// `function* g() {}`: the generator prologue, its initial yield and
+    /// what follows a resume compile and validate.
+    #[test]
+    fn generator_initial_yield_compiles_and_validates() {
+        // Generator; Dup; InitialYield 0; AfterYield 0
+        let mut code = vec![
+            op_byte(JSOp::Generator),
+            op_byte(JSOp::Dup),
+            op_byte(JSOp::InitialYield),
+            0,
+            0,
+            0,
+            op_byte(JSOp::AfterYield),
+            0,
+            0,
+            0,
+            0,
+        ];
+        // 147: [gen, rval, gen, kind] -> CheckResumeKind -> [gen, rval].
+        #[cfg(feature = "ff147")]
+        code.push(op_byte(JSOp::CheckResumeKind));
+        // 159: [gen, rval, kind]; the bytecode itself tests the kind.
+        #[cfg(feature = "ff159")]
+        code.push(op_byte(JSOp::Pop));
+        // Pop; FinalYieldRval
+        code.extend([op_byte(JSOp::Pop), op_byte(JSOp::FinalYieldRval)]);
+        let mut s = script(code, 0);
+        s.is_generator_or_async = true;
+        s.resume_offsets = vec![Pc::new(6)];
+        match translate_plain(&s) {
+            Outcome::Compiled { .. } => {}
+            Outcome::Skipped(reason) => panic!("unexpectedly skipped: {reason}"),
+        }
+    }
+
+    /// `import(x)`: 159's DynamicImport carries an import phase operand
+    /// (`ImportPhase::Evaluation` is 1); an evaluation-phase import
+    /// compiles, consuming the operand.
+    #[test]
+    fn dynamic_import_compiles_and_validates() {
+        // GetArg 0; Undefined; DynamicImport [phase]; Return
+        let mut code = vec![
+            op_byte(JSOp::GetArg),
+            0,
+            0,
+            op_byte(JSOp::Undefined),
+            op_byte(JSOp::DynamicImport),
+        ];
+        #[cfg(feature = "ff159")]
+        code.push(1);
+        code.push(op_byte(JSOp::Return));
+        match translate_plain(&script(code, 1)) {
+            Outcome::Compiled { .. } => {}
+            Outcome::Skipped(reason) => panic!("unexpectedly skipped: {reason}"),
+        }
+    }
+
+    /// `import.source(x)` / `import.defer(x)` (phases 0 and 2): the
+    /// runtime implements only the evaluation phase, so the script is
+    /// interpreted.
+    #[cfg(feature = "ff159")]
+    #[test]
+    fn dynamic_import_of_another_phase_is_skipped() {
+        for phase in [0, 2] {
+            let code = vec![
+                op_byte(JSOp::GetArg),
+                0,
+                0,
+                op_byte(JSOp::Undefined),
+                op_byte(JSOp::DynamicImport),
+                phase,
+                op_byte(JSOp::Return),
+            ];
+            match translate_plain(&script(code, 1)) {
+                Outcome::Skipped(reason) => {
+                    assert!(reason.contains(super::baseline::UNSUPPORTED_OP), "{reason}")
+                }
+                Outcome::Compiled { .. } => panic!("phase {phase} should not compile"),
+            }
+        }
+    }
+
+    /// The table this build targets is the one generated from the engine
+    /// it names, with that engine's semantics version.
+    #[test]
+    fn opcode_table_is_the_selected_engine_version() {
+        #[cfg(feature = "ff147")]
+        let expected = ("ff147", 1);
+        #[cfg(feature = "ff159")]
+        let expected = ("ff159", 2);
+        assert_eq!(
+            (
+                crate::opcodes::ENGINE_VERSION,
+                crate::opcodes::JSOP_SEMANTICS_VERSION
+            ),
+            expected
+        );
+    }
+
+    /// 159's renumbering: the three removed ops (CheckResumeKind,
+    /// IsGenClosing, ForceInterpreter) shift every op after them.
+    #[cfg(feature = "ff159")]
+    #[test]
+    fn ff159_numbering() {
+        assert_eq!(
+            crate::opcodes::OPCODES_H_SHA256,
+            "ace0a53d231375492c36142be7c64043de38a17b1752ad2dc32644715ea84c0b"
+        );
+        let ops: Vec<JSOp> = (0..=255u8).filter_map(JSOp::from_byte).collect();
+        assert_eq!(ops.len(), 239);
+        for removed in ["CheckResumeKind", "IsGenClosing", "ForceInterpreter"] {
+            assert!(ops.iter().all(|op| format!("{op:?}") != removed), "{removed}");
+        }
+        // Before the first removal: unchanged from 147.
+        assert_eq!(JSOp::from_byte(56), Some(JSOp::DynamicImport));
+        assert_eq!(JSOp::from_byte(142), Some(JSOp::Yield));
+        // Past IsGenClosing (147: 143) and CheckResumeKind (147: 151).
+        assert_eq!(JSOp::from_byte(146), Some(JSOp::Await));
+        assert_eq!(JSOp::from_byte(149), Some(JSOp::ResumeKind));
+        assert_eq!(JSOp::from_byte(150), Some(JSOp::Resume));
+        // Past ForceInterpreter (147: 239), the last op.
+        assert_eq!(JSOp::from_byte(238), Some(JSOp::Debugger));
+        assert_eq!(JSOp::from_byte(239), None);
+    }
+
     /// A script containing an op in the bail set is skipped (left interpreted),
     /// never partially compiled. `Pow` has no compiled form yet.
+    #[cfg(feature = "ff147")]
     #[test]
     fn unsupported_op_is_skipped() {
         // GetArg 0; ForceInterpreter; Return -- ForceInterpreter is a permanent

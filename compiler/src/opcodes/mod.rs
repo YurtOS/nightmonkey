@@ -17,8 +17,18 @@ mod ff147;
 #[cfg(feature = "ff147")]
 pub use ff147::*;
 
-#[cfg(not(any(feature = "ff147")))]
+#[cfg(feature = "ff159")]
+mod ff159;
+#[cfg(feature = "ff159")]
+pub use ff159::*;
+
+#[cfg(not(any(feature = "ff147", feature = "ff159")))]
 compile_error!(
     "night-compiler: select an engine version by enabling exactly one of the \
-     `ff147` features (compiler/src/opcodes/)"
+     `ff147`, `ff159` features (compiler/src/opcodes/)"
+);
+#[cfg(all(feature = "ff147", feature = "ff159"))]
+compile_error!(
+    "night-compiler: the `ff147` and `ff159` engine versions are exclusive; \
+     build a non-default version with `--no-default-features --features <version>`"
 );
