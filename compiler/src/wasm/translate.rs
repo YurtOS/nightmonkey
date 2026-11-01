@@ -1038,8 +1038,19 @@ pub(super) const TAG_BOOLEAN: u64 = 0xFFFF_FF82;
 pub(super) const TAG_UNDEFINED: u64 = 0xFFFF_FF83;
 pub(super) const TAG_NULL: u64 = 0xFFFF_FF84;
 pub(super) const TAG_MAGIC: u64 = 0xFFFF_FF85;
+// 159 renumbered the GC-thing types (JSVAL_TYPE_PRIVATE_GCTHING 0x07,
+// SYMBOL 0x08, STRING 0x0e; 147: STRING 0x06, SYMBOL 0x07, PRIVATE_GCTHING
+// 0x08), so a string's tag is no longer the lowest GC-thing tag:
+// `VAL_GCTHING_TAG_MIN` (mir/abi.rs) is the boundary, never `TAG_STRING`.
+// runtime/NightEngineVersion.h static_asserts each against the engine.
+#[cfg(feature = "ff147")]
 pub(super) const TAG_STRING: u64 = 0xFFFF_FF86;
+#[cfg(feature = "ff147")]
 pub(super) const TAG_SYMBOL: u64 = 0xFFFF_FF87;
+#[cfg(feature = "ff159")]
+pub(super) const TAG_STRING: u64 = 0xFFFF_FF8E;
+#[cfg(feature = "ff159")]
+pub(super) const TAG_SYMBOL: u64 = 0xFFFF_FF88;
 pub(super) const TAG_BIGINT_HI: u32 = 0xFFFF_FF89;
 // `JSVAL_TAG_OBJECT` (= `JSVAL_TAG_CLEAR | JSVAL_TYPE_OBJECT` = 0xFFFFFF80|0x0c),
 // Value.h:200-212. On NUNBOX32 the low 32 bits of a boxed object Value are the
@@ -4443,6 +4454,9 @@ mod tests {
     fn value_tag_predicates_match_the_engine() {
         use crate::wasm::mir::abi::VAL_GCTHING_TAG_MIN;
         let types = reference_value_types();
+        // The engine's ValueLowerInclGCThingTag: its lowest GC-thing tag.
+        let lowest_gc = types.iter().filter(|t| t.2).map(|t| t.1).min();
+        assert_eq!(Some(VAL_GCTHING_TAG_MIN), lowest_gc);
         for (name, tag, gc) in types {
             assert!(tag >= TAG_CLEAR, "{name} is not a double");
             assert_eq!(tag >= VAL_GCTHING_TAG_MIN, gc, "{name}: is a GC thing");

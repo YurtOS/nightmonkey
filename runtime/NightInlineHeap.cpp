@@ -227,8 +227,8 @@ static_assert(JSString::MAX_LENGTH == (1u << 30) - 2, "STRING_MAX_LENGTH");
 static_assert(JSFatInlineString::MAX_LENGTH_LATIN1 == 24 &&
                   JSFatInlineString::MAX_LENGTH_TWO_BYTE == 12,
               "FAT_INLINE_MAX_LATIN1 / FAT_INLINE_MAX_TWO_BYTE");
-static_assert(uint32_t(JS::detail::ValueLowerInclGCThingTag) == 0xFFFFFF86u,
-              "VAL_GCTHING_TAG_MIN");
+// VAL_GCTHING_TAG_MIN (the engine's ValueLowerInclGCThingTag) differs by
+// engine version: runtime/NightEngineVersion.h checks it.
 static_assert(js::gc::ChunkStoreBufferOffset == 0, "CHUNK_STORE_BUFFER_OFFSET");
 static_assert(js::gc::ChunkMask == 0xFFFFFu, "NOT_CHUNK_MASK");
 

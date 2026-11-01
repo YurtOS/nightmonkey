@@ -198,8 +198,8 @@ impl<'a> Lower<'a> {
             });
         } else {
             let tag = self.tag_of(val);
-            let st = self.i32c(TAG_STRING as u32);
-            let is_gc = self.bin(Operator::I32GeU, tag, st, Type::I32);
+            let min = self.i32c(VAL_GCTHING_TAG_MIN);
+            let is_gc = self.bin(Operator::I32GeU, tag, min, Type::I32);
             self.cond_br(is_gc, Self::to(gc_b), Self::to(plain_b));
         }
         self.cur = plain_b;

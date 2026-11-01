@@ -18,8 +18,13 @@
 // value are separated at.
 
 /// Tag values at or above this are GC things (the tag half of a nunbox32
-/// `JS::Value`, compared as a u32). Below it are the immediates.
+/// `JS::Value`, compared as a u32). Below it are the immediates. The
+/// engine's `ValueLowerInclGCThingTag`: `JSVAL_TAG_STRING` in 147,
+/// `JSVAL_TAG_PRIVATE_GCTHING` in 159.
+#[cfg(feature = "ff147")]
 pub(crate) const VAL_GCTHING_TAG_MIN: u32 = 0xFFFF_FF86;
+#[cfg(feature = "ff159")]
+pub(crate) const VAL_GCTHING_TAG_MIN: u32 = 0xFFFF_FF87;
 
 // --- JSObject / NativeObject ----------------------------------------------
 //
