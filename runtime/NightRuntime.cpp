@@ -63,6 +63,7 @@
 #include "runtime/NightOpsInterp.h"  // js::night::NightDirectEval (baseline)
 #include "builtin/MapObject.h"         // MapObject::class_ (the inline map get)
 #include "runtime/NightRegionShape.h"   // Night_* region shape constants
+#include "runtime/NightEngineVersion.h"  // JSOP_SEMANTICS_VERSION
 #include "runtime/NightRegistration.h"  // js::night::gNightActivated
 #include "runtime/NightRuntimeData.h"  // js::night::NightRuntimeData (regex table)
 #include "runtime/NightRuntimeSlots.h"  // js::night::NightGet/SetHomeObject (isolated -inl TU)
@@ -7789,7 +7790,14 @@ bool night_runtime_dynamic_import(JSContext* cx, uint32_t top, uint32_t script,
   JS::RootedScript s(cx, LinMem<JSScript>(script));
   JS::RootedValue spec(cx, JS::Value::fromRawBits(specifier));
   JS::RootedValue opts(cx, JS::Value::fromRawBits(options));
+#if JSOP_SEMANTICS_VERSION >= 2
+  // The compiled tiers compile `import(x)` only (an ImportPhase other than
+  // Evaluation leaves the script interpreted).
+  JSObject* promise = js::StartDynamicModuleImport(cx, s, spec, opts,
+                                                   js::ImportPhase::Evaluation);
+#else
   JSObject* promise = js::StartDynamicModuleImport(cx, s, spec, opts);
+#endif
   if (!promise) {
     return false;
   }
@@ -7824,15 +7832,19 @@ bool night_runtime_get_import(JSContext* cx, uint32_t top, uint64_t env,
 }
 
 // The explicit-resource-management ops exist only when the engine enables
-// the proposal; without it the helpers are unreachable but still exported,
-// so the helper table is the same either way.
+// the proposal (147) or always (159, which dropped the build flag);
+// without them the helpers are unreachable but still exported, so the
+// helper table is the same either way.
+#if JSOP_SEMANTICS_VERSION >= 2 || defined(ENABLE_EXPLICIT_RESOURCE_MANAGEMENT)
+#  define NIGHT_EXPLICIT_RESOURCE_MANAGEMENT 1
+#endif
 
 // `AddDisposable`: `[val, method, needsClosure] ->`.
 bool night_runtime_add_disposable(JSContext* cx, uint32_t top, uint64_t env,
                                   uint64_t val, uint64_t method,
                                   uint64_t needsClosure, uint32_t hint) {
   SetNightTop(cx, top);
-#ifndef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
+#ifndef NIGHT_EXPLICIT_RESOURCE_MANAGEMENT
   MOZ_CRASH("AddDisposable without explicit resource management");
 #else
   JS::RootedObject envObj(cx, &JS::Value::fromRawBits(env).toObject());
@@ -7848,7 +7860,7 @@ bool night_runtime_add_disposable(JSContext* cx, uint32_t top, uint64_t env,
 bool night_runtime_take_dispose_capability(JSContext* cx, uint32_t top,
                                            uint64_t env) {
   SetNightTop(cx, top);
-#ifndef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
+#ifndef NIGHT_EXPLICIT_RESOURCE_MANAGEMENT
   MOZ_CRASH("TakeDisposeCapability without explicit resource management");
 #else
   JSObject* envObj = &JS::Value::fromRawBits(env).toObject();
@@ -7869,7 +7881,7 @@ bool night_runtime_create_suppressed_error(JSContext* cx, uint32_t top,
                                            uint64_t error,
                                            uint64_t suppressed) {
   SetNightTop(cx, top);
-#ifndef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
+#ifndef NIGHT_EXPLICIT_RESOURCE_MANAGEMENT
   MOZ_CRASH("CreateSuppressedError without explicit resource management");
 #else
   JS::RootedValue e(cx, JS::Value::fromRawBits(error));

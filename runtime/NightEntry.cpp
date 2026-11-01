@@ -10,6 +10,7 @@
  */
 
 #include "runtime/NightContext.h"
+#include "runtime/NightEngineVersion.h"  // kNightResumeThisMagic
 #include "runtime/NightEntry.h"
 
 #include "js/friend/StackLimits.h"            // js::ReportOverRecursed
@@ -333,6 +334,14 @@ EnterNightStatus NightApplyOrCall(JSContext* cx, const Value& targetv,
 }
 
 bool IsNightResumable(AbstractGeneratorObject* gen) {
+#if JSOP_SEMANTICS_VERSION >= 2
+  // A module (top-level await) generator holds its ModuleObject where a
+  // function generator holds its callee, and module scripts are never
+  // compiled (a Module body scope is declined).
+  if (gen->isModuleGenerator()) {
+    return false;
+  }
+#endif
   JSFunction& callee = gen->callee();
   return callee.hasBaseScript() && callee.baseScript()->hasBytecode() &&
          callee.nonLazyScript()->externalTierWord() != 0;
@@ -348,6 +357,9 @@ EnterNightStatus EnterNightResume(JSContext* cx,
                                   Handle<AbstractGeneratorObject*> genObj,
                                   HandleValue arg, HandleValue kindVal,
                                   MutableHandleValue rvalOut) {
+#if JSOP_SEMANTICS_VERSION >= 2
+  MOZ_ASSERT(!genObj->isModuleGenerator());
+#endif
   JSFunction* callee = &genObj->callee();
   JSScript* script = callee->nonLazyScript();
   uint32_t index = script->externalTierWord();
@@ -371,7 +383,7 @@ EnterNightStatus EnterNightResume(JSContext* cx,
   // The resume sentinel: a generator body's entry dispatch re-enters the
   // state machine when the frame `this` is this magic (never a legit fresh
   // `this`), avoiding an extra ABI param on every ordinary call.
-  sp[1] = JS::MagicValue(JS_GENERATOR_CLOSING);
+  sp[1] = JS::MagicValue(kNightResumeThisMagic);
   // Formal slots are never read on resume (the frontend routes formals
   // through bindings captured before InitialYield); undefined keeps the
   // scanned region valid.

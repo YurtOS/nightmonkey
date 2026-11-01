@@ -2,6 +2,7 @@
  * vim: set ts=8 sts=2 et sw=2 tw=80: */
 
 #include "builtin/Promise.h"  // js::AsyncFunctionAwait, js::CanSkipAwait, js::ExtractAwaitValue
+#include "runtime/NightEngineVersion.h"  // JSOP_SEMANTICS_VERSION
 #include "vm/AsyncFunction.h"  // js::AsyncFunctionResolve, js::AsyncFunctionReject
 #include "vm/GeneratorObject.h"
 #include "vm/JSContext.h"
@@ -117,6 +118,7 @@ uint32_t NightGenRestore(JSContext* cx, uint64_t genBits, JS::Value* locals,
   return len - nlocals;
 }
 
+#if JSOP_SEMANTICS_VERSION == 1
 // `JSOp::CheckResumeKind`, non-Next kinds (called with the operands rooted
 // in the frame). Always raises, mirroring GeneratorThrowOrReturn: Throw sets
 // the pending exception to val; Return stages val in the frame's rval slot
@@ -162,6 +164,25 @@ int32_t NightGenClosing(JSContext* cx) {
   cx->clearPendingException();
   return 1;
 }
+#else
+// 159 bytecode has no CheckResumeKind and the engine no
+// JS_GENERATOR_CLOSING: a resumed generator tests the resume kind itself
+// and returns through its finallys. The compiler emits no call to these
+// (GEN_CLOSING_UNWIND in compiler/src/wasm/translate.rs); they stay
+// exported so the helper table is the same for every engine version.
+bool NightGenCheckResume(JSContext* cx, uint64_t genBits, uint64_t valBits,
+                         uint32_t kind, JS::Value* rvalSlot) {
+  MOZ_CRASH("CheckResumeKind does not exist in this engine's bytecode");
+}
+
+int32_t NightGenIsClosing(JSContext* cx) {
+  MOZ_CRASH("this engine has no generator-closing magic");
+}
+
+int32_t NightGenClosing(JSContext* cx) {
+  MOZ_CRASH("this engine has no generator-closing magic");
+}
+#endif
 
 // `JSOp::FinalYieldRval`: the generator ran to completion; close it (the
 // interpreter's finalSuspend).
