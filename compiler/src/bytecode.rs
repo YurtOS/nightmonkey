@@ -335,7 +335,13 @@ impl<'a> BytecodeParser<'a> {
                 JSOp::GlobalThis => visitor.global_this(),
                 JSOp::NonSyntacticGlobalThis => visitor.non_syntactic_global_this(),
                 JSOp::NewTarget => visitor.new_target(),
-                JSOp::DynamicImport => visitor.dynamic_import(),
+                JSOp::DynamicImport => {
+                    // 159: the import phase (`ImportPhase`); the lowerings
+                    // read it themselves.
+                    #[cfg(feature = "ff159")]
+                    self.next_uint8().unwrap();
+                    visitor.dynamic_import();
+                }
                 JSOp::ImportMeta => visitor.import_meta(),
                 JSOp::NewInit => {
                     let property_count = self.next_uint8().unwrap();
@@ -552,6 +558,7 @@ impl<'a> BytecodeParser<'a> {
                     let resume_index = self.next_uint24().unwrap();
                     visitor.yield_(resume_index);
                 }
+                #[cfg(feature = "ff147")]
                 JSOp::IsGenClosing => visitor.is_gen_closing(),
                 JSOp::AsyncAwait => visitor.async_await(),
                 JSOp::AsyncResolve => visitor.async_resolve(),
@@ -566,6 +573,7 @@ impl<'a> BytecodeParser<'a> {
                     let resume_kind = self.next_uint8().unwrap();
                     visitor.resume_kind(resume_kind);
                 }
+                #[cfg(feature = "ff147")]
                 JSOp::CheckResumeKind => visitor.check_resume_kind(),
                 JSOp::Resume => visitor.resume(),
                 JSOp::JumpTarget => {
@@ -828,6 +836,7 @@ impl<'a> BytecodeParser<'a> {
                     visitor.lineno(lineno);
                 }
                 JSOp::NopDestructuring => visitor.nop_destructuring(),
+                #[cfg(feature = "ff147")]
                 JSOp::ForceInterpreter => visitor.force_interpreter(),
                 JSOp::DebugCheckSelfHosted => visitor.debug_check_self_hosted(),
                 JSOp::Debugger => visitor.debugger(),

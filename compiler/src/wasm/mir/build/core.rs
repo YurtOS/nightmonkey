@@ -125,6 +125,7 @@ impl<'s, 'a> Run<'s, 'a> {
     }
 
     /// The constant `v` is, if it is an `i32` constant.
+    #[cfg(feature = "ff147")]
     pub(super) fn const_i32_of(&self, v: mir::Value) -> Option<i32> {
         match self.f.values[v].def {
             mir::func::ValueDef::Result(i, _) => match self.f.insts[i].op {

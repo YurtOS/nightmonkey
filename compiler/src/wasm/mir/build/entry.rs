@@ -179,10 +179,11 @@ impl<'s, 'a> Run<'s, 'a> {
             .at(pc)
             .ok_or("resume landing without a stack depth")? as usize;
         let saved = before.len() - fl - popped;
-        if depth != saved + 3 {
+        let pushed = crate::wasm::translate::RESUME_VALUES as usize;
+        if depth != saved + pushed {
             return Err(format!(
                 "BUG: resume landing {pc} at depth {depth}, not {}",
-                saved + 3
+                saved + pushed
             ));
         }
         let live = self.s.live.get(&pc).cloned();
@@ -192,7 +193,7 @@ impl<'s, 'a> Run<'s, 'a> {
                 *t = Ty::Dead;
             }
         }
-        tys.extend([Ty::Val(TagSet::ALL); 3]);
+        tys.extend(std::iter::repeat_n(Ty::Val(TagSet::ALL), pushed));
         let o = self.new_block();
         self.f.roots.push(Root {
             kind: RootKind::Resume { index, pc },

@@ -412,10 +412,12 @@ impl<'a> Gen<'a> {
         let mut targets = vec![Self::goto(bad); (max_k + 1) as usize];
         for &(k, landing, depth) in &labels {
             let pre = self.fresh();
+            // [arg, gen, kind] (147) or [arg, kind] (159): `RESUME_VALUES`.
             self.set_slot(depth, rarg);
+            #[cfg(feature = "ff147")]
             self.set_slot(depth + 1, rgen);
             let kb = self.boxed_int32(rkind);
-            self.set_slot(depth + 2, kb);
+            self.set_slot(depth + RESUME_VALUES - 1, kb);
             let enc = layout::ResumeWord {
                 pc: landing,
                 mode: layout::ResumeMode::Continue,

@@ -46,6 +46,10 @@ impl<'a> Gen<'a> {
                 return Err(format!("{} ({op:?})", super::super::UNSUPPORTED_OP));
             }
             DynamicImport => {
+                // 159: the import phase, evaluation (`build_body` declines
+                // the others).
+                #[cfg(feature = "ff159")]
+                p.next_uint8().unwrap();
                 let spec = self.slot(d - 2);
                 let opts = self.slot(d - 1);
                 let script = self.script_ptr();
@@ -92,6 +96,7 @@ impl<'a> Gen<'a> {
                 let r = self.rt(h.resume, &[g, v, k]);
                 self.set_slot(d - 3, r);
             }
+            #[cfg(feature = "ff147")]
             ForceInterpreter => return Err(super::super::FORCE_INTERPRETER.into()),
             _ => return Ok(false),
         }

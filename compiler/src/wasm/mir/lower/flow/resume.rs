@@ -1,6 +1,7 @@
 //! resume: methods of `Lower`, split out of `flow.rs` unchanged.
 
 use super::*;
+use crate::wasm::translate::RESUME_VALUES;
 
 impl<'a> Lower<'a> {
     /// The entry. Under `ARGC_ONRAMP_BIT` (baseline at a loop header),
@@ -70,10 +71,10 @@ impl<'a> Lower<'a> {
             self.cur = fresh;
         }
         if self.is_gen {
-            // A generator's resume stages the generator-closing magic as
+            // A generator's resume stages the resume sentinel magic as
             // `this`, which no call passes (`EnterNightResume`).
             let thisv = self.load_i64(self.sp, FrameLayout::THIS);
-            let magic = self.i64c((TAG_MAGIC << 32) | MAGIC_GENERATOR_CLOSING);
+            let magic = self.i64c((TAG_MAGIC << 32) | MAGIC_RESUME_THIS);
             let is_resume = self.bin(Operator::I64Eq, thisv, magic, Type::I32);
             let (res, fresh) = (self.body.add_block(), self.body.add_block());
             self.cond_br(is_resume, Self::to(res), Self::to(fresh));
@@ -275,12 +276,14 @@ impl<'a> Lower<'a> {
                 .get(&pc)
                 .ok_or("lowering: no depth at a resume root")?;
             let saved = depth
-                .checked_sub(3)
-                .ok_or("lowering: a resume landing below depth 3")?;
+                .checked_sub(RESUME_VALUES)
+                .ok_or("lowering: a resume landing below the resume values")?;
+            // [arg, gen, kind] (147) or [arg, kind] (159): `RESUME_VALUES`.
             self.store_i64(vp, l.operand(saved), rarg);
+            #[cfg(feature = "ff147")]
             self.store_i64(vp, l.operand(saved + 1), rgen);
             let kind = self.box_tagged(TAG_INT32, rkind);
-            self.store_i64(vp, l.operand(saved + 2), kind);
+            self.store_i64(vp, l.operand(saved + RESUME_VALUES - 1), kind);
             self.enter_onramp(pc, root)?;
         }
         self.cur = disp;

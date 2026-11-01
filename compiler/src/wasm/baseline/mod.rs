@@ -106,12 +106,21 @@ pub fn build_body(
     resumes: &[layout::ResumeWord],
     onramps: &[(crate::ids::Pc, Vec<layout::ResumeWord>)],
 ) -> Result<Result<Built, String>, String> {
+    #[cfg(feature = "ff147")]
     if script
         .parser()
         .opcodes()
         .any(|op| op == JSOp::ForceInterpreter)
     {
         return Ok(Err(FORCE_INTERPRETER.into()));
+    }
+    // 159's DynamicImport names an import phase; the runtime implements the
+    // evaluation phase (`import(x)`) only.
+    #[cfg(feature = "ff159")]
+    if let Some(phase) = unsupported_import_phase(script) {
+        return Ok(Err(format!(
+            "{UNSUPPORTED_OP} (DynamicImport phase {phase})"
+        )));
     }
     // Direct eval reads the caller's interpreter frame (`is_direct_eval`): a
     // script containing one is interpreted, before any of it is lowered.
@@ -220,6 +229,27 @@ fn env_unsupported(source: &crate::source::Source, script: &Script) -> Option<St
         }
         _ => Some("body scope is not a Scope".into()),
     }
+}
+
+/// The phase of the first `DynamicImport` in `script` that imports another
+/// phase than evaluation, if any.
+#[cfg(feature = "ff159")]
+fn unsupported_import_phase(script: &Script) -> Option<u8> {
+    let mut p = script.parser();
+    while let Some(op) = p.next_op() {
+        if op == JSOp::DynamicImport {
+            let phase = p.next_uint8()?;
+            if phase != crate::wasm::translate::IMPORT_PHASE_EVALUATION {
+                return Some(phase);
+            }
+        } else {
+            let imm = usize::try_from(op.len()).unwrap() - 1;
+            if imm > 0 {
+                p.advance(imm)?;
+            }
+        }
+    }
+    None
 }
 
 /// Whether any op reading the frame's actuals or arguments object follows

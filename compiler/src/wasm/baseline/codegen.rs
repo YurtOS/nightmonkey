@@ -43,10 +43,10 @@ use crate::wasm::mir::stamp::{
     construct_nslots, typed_alloc_word, typed_keep_bits, typed_restamp_args,
 };
 use crate::wasm::translate::{
-    AtomTable, Helpers, TranslateCtx, INLINE_IC_STRIDE, MAGIC_ELEMENTS_HOLE,
-    MAGIC_GENERATOR_CLOSING, MAGIC_IS_CONSTRUCTING, MAGIC_NO_ITER_VALUE,
-    MAGIC_UNINITIALIZED_LEXICAL, TAG_BIGINT_HI, TAG_BOOLEAN, TAG_CLEAR, TAG_INT32, TAG_MAGIC,
-    TAG_NULL, TAG_OBJECT, TAG_STRING, TAG_SYMBOL, TAG_UNDEFINED,
+    AtomTable, Helpers, TranslateCtx, GEN_CLOSING_UNWIND, INLINE_IC_STRIDE, MAGIC_ELEMENTS_HOLE,
+    MAGIC_IS_CONSTRUCTING, MAGIC_NO_ITER_VALUE, MAGIC_RESUME_THIS, MAGIC_UNINITIALIZED_LEXICAL,
+    RESUME_VALUES, TAG_BIGINT_HI, TAG_BOOLEAN, TAG_CLEAR, TAG_INT32, TAG_MAGIC, TAG_NULL,
+    TAG_OBJECT, TAG_STRING, TAG_SYMBOL, TAG_UNDEFINED,
 };
 
 mod calls;
@@ -358,10 +358,10 @@ impl<'a> Gen<'a> {
         }
         if self.is_gen {
             self.scan_resumes()?;
-            // Fresh call or resume: a resume stages the generator-closing
+            // Fresh call or resume: a resume stages the resume sentinel
             // magic as `this`, which no call can pass.
             let thisv = self.load_i64(self.sp, FrameLayout::THIS);
-            let magic = self.i64c((TAG_MAGIC << 32) | MAGIC_GENERATOR_CLOSING);
+            let magic = self.i64c((TAG_MAGIC << 32) | MAGIC_RESUME_THIS);
             let is_resume = self.binop(Operator::I64Eq, thisv, magic, Type::I32);
             // A MIR body's exit from a resumed activation keeps that magic
             // `this` in the frame, and comes with `ARGC_RESUME_BIT`: it is

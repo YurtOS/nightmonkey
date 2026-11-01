@@ -34,13 +34,16 @@ impl<'a> Gen<'a> {
                 let kind = p.next_uint8().unwrap();
                 self.push_const(d, (TAG_INT32 << 32) | u64::from(kind));
             }
+            #[cfg(feature = "ff147")]
             IsGenClosing => {
+                use crate::wasm::translate::MAGIC_GENERATOR_CLOSING;
                 let v = self.slot(d - 1);
                 let m = self.i64c((TAG_MAGIC << 32) | MAGIC_GENERATOR_CLOSING);
                 let b = self.binop(Operator::I64Eq, v, m, Type::I32);
                 let r = self.boxed_bool(b);
                 self.set_slot(d, r);
             }
+            #[cfg(feature = "ff147")]
             CheckResumeKind => {
                 // [val, gen, kind] -> [val]: Next continues; Throw and
                 // Return raise through the helper (Return by staging the

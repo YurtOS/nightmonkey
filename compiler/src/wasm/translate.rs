@@ -1081,16 +1081,69 @@ impl ConstValue {
     }
 }
 
-// MagicValue payloads (the low half of a TAG_MAGIC value).
-pub(super) const MAGIC_ELEMENTS_HOLE: u64 = 0;
-pub(super) const MAGIC_NO_ITER_VALUE: u64 = 1;
-pub(super) const MAGIC_IS_CONSTRUCTING: u64 = 5;
-pub(super) const MAGIC_UNINITIALIZED_LEXICAL: u64 = 10;
-/// `JS_GENERATOR_CLOSING`: staged by the interpreter's Resume hook in the
-/// frame `this` slot to mark a re-entry, and raised as a pending exception
-/// by a forced `.return()` so the enclosing finallys run (see
-/// runtime/NightGenerator.cpp).
-pub(super) const MAGIC_GENERATOR_CLOSING: u64 = 2;
+// MagicValue payloads (the low half of a TAG_MAGIC value): the engine's
+// `JSWhyMagic` numbering, which 159 changed (JS_UNINITIALIZED_LEXICAL moved
+// first, JS_GENERATOR_CLOSING removed). runtime/NightEngineVersion.h
+// static_asserts each against the engine.
+#[cfg(feature = "ff147")]
+mod magic {
+    pub(crate) const ELEMENTS_HOLE: u64 = 0;
+    pub(crate) const NO_ITER_VALUE: u64 = 1;
+    pub(crate) const GENERATOR_CLOSING: u64 = 2;
+    pub(crate) const IS_CONSTRUCTING: u64 = 5;
+    pub(crate) const UNINITIALIZED_LEXICAL: u64 = 10;
+}
+#[cfg(feature = "ff159")]
+mod magic {
+    pub(crate) const UNINITIALIZED_LEXICAL: u64 = 0;
+    pub(crate) const ELEMENTS_HOLE: u64 = 1;
+    pub(crate) const NO_ITER_VALUE: u64 = 2;
+    pub(crate) const IS_CONSTRUCTING: u64 = 5;
+    pub(crate) const GENERIC_MAGIC: u64 = 12;
+}
+pub(super) const MAGIC_ELEMENTS_HOLE: u64 = magic::ELEMENTS_HOLE;
+pub(super) const MAGIC_NO_ITER_VALUE: u64 = magic::NO_ITER_VALUE;
+pub(super) const MAGIC_IS_CONSTRUCTING: u64 = magic::IS_CONSTRUCTING;
+pub(super) const MAGIC_UNINITIALIZED_LEXICAL: u64 = magic::UNINITIALIZED_LEXICAL;
+/// `JS_GENERATOR_CLOSING` (147 only): raised as a pending exception by a
+/// forced `.return()` so the enclosing finallys run, and observed by
+/// `IsGenClosing` (see runtime/NightGenerator.cpp). 159 returns through
+/// ordinary bytecode instead.
+#[cfg(feature = "ff147")]
+pub(super) const MAGIC_GENERATOR_CLOSING: u64 = magic::GENERATOR_CLOSING;
+/// The resume sentinel, a magic value: `EnterNightResume`
+/// stages it in the frame `this` slot to mark a re-entry, and no call
+/// passes it as `this` (runtime/NightEngineVersion.h names the same one):
+/// `JS_GENERATOR_CLOSING` in 147, `JS_GENERIC_MAGIC` ("for local use") in
+/// 159, which has no generator-closing magic.
+#[cfg(feature = "ff147")]
+pub(super) const MAGIC_RESUME_THIS: u64 = magic::GENERATOR_CLOSING;
+#[cfg(feature = "ff159")]
+pub(super) const MAGIC_RESUME_THIS: u64 = magic::GENERIC_MAGIC;
+
+/// The values a resumed generator finds pushed at its suspend op's landing
+/// (`InitialYield`, `Yield`, `Await`): in 147 the sent value, the generator
+/// and the resume kind (`CheckResumeKind` then raises a throw or return);
+/// in 159 the sent value and the resume kind, which the bytecode itself
+/// tests (a return resumption is an ordinary `SetRval` and return through
+/// the finallys).
+#[cfg(feature = "ff147")]
+pub(super) const RESUME_VALUES: u32 = 3;
+#[cfg(feature = "ff159")]
+pub(super) const RESUME_VALUES: u32 = 2;
+
+/// Whether a forced `.return()` unwinds a generator body as a pending
+/// `JS_GENERATOR_CLOSING` exception (147: catches skip it, finallys run,
+/// the error epilogue turns it into a normal return). 159 resumes a return
+/// with ordinary bytecode (`SetRval`, then a return through the finallys),
+/// so generator bodies unwind like any other.
+pub(super) const GEN_CLOSING_UNWIND: bool = cfg!(feature = "ff147");
+
+/// `ImportPhase::Evaluation` (builtin/ModuleObject.h), the one phase of
+/// 159's `DynamicImport` operand the runtime implements (`import(x)`); a
+/// script importing another phase is interpreted.
+#[cfg(feature = "ff159")]
+pub(crate) const IMPORT_PHASE_EVALUATION: u8 = 1;
 
 // Fixed-slot object layout on wasm32 (JS_NUNBOX32). Consumed by the static
 // slot-access path; the reactor `static_assert`s these against the engine
@@ -4293,7 +4346,10 @@ mod tests {
             ];
             match translate_plain(&script(code, 1)) {
                 Outcome::Skipped(reason) => {
-                    assert!(reason.contains(super::baseline::UNSUPPORTED_OP), "{reason}")
+                    assert!(
+                        reason.contains(crate::wasm::baseline::UNSUPPORTED_OP),
+                        "{reason}"
+                    )
                 }
                 Outcome::Compiled { .. } => panic!("phase {phase} should not compile"),
             }
@@ -4329,7 +4385,10 @@ mod tests {
         let ops: Vec<JSOp> = (0..=255u8).filter_map(JSOp::from_byte).collect();
         assert_eq!(ops.len(), 239);
         for removed in ["CheckResumeKind", "IsGenClosing", "ForceInterpreter"] {
-            assert!(ops.iter().all(|op| format!("{op:?}") != removed), "{removed}");
+            assert!(
+                ops.iter().all(|op| format!("{op:?}") != removed),
+                "{removed}"
+            );
         }
         // Before the first removal: unchanged from 147.
         assert_eq!(JSOp::from_byte(56), Some(JSOp::DynamicImport));
