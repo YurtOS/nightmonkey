@@ -239,6 +239,18 @@ impl<'a> Lower<'a> {
         (addr, Some(v))
     }
 
+    /// Branch to `fail` unless object `obj` is native. Only a native
+    /// object has slots and elements words: a proxy keeps its
+    /// `ProxyDataLayout` there (159: the handler, then an expando that is
+    /// null unless private fields were stamped onto it).
+    pub(super) fn check_native(&mut self, obj: Value, fail: Block) {
+        let shape = self.load_i32(obj, SHAPE_OFFSET);
+        let flags = self.load_i32(shape, SHAPE_IMMUTABLE_FLAGS_OFFSET);
+        let bit = self.i32c(SHAPE_IS_NATIVE_BIT);
+        let native = self.bin(Operator::I32And, flags, bit, Type::I32);
+        self.check(native, fail);
+    }
+
     pub(super) fn dense_slot(
         &mut self,
         recv: Value,
@@ -252,11 +264,7 @@ impl<'a> Lower<'a> {
         let both = self.bin(Operator::I32And, is_obj, is_int, Type::I32);
         self.check(both, fail);
         let obj = self.un(Operator::I32WrapI64, recv, Type::I32);
-        let shape = self.load_i32(obj, SHAPE_OFFSET);
-        let flags = self.load_i32(shape, SHAPE_IMMUTABLE_FLAGS_OFFSET);
-        let bit = self.i32c(SHAPE_IS_NATIVE_BIT);
-        let native = self.bin(Operator::I32And, flags, bit, Type::I32);
-        self.check(native, fail);
+        self.check_native(obj, fail);
         let elements = self.load_i32(obj, OBJ_ELEMENTS_OFFSET);
         let back = self.i32c(ELEMENTS_INITLEN_BACK);
         let header = self.bin(Operator::I32Sub, elements, back, Type::I32);
@@ -299,6 +307,7 @@ impl<'a> Lower<'a> {
         let both = self.bin(Operator::I32And, is_obj, is_int, Type::I32);
         self.check(both, miss);
         let obj = self.un(Operator::I32WrapI64, recv, Type::I32);
+        self.check_native(obj, miss);
         let elements = self.load_i32(obj, OBJ_ELEMENTS_OFFSET);
         let initlen = self.elem_header(elements, ELEMENTS_INITLEN_BACK);
         let idx = self.un(Operator::I32WrapI64, key, Type::I32);
@@ -441,6 +450,7 @@ impl<'a> Lower<'a> {
         let m = self.bin(Operator::I32And, is_push, this_obj, Type::I32);
         self.check(m, other);
         let obj = self.un(Operator::I32WrapI64, this, Type::I32);
+        self.check_native(obj, other);
         let elements = self.load_i32(obj, OBJ_ELEMENTS_OFFSET);
         let flags = self.elem_header(elements, ELEMENTS_FLAGS_BACK);
         let initlen = self.elem_header(elements, ELEMENTS_INITLEN_BACK);
