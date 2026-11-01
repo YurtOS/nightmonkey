@@ -1,0 +1,37 @@
+# Additions to wasi-jit-test-excludes.txt for builds against the Firefox 159
+# engine (NIGHT_ENGINE_VERSION=ff159; scripts/run-jit-tests.sh). Applied to
+# BOTH lanes. One path per line, relative to js/src/jit-test/tests; the
+# comment is the skip condition the test would carry in-tree. All are tests
+# that 147's tree does not have, except where noted.
+
+# !this.Atomics
+auto-regress/bug2053695-3.js
+auto-regress/bug2053695-4.js
+ion/recover-unsignedtodouble.js
+# 159 added Atomics.load/store to it; 147's version runs and passes there.
+typedarray/subarray-scalar-replace.js
+
+# !this.SharedArrayBuffer
+ion/bug2010943-1.js
+structured-clone/deserialize-options-getters.js
+
+# !this.Temporal
+auto-regress/bug2023026.js
+
+# typeof Intl === 'undefined' (setTimeZone has no effect without Intl)
+Date/date-parse-non-movable.js
+# typeof Intl === 'undefined' (Unicode property escapes need ICU)
+regexp/bug-2023370.js
+
+# getBuildConfiguration("wasi") (js::gc::AllocateMappedContent:
+# MOZ_CRASH "Not yet supported for WASI")
+gc/bug-2035206.js
+
+# The Wizer shell parses the main script eagerly (Yurt patch: delazification
+# ParseEverythingEagerly under JS_SHELL_WIZER), so its top-level functions
+# are never lazy; same family as basic/allow-relazify.js.
+parser/bug-2073269-script.js
+
+# Too slow for the wasm32 shell: 147.9s in the interpreter lane and a
+# timeout at 153.4s in the AOT lane, against jit_test.py's 150s limit.
+gc/bug-2010940.js

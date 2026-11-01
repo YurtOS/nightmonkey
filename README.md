@@ -357,7 +357,11 @@ as `--exclude-from` / `--exclude-file`, so the same tests still run in the
 interpreter lane): tests exercising designed-out capability -- the debugger /
 frame-introspection / interrupt classes -- plus an annotated artifact class
 (GC-introspection tests sensitive to the tier's literal-string and
-allocation profile; each carries a comment). The SpiderMonkey tree carries
+allocation profile; each carries a comment). For a build configured with
+`NIGHT_ENGINE_VERSION=ff159`, `scripts/run-jit-tests.sh` also applies
+`tests/wasi-jit-test-excludes-ff159.txt` and (AOT lane)
+`tests/jit-test-excludes-ff159.txt`, so the 147 lanes keep their coverage.
+The SpiderMonkey tree carries
 no test annotations for NightMonkey. NightMonkey's own regression tests
 (`tests/jit-test/`) run in both lanes with `scripts/run-night-tests.sh`.
 
