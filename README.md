@@ -214,14 +214,24 @@ changes. CMake passes it to the C++ runtime, whose per-version code keys
 on it; `runtime/NightEngineVersion.h` checks it against the engine's and
 checks the value tags and magic payloads the compiler emits.
 
-Supported versions: `ff147` (Firefox 147, semantics 1, the default) and
-`ff159` (Firefox 159, semantics 2; `cargo build --no-default-features
---features ff159`, `-DNIGHT_ENGINE_VERSION=ff159`). Besides the bytecode,
-the version selects what 159 changed outside `Opcodes.h`: the value tags
-of strings, symbols and private GC things and the GC-thing tag boundary,
-the `JSWhyMagic` numbering, the `TryNoteKind` numbering (no
-`ForOfIterClose`), and a few renamed engine declarations the runtime's
-layout asserts use.
+Engine versions: `ff147` (Firefox 147, semantics 1, the default; the
+shipping engine, built and tested by CI) and `ff159` (Firefox 159,
+semantics 2; `cargo build --no-default-features --features ff159`,
+`-DNIGHT_ENGINE_VERSION=ff159`). Besides the bytecode, the version
+selects what 159 changed outside `Opcodes.h`: the value tags of strings,
+symbols and private GC things and the GC-thing tag boundary, the
+`JSWhyMagic` numbering, the `TryNoteKind` numbering (no
+`ForOfIterClose`), and the engine declarations the C++ runtime uses. On
+ff159 compiled regular expressions are declined (159 changed the
+irregexp bytecode format the translator reads), so regexes run in the
+engine's interpreter.
+
+What is verified for `ff159`: the Rust crates build and pass their tests
+and Clippy, and the C++ runtime compiles (`-fsyntax-only`, its layout
+`static_assert`s included) against the 159 headers overlaid on the 147
+release's generated headers (`scripts/syntax-check-runtime.py`). Not
+yet verified: a build and link against a real 159 engine release, and
+any JavaScript execution (local regressions, jit-tests, jstests) on it.
 
 CI (`.github/workflows/ci.yml`) runs Rust formatting, check, tests and Clippy,
 workflow lint and script regressions on pull requests and pushes to `yurt`.
