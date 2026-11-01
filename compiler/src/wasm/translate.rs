@@ -5002,7 +5002,7 @@ mod tests {
     }
 
     /// Lower one MIR function (text) to its Wasm body.
-    fn lower_mir_text(src: &str, push_atom: bool) -> waffle::FunctionBody {
+    fn lower_mir_text(src: &str, push_atom: bool) -> (waffle::FunctionBody, Helpers) {
         use crate::wasm::baseline::layout::FrameLayout;
         let mut mm = crate::mir::parse(src).expect("parse");
         if push_atom {
@@ -5015,7 +5015,7 @@ mod tests {
         let f = &mm.funcs[0];
         let layout = FrameLayout::full(f.frame.formals, f.frame.locals);
         let mut atoms = AtomTable::new(Names::default());
-        crate::wasm::mir::lower::lower(
+        let lowered = crate::wasm::mir::lower::lower(
             &mut m,
             helpers,
             &mm,
@@ -5027,81 +5027,147 @@ mod tests {
             Default::default(),
             Default::default(),
         )
-        .expect("lower")
-        .body
+        .expect("lower");
+        (lowered.body, helpers)
+    }
+
+    /// What [`element_safety`] found in a body.
+    #[derive(Debug, Default)]
+    struct ElementSafety {
+        /// Elements loads not behind a native guard on their object, or of
+        /// an object the oracle cannot identify, as (block, load).
+        unguarded: Vec<(waffle::Block, Value)>,
+        /// Elements loads of an identified object.
+        loads: usize,
+        /// Native guards (see below).
+        guards: usize,
     }
 
     /// Every load of an object's elements pointer (`OBJ_ELEMENTS_OFFSET`)
-    /// in `body` that is not behind a native guard on that object, as
-    /// (block, load). A non-native object (a proxy) keeps other data at
-    /// that offset: 159's `ProxyDataLayout` has its often-null `expando`
-    /// there, and the elements header read below it traps.
+    /// in `body` must be behind a native guard on that object. A
+    /// non-native object (a proxy) keeps other data at that offset: 159's
+    /// `ProxyDataLayout` has its often-null `expando` there, and the
+    /// elements header read below it traps.
+    ///
+    /// The object of a load is the boxed value its address unboxes
+    /// (`i32.wrap_i64`). An offset-12 load from a table address (a
+    /// constant, a loaded base plus a hashed index) is not an elements
+    /// load; an address that may still be an object pointer (`or(obj, 0)`,
+    /// a block parameter, ...) cannot be identified and is reported, so a
+    /// rewrite the oracle does not recognize fails loudly.
     ///
     /// A native guard is a block ending in `br_if` on a test of the
-    /// object's shape's native bit (`and(flags, SHAPE_IS_NATIVE_BIT)`,
-    /// native when nonzero) or of its class (`clasp == k`, a native class:
-    /// native when true), or on `eqz` of either (polarity flipped). Its
-    /// success edge is the successor taken when the object is native; the
-    /// load is guarded when that successor has the guard block as its only
-    /// predecessor and dominates the load's block, so every path to the
-    /// load took the success edge and the failure edge cannot reach it.
+    /// object: its shape's native bit (`and(flags, SHAPE_IS_NATIVE_BIT)`,
+    /// native when nonzero), or its class against one of the native class
+    /// cells the lowering reads (`clasp == load(cell)`, for `class_cells`
+    /// (address, offset) pairs: native when equal); or on `eqz` of such a
+    /// test (polarity flipped; `eqz(eqz(t))` is `t`). Its success successor
+    /// is the one taken when the object is native; a load is guarded when
+    /// that successor has the guard block as its only predecessor and
+    /// dominates the load's block, so every path to the load took the
+    /// success edge.
     ///
-    /// Mutation evidence (each turns the two tests below red): deleting
-    /// `check_native` from either arm; computing the test without branching
-    /// on it; branching on its negation (`eqz`, inverted polarity); moving
-    /// the check after the elements load. The previous oracle (any such
-    /// test in a dominating block) passed the second and third.
-    fn unguarded_elements_loads(body: &waffle::FunctionBody) -> Vec<(waffle::Block, Value)> {
+    /// Mutation evidence (each turns the setelem and/or push test red):
+    /// `check_native` deleted from either arm; computed without a branch;
+    /// branched on `eqz` (inverted); moved after the elements load; deleted
+    /// with the load's address rewritten as `or(obj, 0)`; the class test
+    /// against a constant, or against the object's own class.
+    fn element_safety(body: &waffle::FunctionBody, class_cells: &[(u32, u32)]) -> ElementSafety {
         use crate::wasm::mir::abi::{
             BASESHAPE_CLASP_OFFSET, OBJ_ELEMENTS_OFFSET, SHAPE_BASESHAPE_OFFSET,
             SHAPE_IMMUTABLE_FLAGS_OFFSET, SHAPE_IS_NATIVE_BIT, SHAPE_OFFSET,
         };
         use waffle::{Terminator, ValueDef};
         let def = |v: Value| body.values[body.resolve_alias(v)].clone();
-        // The boxed value an object pointer was unboxed from
-        // (`i32.wrap_i64`); None for other pointers (cache rows, cells).
-        let root = |v: Value| match def(v) {
-            ValueDef::Operator(Operator::I32WrapI64, args, _) => {
-                Some(body.resolve_alias(body.arg_pool[args][0]))
-            }
+        let args_of = |v: Value| match def(v) {
+            ValueDef::Operator(op, args, _) => Some((op, body.arg_pool[args].to_vec())),
             _ => None,
         };
-        let load_at = |v: Value, off: u32| match def(v) {
-            ValueDef::Operator(Operator::I32Load { memory }, args, _) if memory.offset == off => {
-                Some(body.arg_pool[args][0])
-            }
+        // The boxed value an object pointer was unboxed from.
+        let root = |v: Value| match args_of(v) {
+            Some((Operator::I32WrapI64, a)) => Some(body.resolve_alias(a[0])),
             _ => None,
         };
-        let is_const = |v: Value, k: u32| matches!(def(v), ValueDef::Operator(Operator::I32Const { value }, _, _) if value == k);
+        // Whether an address may be an object pointer in disguise: an
+        // `i32.wrap_i64` or a block parameter, through the operators that
+        // keep a pointer's identity (`add`, `sub`, `or`, `select`). A
+        // hashed index (`mul`, `xor`, masks, shifts) or a loaded word is a
+        // table address, not the object.
+        fn from_object(body: &waffle::FunctionBody, v: Value, depth: u32) -> bool {
+            match &body.values[body.resolve_alias(v)] {
+                ValueDef::BlockParam(..) => true,
+                ValueDef::Operator(op, args, _) => match op {
+                    Operator::I32WrapI64 => true,
+                    Operator::I32Add
+                    | Operator::I32Sub
+                    | Operator::I32Or
+                    | Operator::TypedSelect { .. }
+                    | Operator::Select => {
+                        depth > 16
+                            || body.arg_pool[*args]
+                                .iter()
+                                .any(|&a| from_object(body, a, depth + 1))
+                    }
+                    _ => false,
+                },
+                _ => true,
+            }
+        }
+        let load_at = |v: Value, off: u32| match args_of(v) {
+            Some((Operator::I32Load { memory }, a)) if memory.offset == off => Some(a[0]),
+            _ => None,
+        };
+        let is_const = |v: Value, k: u32| matches!(args_of(v), Some((Operator::I32Const { value }, _)) if value == k);
+        let clasp_of = |x: Value| {
+            load_at(x, BASESHAPE_CLASP_OFFSET)
+                .and_then(|base| load_at(base, SHAPE_BASESHAPE_OFFSET))
+                .and_then(|shape| load_at(shape, SHAPE_OFFSET))
+                .and_then(root)
+        };
+        let is_class_cell = |x: Value| match args_of(x) {
+            Some((Operator::I32Load { memory }, a)) => class_cells
+                .iter()
+                .any(|&(addr, off)| memory.offset == off && is_const(a[0], addr)),
+            _ => false,
+        };
         // The object `v` is true exactly when native for, if it is a
         // native-bit or class test.
         let native_test = |v: Value| -> Option<Value> {
-            let ValueDef::Operator(op, args, _) = def(v) else {
-                return None;
-            };
-            let args = &body.arg_pool[args];
+            let (op, a) = args_of(v)?;
             match op {
-                Operator::I32And if args.len() == 2 => [(args[0], args[1]), (args[1], args[0])]
-                    .into_iter()
-                    .find_map(|(x, k)| {
+                Operator::I32And if a.len() == 2 => {
+                    [(a[0], a[1]), (a[1], a[0])].into_iter().find_map(|(x, k)| {
                         if !is_const(k, SHAPE_IS_NATIVE_BIT) {
                             return None;
                         }
                         load_at(x, SHAPE_IMMUTABLE_FLAGS_OFFSET)
                             .and_then(|shape| load_at(shape, SHAPE_OFFSET))
                             .and_then(root)
-                    }),
-                Operator::I32Eq if args.len() == 2 => {
-                    [args[0], args[1]].into_iter().find_map(|x| {
-                        load_at(x, BASESHAPE_CLASP_OFFSET)
-                            .and_then(|base| load_at(base, SHAPE_BASESHAPE_OFFSET))
-                            .and_then(|shape| load_at(shape, SHAPE_OFFSET))
-                            .and_then(root)
                     })
                 }
+                Operator::I32Eq if a.len() == 2 => [(a[0], a[1]), (a[1], a[0])]
+                    .into_iter()
+                    .find_map(|(x, cell)| clasp_of(x).filter(|_| is_class_cell(cell))),
                 _ => None,
             }
         };
+        // (object, native when the value is true) for a branch condition.
+        let condition = |mut v: Value| {
+            let mut native_if_true = true;
+            loop {
+                if let Some(o) = native_test(v) {
+                    return Some((o, native_if_true));
+                }
+                match args_of(v) {
+                    Some((Operator::I32Eqz, a)) => {
+                        v = a[0];
+                        native_if_true = !native_if_true;
+                    }
+                    _ => return None,
+                }
+            }
+        };
+        let mut out = ElementSafety::default();
         // (object, success successor) of each native guard.
         let mut guards = vec![];
         let mut loads = vec![];
@@ -5112,53 +5178,135 @@ mod tests {
                 if_false,
             } = &bd.terminator
             {
-                let (obj, native_if_true) = match native_test(*cond) {
-                    Some(o) => (Some(o), true),
-                    None => match def(*cond) {
-                        ValueDef::Operator(Operator::I32Eqz, args, _) => {
-                            (native_test(body.arg_pool[args][0]), false)
-                        }
-                        _ => (None, true),
-                    },
-                };
-                let success = if native_if_true {
-                    if_true.block
-                } else {
-                    if_false.block
-                };
-                if let Some(o) = obj {
+                if let Some((o, native_if_true)) = condition(*cond) {
+                    let success = if native_if_true {
+                        if_true.block
+                    } else {
+                        if_false.block
+                    };
                     if if_true.block != if_false.block && body.blocks[success].preds == [b] {
                         guards.push((o, success));
                     }
                 }
             }
             for &v in &bd.insts {
-                if let ValueDef::Operator(Operator::I32Load { memory }, args, _) = def(v) {
-                    if memory.offset == OBJ_ELEMENTS_OFFSET {
-                        if let Some(o) = root(body.arg_pool[args][0]) {
-                            loads.push((b, v, o));
-                        }
-                    }
+                let Some((Operator::I32Load { memory }, a)) = args_of(v) else {
+                    continue;
+                };
+                if memory.offset != OBJ_ELEMENTS_OFFSET {
+                    continue;
+                }
+                match root(a[0]) {
+                    Some(o) => loads.push((b, v, o)),
+                    None if from_object(body, a[0], 0) => out.unguarded.push((b, v)),
+                    None => {}
                 }
             }
         }
         let cfg = waffle::cfg::CFGInfo::new(body);
-        loads
-            .into_iter()
-            .filter(|&(b, _, o)| {
-                !guards
-                    .iter()
-                    .any(|&(go, s)| go == o && (s == b || cfg.dominates(s, b)))
-            })
-            .map(|(b, v, _)| (b, v))
-            .collect()
+        out.loads = loads.len();
+        out.guards = guards.len();
+        out.unguarded.extend(
+            loads
+                .into_iter()
+                .filter(|&(b, _, o)| {
+                    !guards
+                        .iter()
+                        .any(|&(go, s)| go == o && (s == b || cfg.dominates(s, b)))
+                })
+                .map(|(b, v, _)| (b, v)),
+        );
+        out
+    }
+
+    /// The native class cells the lowering compares a class against
+    /// (`elements.rs`: the Array class, and the arguments classes).
+    fn class_cells(h: &Helpers) -> Vec<(u32, u32)> {
+        vec![
+            (h.array_class_slot, 0),
+            (h.args_class_base, 0),
+            (h.args_class_base, 4),
+        ]
+    }
+
+    /// The oracle's class arm, on hand-built bodies: `load(obj.elements)`
+    /// behind `br_if clasp(obj) == <comparand>`.
+    #[test]
+    fn element_safety_class_arm() {
+        use crate::wasm::mir::abi::OBJ_ELEMENTS_OFFSET;
+        use waffle::{BlockTarget, Terminator};
+        let (m, h) = module_with_helpers();
+        let mem = h.mem;
+        let ld = |b: &mut waffle::FunctionBody, blk, addr, off| {
+            let memory = waffle::MemoryArg {
+                align: 2,
+                offset: off,
+                memory: mem,
+            };
+            b.add_op(blk, Operator::I32Load { memory }, &[addr], &[Type::I32])
+        };
+        let body_with = |comparand: &str| {
+            let mut b = waffle::FunctionBody::new(&m, h.night_abi_sig2);
+            let entry = b.entry;
+            let (ok, fail) = (b.add_block(), b.add_block());
+            let boxed = b.add_op(entry, Operator::I64Const { value: 0 }, &[], &[Type::I64]);
+            let obj = b.add_op(entry, Operator::I32WrapI64, &[boxed], &[Type::I32]);
+            let shape = ld(&mut b, entry, obj, 0);
+            let base = ld(&mut b, entry, shape, 0);
+            let clasp = ld(&mut b, entry, base, 0);
+            let other = match comparand {
+                "cell" => {
+                    let c = b.add_op(
+                        entry,
+                        Operator::I32Const {
+                            value: h.array_class_slot,
+                        },
+                        &[],
+                        &[Type::I32],
+                    );
+                    ld(&mut b, entry, c, 0)
+                }
+                "const" => b.add_op(
+                    entry,
+                    Operator::I32Const { value: 0x1234 },
+                    &[],
+                    &[Type::I32],
+                ),
+                _ => clasp,
+            };
+            let eq = b.add_op(entry, Operator::I32Eq, &[clasp, other], &[Type::I32]);
+            b.set_terminator(
+                entry,
+                Terminator::CondBr {
+                    cond: eq,
+                    if_true: BlockTarget {
+                        block: ok,
+                        args: vec![],
+                    },
+                    if_false: BlockTarget {
+                        block: fail,
+                        args: vec![],
+                    },
+                },
+            );
+            ld(&mut b, ok, obj, OBJ_ELEMENTS_OFFSET);
+            b.set_terminator(ok, Terminator::Unreachable);
+            b.set_terminator(fail, Terminator::Unreachable);
+            b
+        };
+        let r = element_safety(&body_with("cell"), &class_cells(&h));
+        assert_eq!((r.unguarded.len(), r.loads, r.guards), (0, 1, 1));
+        for wrong in ["const", "self"] {
+            let r = element_safety(&body_with(wrong), &class_cells(&h));
+            assert_eq!((r.unguarded.len(), r.loads, r.guards), (1, 1, 0), "{wrong}");
+        }
     }
 
     /// `o[i] = v` (generic `js.setelem`): the dense overwrite and the
     /// append arm read `o`'s elements only behind its native check.
     #[test]
     fn setelem_reads_elements_only_of_native_objects() {
-        let body = lower_mir_text(
+        let (body, h) = lower_mir_text(
             "func @s3 (formals=3, locals=0, depths={0:0}) {
   root entry b0
 b0(v0: obj{Function(s3)}, v1: val, v2: val, v3: val, v4: val):
@@ -5173,14 +5321,18 @@ b9:
 ",
             false,
         );
-        assert_eq!(unguarded_elements_loads(&body), vec![]);
+        let r = element_safety(&body, &class_cells(&h));
+        assert_eq!(r.unguarded, vec![]);
+        // The dense overwrite (dense_slot) and the append arm, each behind
+        // its own native-bit guard: fewer means the oracle lost track.
+        assert!(r.loads >= 2 && r.guards >= 2, "{r:?}");
     }
 
     /// `o.push(v)` (a `call` in a function naming `push`): the push arm
     /// reads `o`'s elements only behind its native check.
     #[test]
     fn push_reads_elements_only_of_native_objects() {
-        let body = lower_mir_text(
+        let (body, h) = lower_mir_text(
             "func @s3 (formals=3, locals=0, depths={0:0}) {
   root entry b0
 b0(v0: obj{Function(s3)}, v1: val, v2: val, v3: val, v4: val):
@@ -5196,7 +5348,10 @@ b9:
 ",
             true,
         );
-        assert_eq!(unguarded_elements_loads(&body), vec![]);
+        let r = element_safety(&body, &class_cells(&h));
+        assert_eq!(r.unguarded, vec![]);
+        // The push arm's load behind its native-bit guard.
+        assert!(r.loads >= 1 && r.guards >= 1, "{r:?}");
     }
 
     /// The MIR fixtures that use only lowered ops lower to a valid module:
