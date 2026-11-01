@@ -261,7 +261,8 @@ A generator resumes through the same mechanism as a MIR deopt (§4).
   which lifts the "generator using arguments" gate.
 - **Resume:** baseline keeps the existing `EnterNightResume` protocol:
   `this` is the resume sentinel magic (`JS_GENERATOR_CLOSING` on ff147,
-  `JS_GENERIC_MAGIC` on ff159, which has no closing magic), a descriptor
+  `JS_ION_BAILOUT`, which only the absent Ion creates, on ff159, which has
+  no closing magic), a descriptor
   staged at the locals, and `gen_restore`. It then resumes at the yield's
   successor pc with what the suspend op defines pushed (`RESUME_VALUES`):
   `[sent value, generator, resume kind]` on ff147, where `CheckResumeKind`

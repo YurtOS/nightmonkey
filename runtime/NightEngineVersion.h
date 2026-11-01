@@ -69,9 +69,11 @@ inline constexpr JSWhyMagic kNightResumeThisMagic = JS_GENERATOR_CLOSING;
 #elif JSOP_SEMANTICS_VERSION == 2
 static_assert(JS_UNINITIALIZED_LEXICAL == 0 && JS_ELEMENTS_HOLE == 1 &&
                   JS_NO_ITER_VALUE == 2 && JS_IS_CONSTRUCTING == 5 &&
-                  JS_GENERIC_MAGIC == 12,
+                  JS_ION_BAILOUT == 8,
               "translate.rs MAGIC_* (ff159)");
-inline constexpr JSWhyMagic kNightResumeThisMagic = JS_GENERIC_MAGIC;
+// Only Ion creates JS_ION_BAILOUT, and the wasm32 engine has no Ion; the
+// runtime returns JS_GENERIC_MAGIC as a failure value, so not that.
+inline constexpr JSWhyMagic kNightResumeThisMagic = JS_ION_BAILOUT;
 #else
 #  error "unsupported JSOP_SEMANTICS_VERSION: add the engine version (README, Engine versions)"
 #endif

@@ -1110,7 +1110,7 @@ mod magic {
     pub(crate) const ELEMENTS_HOLE: u64 = 1;
     pub(crate) const NO_ITER_VALUE: u64 = 2;
     pub(crate) const IS_CONSTRUCTING: u64 = 5;
-    pub(crate) const GENERIC_MAGIC: u64 = 12;
+    pub(crate) const ION_BAILOUT: u64 = 8;
 }
 pub(super) const MAGIC_ELEMENTS_HOLE: u64 = magic::ELEMENTS_HOLE;
 pub(super) const MAGIC_NO_ITER_VALUE: u64 = magic::NO_ITER_VALUE;
@@ -1125,12 +1125,14 @@ pub(super) const MAGIC_GENERATOR_CLOSING: u64 = magic::GENERATOR_CLOSING;
 /// The resume sentinel, a magic value: `EnterNightResume`
 /// stages it in the frame `this` slot to mark a re-entry, and no call
 /// passes it as `this` (runtime/NightEngineVersion.h names the same one):
-/// `JS_GENERATOR_CLOSING` in 147, `JS_GENERIC_MAGIC` ("for local use") in
-/// 159, which has no generator-closing magic.
+/// `JS_GENERATOR_CLOSING` in 147. 159 has no generator-closing magic; its
+/// sentinel is `JS_ION_BAILOUT`, which only Ion creates and the wasm32
+/// engine has no Ion (not `JS_GENERIC_MAGIC`, which the runtime also
+/// returns as a failure value).
 #[cfg(feature = "ff147")]
 pub(super) const MAGIC_RESUME_THIS: u64 = magic::GENERATOR_CLOSING;
 #[cfg(feature = "ff159")]
-pub(super) const MAGIC_RESUME_THIS: u64 = magic::GENERIC_MAGIC;
+pub(super) const MAGIC_RESUME_THIS: u64 = magic::ION_BAILOUT;
 
 /// The values a resumed generator finds pushed at its suspend op's landing
 /// (`InitialYield`, `Yield`, `Await`): in 147 the sent value, the generator
