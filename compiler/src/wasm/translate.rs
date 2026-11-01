@@ -4840,6 +4840,164 @@ mod tests {
         }
     }
 
+    /// Lower one MIR function (text) to its Wasm body.
+    fn lower_mir_text(src: &str, push_atom: bool) -> waffle::FunctionBody {
+        use crate::wasm::baseline::layout::FrameLayout;
+        let mut mm = crate::mir::parse(src).expect("parse");
+        if push_atom {
+            // The push arm is emitted only where the function names `push`.
+            mm.atoms.push(crate::ids::JsString::from_chars(
+                "push".encode_utf16().collect(),
+            ));
+        }
+        let (mut m, helpers) = module_with_helpers();
+        let f = &mm.funcs[0];
+        let layout = FrameLayout::full(f.frame.formals, f.frame.locals);
+        let mut atoms = AtomTable::new(Names::default());
+        crate::wasm::mir::lower::lower(
+            &mut m,
+            helpers,
+            &mm,
+            &mut atoms,
+            f,
+            layout,
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )
+        .expect("lower")
+        .body
+    }
+
+    /// Every load of an object's elements pointer (`OBJ_ELEMENTS_OFFSET`)
+    /// in `body` that is not dominated by a test of that object's shape's
+    /// native bit (`SHAPE_IS_NATIVE_BIT` of the immutable flags) or of its
+    /// class, as (block, load). A non-native object (a proxy) keeps other data at
+    /// that offset: 159's `ProxyDataLayout` has its often-null `expando`
+    /// there, and the elements header read below it traps.
+    fn unguarded_elements_loads(body: &waffle::FunctionBody) -> Vec<(waffle::Block, Value)> {
+        use crate::wasm::mir::abi::{
+            BASESHAPE_CLASP_OFFSET, OBJ_ELEMENTS_OFFSET, SHAPE_BASESHAPE_OFFSET,
+            SHAPE_IMMUTABLE_FLAGS_OFFSET, SHAPE_IS_NATIVE_BIT, SHAPE_OFFSET,
+        };
+        use waffle::ValueDef;
+        let def = |v: Value| body.values[body.resolve_alias(v)].clone();
+        // The boxed value an object pointer was unboxed from
+        // (`i32.wrap_i64`); None for other pointers (cache rows, cells).
+        let root = |v: Value| match def(v) {
+            ValueDef::Operator(Operator::I32WrapI64, args, _) => {
+                Some(body.resolve_alias(body.arg_pool[args][0]))
+            }
+            _ => None,
+        };
+        let load_at = |v: Value, off: u32| match def(v) {
+            ValueDef::Operator(Operator::I32Load { memory }, args, _) if memory.offset == off => {
+                Some(body.arg_pool[args][0])
+            }
+            _ => None,
+        };
+        let is_const = |v: Value, k: u32| matches!(def(v), ValueDef::Operator(Operator::I32Const { value }, _, _) if value == k);
+        // (block, position, object) of each native-bit test.
+        let mut checks = vec![];
+        let mut loads = vec![];
+        for (b, bd) in body.blocks.entries() {
+            for (i, &v) in bd.insts.iter().enumerate() {
+                let ValueDef::Operator(op, args, _) = def(v) else {
+                    continue;
+                };
+                let args = &body.arg_pool[args];
+                match op {
+                    Operator::I32And if args.len() == 2 => {
+                        for (x, k) in [(args[0], args[1]), (args[1], args[0])] {
+                            if !is_const(k, SHAPE_IS_NATIVE_BIT) {
+                                continue;
+                            }
+                            let obj = load_at(x, SHAPE_IMMUTABLE_FLAGS_OFFSET)
+                                .and_then(|shape| load_at(shape, SHAPE_OFFSET));
+                            if let Some(o) = obj.and_then(root) {
+                                checks.push((b, i, o));
+                            }
+                        }
+                    }
+                    // A class test (`clasp == <a native class>`, as the
+                    // array and arguments arms do) proves native too.
+                    Operator::I32Eq if args.len() == 2 => {
+                        for x in [args[0], args[1]] {
+                            let obj = load_at(x, BASESHAPE_CLASP_OFFSET)
+                                .and_then(|base| load_at(base, SHAPE_BASESHAPE_OFFSET))
+                                .and_then(|shape| load_at(shape, SHAPE_OFFSET));
+                            if let Some(o) = obj.and_then(root) {
+                                checks.push((b, i, o));
+                            }
+                        }
+                    }
+                    Operator::I32Load { memory } if memory.offset == OBJ_ELEMENTS_OFFSET => {
+                        if let Some(o) = root(args[0]) {
+                            loads.push((b, i, v, o));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let cfg = waffle::cfg::CFGInfo::new(body);
+        loads
+            .into_iter()
+            .filter(|&(b, i, _, o)| {
+                !checks.iter().any(|&(cb, ci, co)| {
+                    co == o && ((cb == b && ci < i) || (cb != b && cfg.dominates(cb, b)))
+                })
+            })
+            .map(|(b, _, v, _)| (b, v))
+            .collect()
+    }
+
+    /// `o[i] = v` (generic `js.setelem`): the dense overwrite and the
+    /// append arm read `o`'s elements only behind its native check.
+    #[test]
+    fn setelem_reads_elements_only_of_native_objects() {
+        let body = lower_mir_text(
+            "func @s3 (formals=3, locals=0, depths={0:0}) {
+  root entry b0
+b0(v0: obj{Function(s3)}, v1: val, v2: val, v3: val, v4: val):
+  js.setelem v2, v3, v4 -> ok_clean b1, ok_dirty b1, err b9
+b1:
+  v5 = const.val undefined
+  return v5
+b9:
+  v6 = const.val undefined
+  exit.throw pc=0 this=v1 args=[v2, v3, v4] locals=[] rval=v6 stack=[]
+}
+",
+            false,
+        );
+        assert_eq!(unguarded_elements_loads(&body), vec![]);
+    }
+
+    /// `o.push(v)` (a `call` in a function naming `push`): the push arm
+    /// reads `o`'s elements only behind its native check.
+    #[test]
+    fn push_reads_elements_only_of_native_objects() {
+        let body = lower_mir_text(
+            "func @s3 (formals=3, locals=0, depths={0:0}) {
+  root entry b0
+b0(v0: obj{Function(s3)}, v1: val, v2: val, v3: val, v4: val):
+  call v2, v3, v4 -> ok_clean b1(v5: val), ok_dirty b2(v8: val), err b9
+b1(v5: val):
+  return v5
+b2(v8: val):
+  return v8
+b9:
+  v7 = const.val undefined
+  exit.throw pc=0 this=v1 args=[v2, v3, v4] locals=[] rval=v7 stack=[]
+}
+",
+            true,
+        );
+        assert_eq!(unguarded_elements_loads(&body), vec![]);
+    }
+
     /// The MIR fixtures that use only lowered ops lower to a valid module:
     /// guards, overflow checks, generic ops with rooted live values and
     /// their clean/dirty/err edges, loops, returns, exits and throws.
