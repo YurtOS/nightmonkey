@@ -383,7 +383,7 @@ pub enum RtOp {
     GenFinal,
     /// Raise a `throw`/`return` resumption (`CheckResumeKind` with a kind
     /// other than next; always fails): `v, g, kind`. A return stages `v`
-    /// as the frame's rval.
+    /// as the frame's rval. Built from ff147 bytecode only.
     GenCheckResume,
     /// `AsyncAwait`/`AsyncResolve` (1 for resolve): `v, g` -> value.
     AsyncAwait(u32),
@@ -650,6 +650,8 @@ pub enum Opcode {
         initial: bool,
     },
     /// Whether `v` is the generator-closing magic (`IsGenClosing`) -> bool.
+    /// Built from ff147 bytecode only (159 has neither the op nor the
+    /// magic).
     IsGenClosing,
     /// An exit from an inlined callee's code (§5.5), with an `exit`'s
     /// operands for the callee's frame: finish the callee in its baseline

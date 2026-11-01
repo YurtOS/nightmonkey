@@ -163,8 +163,8 @@ impl<'s, 'a> Run<'s, 'a> {
     /// The `Resume` root for resume index `index` at landing `pc`: the
     /// frame as the resume restored it, all `Val(⊤)`, guarded up to the
     /// types the slots had at the yield (`before`, whose top `popped`
-    /// values the yield consumed; the landing's three resume values are
-    /// `Val(⊤)`). The walk goes on from there; a miss exits at the landing.
+    /// values the yield consumed; the landing's resume values,
+    /// `RESUME_VALUES` of them (3 on ff147, 2 on ff159), are `Val(⊤)`). The walk goes on from there; a miss exits at the landing.
     pub(super) fn resume_root(
         &mut self,
         index: u32,

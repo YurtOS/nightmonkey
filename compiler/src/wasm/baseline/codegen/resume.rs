@@ -369,8 +369,9 @@ impl<'a> Gen<'a> {
 
     /// The generator resume entry: read the descriptor `EnterNightResume`
     /// staged, restore the frame from the generator object, push the
-    /// resume protocol's `[sent value, generator, resume kind]` at the
-    /// label's depth, and route to its landing.
+    /// resume protocol's values at the label's depth (`RESUME_VALUES`:
+    /// `[sent value, generator, resume kind]` on ff147, `[sent value,
+    /// resume kind]` on ff159), and route to its landing.
     pub(super) fn finalize_gen_dispatch(&mut self) {
         let Some(disp) = self.gen_dispatch_blk else {
             return;

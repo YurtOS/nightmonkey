@@ -38,6 +38,8 @@ uint32_t NightGenRestore(JSContext* cx, uint64_t genBits, JS::Value* locals,
                          uint32_t nlocals, JS::Value* envSlot, JS::Value* ops);
 // `CheckResumeKind`, non-Next kinds: always raises (Throw sets the pending
 // exception; Return stages the value and raises JS_GENERATOR_CLOSING).
+// 147 only (JSOP_SEMANTICS_VERSION 1): 159 has neither the op nor the
+// closing magic, and these three crash if called there.
 bool NightGenCheckResume(JSContext* cx, uint64_t genBits, uint64_t valBits,
                          uint32_t kind, JS::Value* rvalSlot);
 // The closing check: 1 when a JS_GENERATOR_CLOSING magic is pending.
