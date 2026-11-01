@@ -4353,6 +4353,129 @@ mod tests {
         s
     }
 
+    /// Where a generator resume dispatch in `body` stores the sent value
+    /// and the resume kind it reads from `EnterNightResume`'s descriptor
+    /// ([index i32, kind i32, gen, arg]): the frame offsets of the stores
+    /// of `i64.load offset=16 D` (the value) and of the boxed
+    /// `i32.load offset=4 D` (the kind), for each descriptor address `D`.
+    fn resume_value_stores(body: &waffle::FunctionBody) -> Vec<(u32, u32)> {
+        use waffle::ValueDef;
+        let def = |v: Value| body.values[body.resolve_alias(v)].clone();
+        let load_of = |v: Value, want_i64: bool, off: u32| match def(v) {
+            ValueDef::Operator(Operator::I64Load { memory }, args, _)
+                if want_i64 && memory.offset == off =>
+            {
+                Some(body.resolve_alias(body.arg_pool[args][0]))
+            }
+            ValueDef::Operator(Operator::I32Load { memory }, args, _)
+                if !want_i64 && memory.offset == off =>
+            {
+                Some(body.resolve_alias(body.arg_pool[args][0]))
+            }
+            _ => None,
+        };
+        // The descriptor address a boxed int32 of `i32.load offset=4 D` is of.
+        let kind_desc = |v: Value| {
+            let ValueDef::Operator(Operator::I64Or, args, _) = def(v) else {
+                return None;
+            };
+            body.arg_pool[args].iter().find_map(|&x| match def(x) {
+                ValueDef::Operator(Operator::I64ExtendI32U, a, _) => {
+                    load_of(body.arg_pool[a][0], false, 4)
+                }
+                _ => None,
+            })
+        };
+        let (mut args, mut kinds) = (vec![], vec![]);
+        for (_, bd) in body.blocks.entries() {
+            for &v in &bd.insts {
+                let ValueDef::Operator(Operator::I64Store { memory }, a, _) = def(v) else {
+                    continue;
+                };
+                let stored = body.arg_pool[a][1];
+                if let Some(d) = load_of(stored, true, 16) {
+                    args.push((d, memory.offset));
+                }
+                if let Some(d) = kind_desc(stored) {
+                    kinds.push((d, memory.offset));
+                }
+            }
+        }
+        let mut out: Vec<(u32, u32)> = args
+            .iter()
+            .flat_map(|&(d, ao)| {
+                kinds
+                    .iter()
+                    .filter(move |k| k.0 == d)
+                    .map(move |k| (ao, k.1))
+            })
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// A resumed initial yield's landing gets the sent value in the slot
+    /// above the saved generator and the resume kind above it (159:
+    /// `[gen] -> [gen, rval, kind]`), in baseline's resume dispatch and in
+    /// MIR's lowered one.
+    #[cfg(feature = "ff159")]
+    #[test]
+    fn ff159_resume_values_land_in_order() {
+        use crate::wasm::baseline::layout::FrameLayout;
+        let s = ff159_initial_yield_script();
+        let l = FrameLayout::of(&s);
+        let expected = vec![(l.operand(1), l.operand(2))];
+        // Baseline.
+        let (mut m, helpers) = module_with_helpers();
+        let source = Source {
+            objects: vec![],
+            global_object: None,
+            selfhosted: Vec::new(),
+            regex_programs: Vec::new(),
+        };
+        let mut atoms = AtomTable::new(Names::default());
+        let body = match translate_script(
+            &mut m,
+            helpers,
+            &source,
+            &mut atoms,
+            0,
+            &s,
+            &Options::default(),
+        )
+        .expect("translate")
+        {
+            Outcome::Compiled { body, .. } => body,
+            Outcome::Skipped(r) => panic!("skipped: {r}"),
+        };
+        assert_eq!(resume_value_stores(&body), expected, "baseline");
+        // MIR.
+        let opts = Options::default();
+        let ctx = empty_ctx(helpers, &source, &opts);
+        let names = Names::default();
+        let (mm, f) = super::super::mir::build::build(&ctx, &names, ScriptId::new(0), &s, false)
+            .expect("MIR build");
+        let mut atoms = AtomTable::new(Names::default());
+        let lowered = crate::wasm::mir::lower::lower(
+            &mut m,
+            helpers,
+            &mm,
+            &mut atoms,
+            &f,
+            l,
+            crate::wasm::mir::lower::LowerOpts {
+                is_gen: true,
+                ..Default::default()
+            },
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )
+        .expect("lower");
+        assert_eq!(resume_value_stores(&lowered.body), expected, "MIR");
+    }
+
     /// The 159 sequence compiles in baseline, whose stack layout puts the
     /// landing at the yield's depth plus the two values it defines.
     #[cfg(feature = "ff159")]
@@ -4438,6 +4561,43 @@ mod tests {
                     )
                 }
                 Outcome::Compiled { .. } => panic!("phase {phase} should not compile"),
+            }
+        }
+    }
+
+    /// MIR declines a non-evaluation import phase itself (an inlined
+    /// callee's import is never seen by its own baseline body), and builds
+    /// an evaluation-phase one.
+    #[cfg(feature = "ff159")]
+    #[test]
+    fn mir_declines_other_import_phases() {
+        let (_m, helpers) = module_with_helpers();
+        let source = Source {
+            objects: vec![],
+            global_object: None,
+            selfhosted: Vec::new(),
+            regex_programs: Vec::new(),
+        };
+        let opts = Options::default();
+        let ctx = empty_ctx(helpers, &source, &opts);
+        let names = Names::default();
+        for phase in [0u8, 1, 2] {
+            let code = vec![
+                op_byte(JSOp::GetArg),
+                0,
+                0,
+                op_byte(JSOp::Undefined),
+                op_byte(JSOp::DynamicImport),
+                phase,
+                op_byte(JSOp::Return),
+            ];
+            let s = script(code, 1);
+            let built = super::super::mir::build::build(&ctx, &names, ScriptId::new(0), &s, false);
+            match (phase, built) {
+                (IMPORT_PHASE_EVALUATION, Ok(_)) => {}
+                (IMPORT_PHASE_EVALUATION, Err(e)) => panic!("phase 1 declined: {e}"),
+                (_, Err(e)) => assert!(e.contains("DynamicImport phase"), "{e}"),
+                (_, Ok(_)) => panic!("phase {phase} built"),
             }
         }
     }
