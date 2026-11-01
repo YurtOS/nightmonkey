@@ -470,6 +470,10 @@ EnterNightStatus EnterNightResume(JSContext* cx,
     // Ran to completion (FinalYieldRval or a forced .return()).
     genObj->setClosed(cx);
   }
+  // Hand the result to the caller's rooted handle before anything below can
+  // collect garbage: `retval` is a raw word that nothing roots, and the
+  // interrupt poll can run a GC, interrupt callbacks and Debugger hooks.
+  rvalOut.set(JS::Value::fromRawBits(retval));
 #if JSOP_SEMANTICS_VERSION >= 2
   // 147 resumed async functions and async generators through interpreted
   // self-hosted code (AsyncFunctionNext and friends), whose RetRval polled
@@ -481,7 +485,6 @@ EnterNightStatus EnterNightResume(JSContext* cx,
     return EnterNightStatus::Error;
   }
 #endif
-  rvalOut.set(JS::Value::fromRawBits(retval));
   return EnterNightStatus::Ok;
 }
 

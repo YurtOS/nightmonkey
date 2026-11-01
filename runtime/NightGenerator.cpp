@@ -252,7 +252,7 @@ bool NightCanSkipAwait(JSContext* cx, uint64_t valBits, uint64_t* out) {
   // job). Never skip: the await takes the standard enqueue path.
   *out = JS::BooleanValue(false).asRawBits();
   return true;
-#endif
+#else
   RootedValue val(cx, JS::Value::fromRawBits(valBits));
   bool canSkip = false;
   if (!CanSkipAwait(cx, val, &canSkip)) {
@@ -260,6 +260,7 @@ bool NightCanSkipAwait(JSContext* cx, uint64_t valBits, uint64_t* out) {
   }
   *out = JS::BooleanValue(canSkip).asRawBits();
   return true;
+#endif
 }
 
 // `JSOp::MaybeExtractAwaitValue`: when `canSkip`, replace the awaited value
