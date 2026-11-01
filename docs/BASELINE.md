@@ -33,8 +33,8 @@ MIR.md changes that follow.
   waffle's reducifier handles that (§7).
 - **Two gates, but only one lasting.** A script runs the MIR pipeline
   only if baseline supports every op in it and the MIR builder does too.
-  Baseline supports every JSOp except `ForceInterpreter` (§6) and, in this
-  fork, the four direct-eval ops (the script is interpreted; see §6 and the
+  Baseline supports every JSOp except `ForceInterpreter` (§6; 147 only)
+  and, in this fork, the four direct-eval ops (the script is interpreted; see §6 and the
   "Direct eval" item in §7). After that its gate is vacuous and the MIR
   builder's gate is the only real one.
 
@@ -260,8 +260,17 @@ A generator resumes through the same mechanism as a MIR deopt (§4).
   saved layout is extended with the arguments-object and actuals slots,
   which lifts the "generator using arguments" gate.
 - **Resume:** baseline keeps the existing `EnterNightResume` protocol:
-  `this == JS_GENERATOR_CLOSING`, a descriptor staged at the locals, and
-  `gen_restore`. It then resumes at the yield's successor pc.
+  `this` is the resume sentinel magic (`JS_GENERATOR_CLOSING` on ff147,
+  `JS_GENERIC_MAGIC` on ff159, which has no closing magic), a descriptor
+  staged at the locals, and `gen_restore`. It then resumes at the yield's
+  successor pc with what the suspend op defines pushed (`RESUME_VALUES`):
+  `[sent value, generator, resume kind]` on ff147, where `CheckResumeKind`
+  raises a throw or a forced return (the latter as the
+  `JS_GENERATOR_CLOSING` exception that catches skip and the error
+  epilogue turns into a return); `[sent value, resume kind]` on ff159,
+  whose bytecode tests the kind itself and returns through its finallys
+  with ordinary ops (no `CheckResumeKind`, `IsGenClosing` or closing
+  unwind, `GEN_CLOSING_UNWIND`).
 
 The C++ side is unchanged.
 
@@ -343,8 +352,9 @@ The cost is one compare per loop iteration in baseline code.
 
 ## 6. Covering every JSOp
 
-Baseline supports all 242 JSOps except `ForceInterpreter`, which by
-definition means "run in the interpreter", and (in this fork) the four
+Baseline supports all JSOps (242 on ff147, 239 on ff159) except
+`ForceInterpreter` (ff147 only), which by definition means "run in the
+interpreter", and (in this fork) the four
 direct-eval ops: a script containing one is interpreted and is never inlined
 (`baseline::is_direct_eval`), because the eval reads the caller's interpreter
 frame (its `arguments`, its Debugger frame), which a compiled or inlined frame
@@ -708,8 +718,10 @@ Deviations from the plan above, and details it did not settle:
    indirection.
 5. **A script declined in `Baseline` mode is interpreted**, not
    compiled by BBV, so the lane measures baseline alone.
-6. **Baseline supports every op** except `ForceInterpreter` (§6) and, in
-   this fork, direct eval, whose scripts are interpreted.
+6. **Baseline supports every op** except `ForceInterpreter` (§6; ff147
+   only) and, in this fork, direct eval, whose scripts are interpreted.
+   On ff159 a `DynamicImport` of a phase other than evaluation
+   (`import.source`, `import.defer`) also leaves its script interpreted.
    Module ops are in B4.
 7. **Inline fast paths that decide from tags alone** (§3.1, B5). This
    amends the original "nothing else is special-cased" rule. The paths

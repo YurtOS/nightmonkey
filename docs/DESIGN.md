@@ -170,7 +170,7 @@ Each script goes through up to two compiled tiers, then the interpreter
 - **Baseline** (`wasm/baseline/`): a one-to-one translation of the bytecode
   that keeps the interpreter's frame layout. It is the correctness floor and the
   landing place of every MIR exit, so any script MIR compiles also carries a
-  baseline body. It declines a script for `ForceInterpreter`, for ops it does
+  baseline body. It declines a script for `ForceInterpreter` (ff147), for ops it does
   not support (direct eval, which needs the caller's interpreter frame), and for
   size limits; the script is then interpreted.
 - **MIR** (`mir/`, `wasm/mir/`): an SSA builder over the bytecode that uses the
@@ -179,8 +179,8 @@ Each script goes through up to two compiled tiers, then the interpreter
   describes the builder, optimizer and lowering; `docs/MIR-MEMORY.md` the memory
   and effects model, including the property-layout stamps.
 - **Interpreter**: whatever a tier declines. `--strict-coverage` rejects a
-  decline unless the reason is a designed-out one (`ForceInterpreter`, an
-  unsupported op).
+  decline unless the reason is a designed-out one (`ForceInterpreter` on
+  ff147, an unsupported op).
 
 An optimistic fact is never trusted on its own: it reaches generated code only
 through a guard, and the generic path stays correct when a guard fails.
@@ -344,8 +344,9 @@ which make waffle copy code, are what grows it (`wants_onramp`).
 
 Baseline's lowering is the run of arms in `wasm/baseline/codegen/op_*.rs`; an op
 no run handles declines the script with a `BUG:` reason. Explicit declines are
-`ForceInterpreter` and the eval variants (an `unsupported op`, because eval reads
-the caller's interpreter frame). MIR declines anything its builder does not
+`ForceInterpreter` (ff147; 159 removed the op) and the eval variants (an
+`unsupported op`, because eval reads the caller's interpreter frame), and on
+ff159 a `DynamicImport` of another phase than evaluation. MIR declines anything its builder does not
 accept, and the script falls back to baseline.
 Compiled frames are not interpreter frames, and some observable behavior
 follows from that. These are designed-out capabilities, kept covered by the
