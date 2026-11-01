@@ -677,16 +677,7 @@ impl<'a, M: MemAccess> Walker<'a, M> {
 }
 
 fn try_note_kind(raw: u32) -> Result<TryNoteKind> {
-    Ok(match raw {
-        0 => TryNoteKind::Catch,
-        1 => TryNoteKind::Finally,
-        2 => TryNoteKind::ForIn,
-        3 => TryNoteKind::Destructuring,
-        4 => TryNoteKind::ForOf,
-        5 => TryNoteKind::ForOfIterClose,
-        6 => TryNoteKind::Loop,
-        _ => bail!("invalid TryNoteKind {raw}"),
-    })
+    TryNoteKind::from_engine(raw).ok_or_else(|| anyhow!("invalid TryNoteKind {raw}"))
 }
 
 #[cfg(test)]

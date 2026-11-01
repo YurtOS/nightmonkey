@@ -16,6 +16,28 @@ pub enum TryNoteKind {
     Loop = 6,
 }
 
+impl TryNoteKind {
+    /// The kind the engine numbers `raw` (vm/StencilEnums.h). 159 removed
+    /// `ForOfIterClose` (its try-note walk no longer skips to the matching
+    /// `ForOf`), so `Loop` is 5 there, 6 in 147.
+    pub fn from_engine(raw: u32) -> Option<TryNoteKind> {
+        Some(match raw {
+            0 => TryNoteKind::Catch,
+            1 => TryNoteKind::Finally,
+            2 => TryNoteKind::ForIn,
+            3 => TryNoteKind::Destructuring,
+            4 => TryNoteKind::ForOf,
+            #[cfg(feature = "ff147")]
+            5 => TryNoteKind::ForOfIterClose,
+            #[cfg(feature = "ff147")]
+            6 => TryNoteKind::Loop,
+            #[cfg(feature = "ff159")]
+            5 => TryNoteKind::Loop,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct TryNote {
     pub kind: TryNoteKind,
