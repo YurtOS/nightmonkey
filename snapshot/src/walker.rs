@@ -688,3 +688,37 @@ fn try_note_kind(raw: u32) -> Result<TryNoteKind> {
         _ => bail!("invalid TryNoteKind {raw}"),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The engine's `TryNoteKind` numbering (vm/StencilEnums.h): 159
+    /// removed `ForOfIterClose`, so `Loop` moved from 6 to 5.
+    #[test]
+    fn try_note_kinds_are_the_engines() {
+        #[cfg(feature = "ff147")]
+        let kinds = [
+            TryNoteKind::Catch,
+            TryNoteKind::Finally,
+            TryNoteKind::ForIn,
+            TryNoteKind::Destructuring,
+            TryNoteKind::ForOf,
+            TryNoteKind::ForOfIterClose,
+            TryNoteKind::Loop,
+        ];
+        #[cfg(feature = "ff159")]
+        let kinds = [
+            TryNoteKind::Catch,
+            TryNoteKind::Finally,
+            TryNoteKind::ForIn,
+            TryNoteKind::Destructuring,
+            TryNoteKind::ForOf,
+            TryNoteKind::Loop,
+        ];
+        for (raw, kind) in kinds.iter().enumerate() {
+            assert_eq!(try_note_kind(raw as u32).unwrap(), *kind, "kind {raw}");
+        }
+        assert!(try_note_kind(kinds.len() as u32).is_err());
+    }
+}
