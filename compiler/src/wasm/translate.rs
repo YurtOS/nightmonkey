@@ -4373,6 +4373,96 @@ mod tests {
         );
     }
 
+    /// The engine's nunbox32 value types (js/public/Value.h `JSValueType`,
+    /// tag = `JSVAL_TAG_CLEAR | type`), as the patched engine of each
+    /// version defines them, with whether each is a GC thing. Written out
+    /// independently of the compiler's constants.
+    fn reference_value_types() -> [(&'static str, u32, bool); 10] {
+        #[cfg(feature = "ff147")]
+        let types = [
+            ("INT32", 0x01, false),
+            ("BOOLEAN", 0x02, false),
+            ("UNDEFINED", 0x03, false),
+            ("NULL", 0x04, false),
+            ("MAGIC", 0x05, false),
+            ("STRING", 0x06, true),
+            ("SYMBOL", 0x07, true),
+            ("PRIVATE_GCTHING", 0x08, true),
+            ("BIGINT", 0x09, true),
+            ("OBJECT", 0x0c, true),
+        ];
+        #[cfg(feature = "ff159")]
+        let types = [
+            ("INT32", 0x01, false),
+            ("BOOLEAN", 0x02, false),
+            ("UNDEFINED", 0x03, false),
+            ("NULL", 0x04, false),
+            ("MAGIC", 0x05, false),
+            ("PRIVATE_GCTHING", 0x07, true),
+            ("SYMBOL", 0x08, true),
+            ("BIGINT", 0x09, true),
+            ("OBJECT", 0x0c, true),
+            ("STRING", 0x0e, true),
+        ];
+        types.map(|(name, ty, gc)| (name, 0xFFFF_FF80 | ty, gc))
+    }
+
+    /// Each tag the compiler emits is the engine's.
+    #[test]
+    fn value_tags_are_the_engines() {
+        let tag = |name: &str| {
+            reference_value_types()
+                .iter()
+                .find(|t| t.0 == name)
+                .unwrap()
+                .1
+        };
+        assert_eq!(TAG_CLEAR, 0xFFFF_FF80);
+        for (name, ours) in [
+            ("INT32", TAG_INT32 as u32),
+            ("BOOLEAN", TAG_BOOLEAN as u32),
+            ("UNDEFINED", TAG_UNDEFINED as u32),
+            ("NULL", TAG_NULL as u32),
+            ("MAGIC", TAG_MAGIC as u32),
+            ("STRING", TAG_STRING as u32),
+            ("SYMBOL", TAG_SYMBOL as u32),
+            ("BIGINT", TAG_BIGINT_HI),
+            ("OBJECT", TAG_OBJECT as u32),
+        ] {
+            assert_eq!(ours, tag(name), "TAG_{name}");
+        }
+    }
+
+    /// The tag-range predicates the lowerings emit, over every tag and the
+    /// double space, against the engine's meaning of each tag:
+    /// a double is below `TAG_CLEAR`; a number is at or below `TAG_INT32`;
+    /// int32, boolean, undefined and null are the four tags from
+    /// `TAG_INT32` (ToBoolean's and strict equality's inline cases); a GC
+    /// thing is at or above `VAL_GCTHING_TAG_MIN` (the post-barriers).
+    #[test]
+    fn value_tag_predicates_match_the_engine() {
+        use crate::wasm::mir::abi::VAL_GCTHING_TAG_MIN;
+        let types = reference_value_types();
+        for (name, tag, gc) in types {
+            assert!(tag >= TAG_CLEAR, "{name} is not a double");
+            assert_eq!(tag >= VAL_GCTHING_TAG_MIN, gc, "{name}: is a GC thing");
+            assert_eq!(
+                tag <= TAG_INT32 as u32,
+                name == "INT32",
+                "{name}: is a number"
+            );
+            assert_eq!(
+                tag.wrapping_sub(TAG_INT32 as u32) < 4,
+                matches!(name, "INT32" | "BOOLEAN" | "UNDEFINED" | "NULL"),
+                "{name}: is an immediate with a ToBoolean inline case"
+            );
+        }
+        // Doubles (canonical NaN and the extremes of the double tag space).
+        for hi in [0u32, 0x7FF8_0000, 0xFFF0_0000, TAG_CLEAR - 1] {
+            assert!(hi < TAG_CLEAR && hi < VAL_GCTHING_TAG_MIN && hi <= TAG_INT32 as u32);
+        }
+    }
+
     /// 159's renumbering: the three removed ops (CheckResumeKind,
     /// IsGenClosing, ForceInterpreter) shift every op after them.
     #[cfg(feature = "ff159")]
