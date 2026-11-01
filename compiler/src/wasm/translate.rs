@@ -4319,6 +4319,79 @@ mod tests {
         }
     }
 
+    /// `function* g() {}` as the 159 emitter writes it: after the initial
+    /// yield the bytecode itself tests the resume kind
+    /// (`emitCheckYieldResumeKind`): Next goes on, Throw throws the sent
+    /// value, Return stores it as the frame's rval and returns.
+    #[cfg(feature = "ff159")]
+    fn ff159_initial_yield_script() -> Script {
+        let jump = |op: JSOp, off: i32| {
+            let mut v = vec![op_byte(op)];
+            v.extend(off.to_le_bytes());
+            v
+        };
+        let mut code = vec![];
+        code.push(op_byte(JSOp::Generator)); // 0: [gen]
+        code.push(op_byte(JSOp::Dup)); // 1: [gen gen]
+        code.extend([op_byte(JSOp::InitialYield), 0, 0, 0]); // 2: [gen rval kind]
+        code.extend(jump(JSOp::AfterYield, 0)); // 6
+        code.push(op_byte(JSOp::Dup)); // 11: [gen rval kind kind]
+        code.extend(jump(JSOp::JumpIfFalse, 33 - 12)); // 12: Next -> 33
+        code.extend([op_byte(JSOp::ResumeKind), 1]); // 17: [gen rval kind Throw]
+        code.push(op_byte(JSOp::StrictEq)); // 19: [gen rval isThrow]
+        code.extend(jump(JSOp::JumpIfFalse, 26 - 20)); // 20: Return -> 26
+        code.push(op_byte(JSOp::Throw)); // 25: throw rval
+        code.extend(jump(JSOp::JumpTarget, 0)); // 26: [gen rval]
+        code.push(op_byte(JSOp::SetRval)); // 31: [gen]
+        code.push(op_byte(JSOp::FinalYieldRval)); // 32
+        code.extend(jump(JSOp::JumpTarget, 0)); // 33: [gen rval kind]
+        code.extend([op_byte(JSOp::Pop), op_byte(JSOp::Pop)]); // 38: [gen]
+        code.push(op_byte(JSOp::FinalYieldRval)); // 40
+        let mut s = script(code, 0);
+        s.is_generator_or_async = true;
+        s.resume_offsets = vec![Pc::new(6)];
+        s
+    }
+
+    /// The 159 sequence compiles in baseline, whose stack layout puts the
+    /// landing at the yield's depth plus the two values it defines.
+    #[cfg(feature = "ff159")]
+    #[test]
+    fn ff159_resume_kind_check_compiles() {
+        let s = ff159_initial_yield_script();
+        let depths = super::super::baseline::layout::StackDepths::compute(&s).expect("depths");
+        assert_eq!(depths.at(Pc::new(6)), Some(1 + RESUME_VALUES));
+        match translate_plain(&s) {
+            Outcome::Compiled { .. } => {}
+            Outcome::Skipped(reason) => panic!("unexpectedly skipped: {reason}"),
+        }
+    }
+
+    /// MIR builds the 159 sequence: its resume root takes exactly the
+    /// values the resumed `InitialYield` defines ([sent value, resume
+    /// kind]) above the saved generator, and the kind test, the throw and
+    /// the return path consume them; a resume protocol pushing 147's three
+    /// values is refused at the root ("resume landing ... at depth").
+    #[cfg(feature = "ff159")]
+    #[test]
+    fn ff159_resume_kind_check_builds_in_mir() {
+        let s = ff159_initial_yield_script();
+        let (_m, helpers) = module_with_helpers();
+        let source = Source {
+            objects: vec![],
+            global_object: None,
+            selfhosted: Vec::new(),
+            regex_programs: Vec::new(),
+        };
+        let opts = Options::default();
+        let ctx = empty_ctx(helpers, &source, &opts);
+        let names = Names::default();
+        if let Err(e) = super::super::mir::build::build(&ctx, &names, ScriptId::new(0), &s, false) {
+            assert!(!e.contains("resume landing"), "{e}");
+            panic!("MIR declined the 159 sequence: {e}");
+        }
+    }
+
     /// `import(x)`: 159's DynamicImport carries an import phase operand
     /// (`ImportPhase::Evaluation` is 1); an evaluation-phase import
     /// compiles, consuming the operand.
