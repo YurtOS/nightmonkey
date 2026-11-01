@@ -1,7 +1,7 @@
 //! The engine's opcode table: the `JSOp` enum with each opcode's length and
 //! stack effect, generated from SpiderMonkey's `vm/Opcodes.h` by
 //! `scripts/gen_opcodes.py` and checked in, one file per supported engine
-//! version. A cargo feature named after the version (`ff147`, ...) selects
+//! version. A cargo feature named after the version (`ff147`, `ff159`) selects
 //! the one a build targets; exactly one must be enabled.
 //!
 //! Each table records a digest of the `Opcodes.h` it came from, and a build

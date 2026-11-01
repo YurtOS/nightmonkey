@@ -208,6 +208,21 @@ that forward it (`snapshot`, `nightmonkey`, `guest`), add its arm to
 `compiler/src/opcodes/mod.rs`, and condition the lowering changes on
 `feature = "ff153"`.
 
+Each table also records the header's `JSOP_SEMANTICS_VERSION`, which
+the engine's patch queue bumps whenever the meaning of its bytecode
+changes. CMake passes it to the C++ runtime, whose per-version code keys
+on it; `runtime/NightEngineVersion.h` checks it against the engine's and
+checks the value tags and magic payloads the compiler emits.
+
+Supported versions: `ff147` (Firefox 147, semantics 1, the default) and
+`ff159` (Firefox 159, semantics 2). `ff159` covers the bytecode
+(`cargo build --no-default-features --features ff159`,
+`-DNIGHT_ENGINE_VERSION=ff159`), but 159 also renumbered the value tags
+of strings, symbols and private GC things, which the compiler's
+`TAG_*` constants (`compiler/src/wasm/translate.rs`) still give as
+147's: a build against a 159 engine stops at the tag checks in
+`runtime/NightEngineVersion.h` until they are ported.
+
 CI (`.github/workflows/ci.yml`) runs Rust formatting, check, tests and Clippy,
 workflow lint and script regressions on pull requests and pushes to `yurt`.
 Its reusable engine workflow (`.github/workflows/engine-release.yml`)
