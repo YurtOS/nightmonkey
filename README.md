@@ -208,6 +208,44 @@ that forward it (`snapshot`, `nightmonkey`, `guest`), add its arm to
 `compiler/src/opcodes/mod.rs`, and condition the lowering changes on
 `feature = "ff153"`.
 
+Each table also records the header's `JSOP_SEMANTICS_VERSION`, which
+the engine's patch queue bumps whenever the meaning of its bytecode
+changes. CMake passes it to the C++ runtime, whose per-version code keys
+on it; `runtime/NightEngineVersion.h` checks it against the engine's and
+checks the value tags and magic payloads the compiler emits.
+
+Engine versions: `ff147` (Firefox 147, semantics 1, the default; the
+shipping engine, built and tested by CI) and `ff159` (Firefox 159,
+semantics 2; `cargo build --no-default-features --features ff159`,
+`-DNIGHT_ENGINE_VERSION=ff159`). Besides the bytecode, the version
+selects what 159 changed outside `Opcodes.h`: the value tags of strings,
+symbols and private GC things and the GC-thing tag boundary, the
+`JSWhyMagic` numbering, the `TryNoteKind` numbering (no
+`ForOfIterClose`), and the engine declarations the C++ runtime uses. On
+ff159 compiled regular expressions are declined (159 changed the
+irregexp bytecode format the translator reads), so regexes run in the
+engine's interpreter.
+
+What is verified for `ff159`: the Rust crates build and pass their tests
+and Clippy, and the C++ runtime compiles (`-fsyntax-only`, its layout
+`static_assert`s included) against the 159 headers overlaid on the 147
+release's generated headers:
+
+```
+scripts/overlay-engine-headers.py <147-release>/spidermonkey <firefox-git> <159-ref> <159 Opcodes.h> dist159
+cmake -S . -B b159 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DSPIDERMONKEY_DIST=$PWD/dist159 \
+  -DNIGHT_ENGINE_VERSION=ff159 -DNIGHT_TOOLCHAIN_ROOT=... -DNIGHT_SYSROOT=...
+scripts/syntax-check-runtime.py b159
+```
+
+Beyond that, ff159 has been built and run against a real 159.0 engine with the
+Yurt patch queue (YurtOS/yurt-firefox#33): on an EC2 box and in that
+repository's gate, which builds this tree with `NIGHT_ENGINE_VERSION=ff159` and
+runs the jit-tests in both lanes. The versioned exclude lists
+(`tests/*-ff159.txt`) record what that run showed does not apply to this build.
+Not yet verified: jstests on 159 (there is no `jstests-excludes-ff159.txt`),
+the nightly and weekly lanes, and a published 159 engine release.
+
 CI (`.github/workflows/ci.yml`) runs Rust formatting, check, tests and Clippy,
 workflow lint and script regressions on pull requests and pushes to `yurt`.
 Its reusable engine workflow (`.github/workflows/engine-release.yml`)
@@ -332,7 +370,11 @@ as `--exclude-from` / `--exclude-file`, so the same tests still run in the
 interpreter lane): tests exercising designed-out capability -- the debugger /
 frame-introspection / interrupt classes -- plus an annotated artifact class
 (GC-introspection tests sensitive to the tier's literal-string and
-allocation profile; each carries a comment). The SpiderMonkey tree carries
+allocation profile; each carries a comment). For a build configured with
+`NIGHT_ENGINE_VERSION=ff159`, `scripts/run-jit-tests.sh` also applies
+`tests/wasi-jit-test-excludes-ff159.txt` and (AOT lane)
+`tests/jit-test-excludes-ff159.txt`, so the 147 lanes keep their coverage.
+The SpiderMonkey tree carries
 no test annotations for NightMonkey. NightMonkey's own regression tests
 (`tests/jit-test/`) run in both lanes with `scripts/run-night-tests.sh`.
 

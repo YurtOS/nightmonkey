@@ -7,6 +7,9 @@ pub const ENGINE_VERSION: &str = "ff147";
 /// SHA-256 of the Opcodes.h this table was generated from.
 pub const OPCODES_H_SHA256: &str =
     "6d263a46984a467aa1eb3a31b0f27edd25caccdfd853e4479788e914f4922499";
+/// The header's JSOP_SEMANTICS_VERSION: the bytecode semantics the
+/// lowerings for this version were written against.
+pub const JSOP_SEMANTICS_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u16)]

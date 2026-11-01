@@ -27,6 +27,9 @@
 //! status: 0 = failure (no match), 1 = success (output regs filled),
 //! -2 = retry (rerun in the interpreter).
 
+// The decoder below reads 147's bytecode; 159 declines every program.
+#![cfg_attr(feature = "ff159", allow(dead_code, unused_imports))]
+
 use crate::constants::{BT_BUDGET, MAX_BT_LABELS, MAX_BYTECODE_LEN};
 use std::collections::HashMap;
 
@@ -708,6 +711,27 @@ impl Ctx {
 /// Translate one program. On success, returns the finished body for the
 /// 6-i32-param -> i32 regex ABI signature.
 pub fn translate(
+    module: &Module,
+    sig: Signature,
+    mem: Memory,
+    ci_helper: Option<Func>,
+    inp: &RegexTranslateInput,
+) -> Result<FunctionBody, String> {
+    // 159 replaced the irregexp bytecode format (regexp-bytecodes.h: typed
+    // operands, new layouts, renumbered ops); this decoder reads 147's.
+    // Declined, the regex runs in the engine's own interpreter.
+    #[cfg(feature = "ff159")]
+    {
+        let _ = (module, sig, mem, ci_helper, inp);
+        Err("the ff159 irregexp bytecode format is not translated".to_string())
+    }
+    #[cfg(feature = "ff147")]
+    translate_ff147(module, sig, mem, ci_helper, inp)
+}
+
+/// [`translate`] for 147's irregexp bytecode.
+#[cfg(feature = "ff147")]
+fn translate_ff147(
     module: &Module,
     sig: Signature,
     mem: Memory,
@@ -1634,4 +1658,53 @@ fn emit_backref(cx: &mut Ctx, op: u8, w0: u32, target_off: u32) -> Result<(), St
     cx.cur = join;
     cx.set_pos(jp_pos);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use waffle::{MemoryData, SignatureData};
+
+    fn translate_program(bytecode: &[u8]) -> Result<FunctionBody, String> {
+        let mut m = Module::empty();
+        let mem = m.memories.push(MemoryData {
+            initial_pages: 1,
+            maximum_pages: None,
+            segments: Vec::new(),
+        });
+        let sig = m.signatures.push(SignatureData {
+            params: vec![Type::I32; 6],
+            returns: vec![Type::I32],
+        });
+        let inp = RegexTranslateInput {
+            bytecode,
+            wide: false,
+            total_regs: 2,
+            output_regs: 2,
+        };
+        translate(&m, sig, mem, None, &inp)
+    }
+
+    /// A one-instruction program in this decoder's ISA (147's
+    /// regexp-bytecodes.h: FAIL 12, SUCCEED 13) translates.
+    #[cfg(feature = "ff147")]
+    #[test]
+    fn one_instruction_programs_translate() {
+        for op in [BC_FAIL, BC_SUCCEED] {
+            assert!(translate_program(&[op, 0, 0, 0]).is_ok(), "op {op}");
+        }
+    }
+
+    /// 159 replaced the irregexp bytecode format (operand types and
+    /// layouts, renumbered ops: byte 13 is FAIL there, SUCCEED here), which
+    /// this decoder does not read: every program is declined (the regex
+    /// runs in the engine's interpreter), never decoded with the 147 ISA.
+    #[cfg(feature = "ff159")]
+    #[test]
+    fn programs_are_declined() {
+        for op in [12u8, 13] {
+            let r = translate_program(&[op, 0, 0, 0]);
+            assert!(r.is_err(), "op {op} translated");
+        }
+    }
 }

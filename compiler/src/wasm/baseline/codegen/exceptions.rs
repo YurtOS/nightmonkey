@@ -37,7 +37,7 @@ impl<'a> Gen<'a> {
         }
         let saved = (self.cur, self.live);
         let b = self.fresh();
-        if self.is_gen {
+        if self.is_gen && GEN_CLOSING_UNWIND {
             // A pending generator-closing magic is a forced `.return()`
             // that finished unwinding its finallys: return rval normally
             // (the interpreter's `HandleError` for generator frames).
@@ -138,7 +138,7 @@ impl<'a> Gen<'a> {
             return t.clone();
         }
         let (closes, handler) = self.walk_try_notes(pc, depth);
-        if self.is_gen && matches!(handler, Some((_, _, false))) {
+        if self.is_gen && GEN_CLOSING_UNWIND && matches!(handler, Some((_, _, false))) {
             let t = self.gen_catch_target(pc, depth, closes, handler);
             self.exc_targets.insert((pc, depth), t.clone());
             return t;

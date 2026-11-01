@@ -69,7 +69,7 @@ class ShardInputsTests(unittest.TestCase):
 
     def test_the_inputs_are_the_shell_and_the_release_test_sources(self):
         self.assertIn("inputs.jit_tests == 'sharded'", self.package)
-        self.assertIn('tar -C "$GITHUB_WORKSPACE" -cf "$RUNNER_TEMP/shard-inputs.tar" build/bin', self.package)
+        self.assertIn('tar -C "$GITHUB_WORKSPACE" -cf "$RUNNER_TEMP/shard-inputs.tar" build/bin build/CMakeCache.txt', self.package)
         self.assertIn('tar -C "$RUNNER_TEMP/testsrc" -rf "$RUNNER_TEMP/shard-inputs.tar" js', self.package)
 
 

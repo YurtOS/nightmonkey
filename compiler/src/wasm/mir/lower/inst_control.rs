@@ -53,11 +53,17 @@ impl<'a> Lower<'a> {
             } => {
                 self.gen_suspend(inst, a, index, nargs, nlocals, initial)?;
             }
+            #[cfg(feature = "ff147")]
             Opcode::IsGenClosing => {
+                use crate::wasm::translate::MAGIC_GENERATOR_CLOSING;
                 let m = self.i64c((TAG_MAGIC << 32) | MAGIC_GENERATOR_CLOSING);
                 let r = self.bin(Operator::I64Eq, a[0], m, Type::I32);
                 self.def(inst, r);
             }
+            // 159 bytecode has no IsGenClosing (and no generator-closing
+            // magic) to build it from.
+            #[cfg(feature = "ff159")]
+            Opcode::IsGenClosing => return Err("BUG: IsGenClosing in an ff159 body".into()),
             Opcode::Exit { pc, nargs, nlocals } | Opcode::ExitThrow { pc, nargs, nlocals } => {
                 let mode = if matches!(d.op, Opcode::Exit { .. }) {
                     ResumeMode::Continue

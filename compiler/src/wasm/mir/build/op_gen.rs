@@ -73,6 +73,13 @@ impl<'s, 'a> Run<'s, 'a> {
                 self.push(r, Ty::Val(t));
             }
             DynamicImport => {
+                #[cfg(feature = "ff159")]
+                {
+                    let phase = p.next_uint8().unwrap();
+                    if phase != crate::wasm::translate::IMPORT_PHASE_EVALUATION {
+                        return Err(format!("DynamicImport phase {phase}"));
+                    }
+                }
                 let o = self.pop();
                 let s = self.pop();
                 let vals = vec![self.boxed(s), self.boxed(o)];
@@ -147,12 +154,14 @@ impl<'s, 'a> Run<'s, 'a> {
                 let v = self.const_i32(kind);
                 self.push(v, Ty::I32);
             }
+            #[cfg(feature = "ff147")]
             IsGenClosing => {
                 let x = self.top();
                 let v = self.boxed(x);
                 let b = self.inst(Opcode::IsGenClosing, vec![v], Some(MType::Bool));
                 self.push(b, Ty::Bool);
             }
+            #[cfg(feature = "ff147")]
             CheckResumeKind => {
                 // [val, gen, kind] -> [val]: next goes on; throw and return
                 // raise through the helper, which always fails.

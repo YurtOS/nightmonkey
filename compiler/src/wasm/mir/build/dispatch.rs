@@ -223,7 +223,6 @@ pub(super) fn op_family(op: JSOp) -> OpFamily {
         | JSOp::AfterYield
         | JSOp::FinalYieldRval
         | JSOp::Yield
-        | JSOp::IsGenClosing
         | JSOp::AsyncAwait
         | JSOp::AsyncResolve
         | JSOp::AsyncReject
@@ -231,7 +230,6 @@ pub(super) fn op_family(op: JSOp) -> OpFamily {
         | JSOp::CanSkipAwait
         | JSOp::MaybeExtractAwaitValue
         | JSOp::ResumeKind
-        | JSOp::CheckResumeKind
         | JSOp::Resume
         | JSOp::CheckReturn
         | JSOp::CreateSuppressedError
@@ -260,7 +258,11 @@ pub(super) fn op_family(op: JSOp) -> OpFamily {
         | JSOp::GetImport
         | JSOp::SetIntrinsic
         | JSOp::GlobalOrEvalDeclInstantiation
-        | JSOp::ForceInterpreter
         | JSOp::DebugCheckSelfHosted => OpFamily::Unsupported,
+        // Removed in 159 (JSOP_SEMANTICS_VERSION 2).
+        #[cfg(feature = "ff147")]
+        JSOp::IsGenClosing | JSOp::CheckResumeKind => OpFamily::Gen,
+        #[cfg(feature = "ff147")]
+        JSOp::ForceInterpreter => OpFamily::Unsupported,
     }
 }

@@ -1796,16 +1796,19 @@ guard hoisting (2026-09-28).**
   `Resume { index, pc }` root: the frame there, `Val(⊤)`, guarded up to
   the types the slots had at the yield (a miss exits at the landing).
   The body's entry, after the resume and onramp forks, takes a
-  generator's resume (`EnterNightResume`'s generator-closing `this`):
+  generator's resume (`EnterNightResume`'s resume-sentinel `this`):
   it dispatches on the resume index first (compares for up to four
   yields, a `br_table` past that), restores the frame with
-  `gen_restore`, pushes `[sent value, generator, resume kind]`, and
+  `gen_restore`, pushes `[sent value, generator, resume kind]` (ff147;
+  `[sent value, resume kind]` on ff159, `RESUME_VALUES`), and
   enters the root; an index with no root (a yield in catch code, which
   is baseline's) goes to baseline's own dispatch, descriptor untouched.
   Baseline's entry now takes `ARGC_RESUME_BIT` over the magic `this`
   (an exit from a resumed activation). The rest are `js.rt` ops over
-  baseline's helpers (`CheckResumeKind` raises through the helper with
-  the rval slot left to it; `FinalYieldRval` counts as an rval use).
+  baseline's helpers (on ff147, `CheckResumeKind` raises through the
+  helper with the rval slot left to it; ff159 has no `CheckResumeKind`
+  or `IsGenClosing`, its bytecode handling throw and return resumptions
+  with ordinary ops; `FinalYieldRval` counts as an rval use).
   A resume's path re-enters its loop at the header past the preheader:
   the validator allows that for blocks a `Resume` root reaches, and
   `licm`/`hoist_guards` leave such loops alone. A `for (…) yield`

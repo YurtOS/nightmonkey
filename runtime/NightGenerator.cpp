@@ -2,6 +2,7 @@
  * vim: set ts=8 sts=2 et sw=2 tw=80: */
 
 #include "builtin/Promise.h"  // js::AsyncFunctionAwait, js::CanSkipAwait, js::ExtractAwaitValue
+#include "runtime/NightEngineVersion.h"  // JSOP_SEMANTICS_VERSION
 #include "vm/AsyncFunction.h"  // js::AsyncFunctionResolve, js::AsyncFunctionReject
 #include "vm/GeneratorObject.h"
 #include "vm/JSContext.h"
@@ -117,6 +118,7 @@ uint32_t NightGenRestore(JSContext* cx, uint64_t genBits, JS::Value* locals,
   return len - nlocals;
 }
 
+#if JSOP_SEMANTICS_VERSION == 1
 // `JSOp::CheckResumeKind`, non-Next kinds (called with the operands rooted
 // in the frame). Always raises, mirroring GeneratorThrowOrReturn: Throw sets
 // the pending exception to val; Return stages val in the frame's rval slot
@@ -162,6 +164,25 @@ int32_t NightGenClosing(JSContext* cx) {
   cx->clearPendingException();
   return 1;
 }
+#else
+// 159 bytecode has no CheckResumeKind and the engine no
+// JS_GENERATOR_CLOSING: a resumed generator tests the resume kind itself
+// and returns through its finallys. The compiler emits no call to these
+// (GEN_CLOSING_UNWIND in compiler/src/wasm/translate.rs); they stay
+// exported so the helper table is the same for every engine version.
+bool NightGenCheckResume(JSContext*, uint64_t, uint64_t, uint32_t,
+                         JS::Value*) {
+  MOZ_CRASH("CheckResumeKind does not exist in this engine's bytecode");
+}
+
+int32_t NightGenIsClosing(JSContext*) {
+  MOZ_CRASH("this engine has no generator-closing magic");
+}
+
+int32_t NightGenClosing(JSContext*) {
+  MOZ_CRASH("this engine has no generator-closing magic");
+}
+#endif
 
 // `JSOp::FinalYieldRval`: the generator ran to completion; close it (the
 // interpreter's finalSuspend).
@@ -222,6 +243,16 @@ bool NightAsyncReject(JSContext* cx, uint64_t genBits, uint64_t reasonBits,
 
 // `JSOp::CanSkipAwait`: whether awaiting `value` can skip the suspension.
 bool NightCanSkipAwait(JSContext* cx, uint64_t valBits, uint64_t* out) {
+#if JSOP_SEMANTICS_VERSION >= 2
+  // 159's js::CanSkipAwait requires its caller to have established that the
+  // awaiting frame is the first frame of its activation (the interpreter's
+  // and the JITs' CanSkipAwait op do) and then inspects cx->activation(). A
+  // compiled frame is on no activation at all: the precondition never holds,
+  // and cx->activation() can be null here (a body resumed from a promise
+  // job). Never skip: the await takes the standard enqueue path.
+  *out = JS::BooleanValue(false).asRawBits();
+  return true;
+#else
   RootedValue val(cx, JS::Value::fromRawBits(valBits));
   bool canSkip = false;
   if (!CanSkipAwait(cx, val, &canSkip)) {
@@ -229,6 +260,7 @@ bool NightCanSkipAwait(JSContext* cx, uint64_t valBits, uint64_t* out) {
   }
   *out = JS::BooleanValue(canSkip).asRawBits();
   return true;
+#endif
 }
 
 // `JSOp::MaybeExtractAwaitValue`: when `canSkip`, replace the awaited value

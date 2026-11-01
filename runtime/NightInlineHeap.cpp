@@ -13,6 +13,7 @@
 #include "runtime/NightInlineHeap.h"
 
 #include "runtime/NightContext.h"
+#include "runtime/NightEngineVersion.h"  // JSOP_SEMANTICS_VERSION
 #include "builtin/MapObject.h"
 #include "vm/Iteration.h"
 #include "vm/StringType.h"
@@ -74,12 +75,29 @@ namespace night {
 // compiles this file out entirely.
 
 // --- JSObject / NativeObject header ---------------------------------------
+// 159 moved the native-object words (externalWord_, slots, elements) from
+// JS::shadow::Object to JS::shadow::NativeObject, and the string flag
+// constants from JSString to js::StringFlags; the values are unchanged.
+#if JSOP_SEMANTICS_VERSION >= 2
+using NightShadowNativeObject = JS::shadow::NativeObject;
+using NightStringFlags = js::StringFlags;
+#else
+using NightShadowNativeObject = JS::shadow::Object;
+using NightStringFlags = JSString;
+#endif
+
 static_assert(offsetof(JS::shadow::Object, shape) == 0, "SHAPE_OFFSET");
+// 159's ContextOptions is a byte shorter, which moves the state word.
+#if JSOP_SEMANTICS_VERSION >= 2
+static_assert(JSContext::offsetOfExternalCompilerState() == 140,
+              "CX_EXT_STATE_OFFSET");
+#else
 static_assert(JSContext::offsetOfExternalCompilerState() == 144,
               "CX_EXT_STATE_OFFSET");
+#endif
 static_assert(offsetof(js::nightrt::NightContextState, propIcBase) == 0,
               "CTX_PROPIC_BASE_OFFSET");
-static_assert(offsetof(JS::shadow::Object, externalWord_) == 4,
+static_assert(offsetof(NightShadowNativeObject, externalWord_) == 4,
               "OBJ_CLASS_IDX_OFFSET (the night stamp word)");
 static_assert(JSObject::offsetOfExternalWord() == 4,
               "OBJ_CLASS_IDX_OFFSET (the night stamp word)");
@@ -165,7 +183,7 @@ static_assert(MapObject::Table::Entry::offsetOfValue() == 8, "MAP_ENTRY_VALUE_OF
 static_assert(MapObject::Table::offsetOfImplDataChain() == 16, "MAP_ENTRY_CHAIN_OFFSET");
 static_assert(NormalAtom::offsetOfHash() == 20, "ATOM_HASH_OFFSET");
 static_assert(FatInlineAtom::offsetOfHash() == 28, "FAT_ATOM_HASH_OFFSET");
-static_assert(JSString::FAT_INLINE_MASK == 0xC0, "STRING_FAT_INLINE_MASK");
+static_assert(NightStringFlags::FAT_INLINE_MASK == 0xC0, "STRING_FAT_INLINE_MASK");
 static_assert(mozilla::kGoldenRatioU32 == 0x9E3779B9U, "GOLDEN_RATIO");
 
 // --- NativeIterator: the inline for-in steps ------------------------------
@@ -221,14 +239,14 @@ static_assert(JSString::offsetOfLength() == 4, "STRING_LENGTH_OFFSET");
 static_assert(sizeof(JSString) == 16, "ROPE_BYTES");
 // (The children's offsets, ROPE_LEFT_OFFSET 8 and ROPE_RIGHT_OFFSET 12, are
 // private to JSRope: NightCheckRopeLayout checks them on a real rope.)
-static_assert(JSString::INIT_ROPE_FLAGS == 0, "a rope's flags are its Latin1 bit");
-static_assert(JSString::LATIN1_CHARS_BIT == 1u << 10, "STRING_LATIN1_CHARS_BIT");
+static_assert(NightStringFlags::INIT_ROPE_FLAGS == 0, "a rope's flags are its Latin1 bit");
+static_assert(NightStringFlags::LATIN1_CHARS_BIT == 1u << 10, "STRING_LATIN1_CHARS_BIT");
 static_assert(JSString::MAX_LENGTH == (1u << 30) - 2, "STRING_MAX_LENGTH");
 static_assert(JSFatInlineString::MAX_LENGTH_LATIN1 == 24 &&
                   JSFatInlineString::MAX_LENGTH_TWO_BYTE == 12,
               "FAT_INLINE_MAX_LATIN1 / FAT_INLINE_MAX_TWO_BYTE");
-static_assert(uint32_t(JS::detail::ValueLowerInclGCThingTag) == 0xFFFFFF86u,
-              "VAL_GCTHING_TAG_MIN");
+// VAL_GCTHING_TAG_MIN (the engine's ValueLowerInclGCThingTag) differs by
+// engine version: runtime/NightEngineVersion.h checks it.
 static_assert(js::gc::ChunkStoreBufferOffset == 0, "CHUNK_STORE_BUFFER_OFFSET");
 static_assert(js::gc::ChunkMask == 0xFFFFFu, "NOT_CHUNK_MASK");
 
@@ -238,8 +256,15 @@ static_assert(js::gc::ChunkMask == 0xFFFFFu, "NOT_CHUNK_MASK");
 // NEEDS_BARRIER)`; an inline global read re-derives the global from cx each
 // access as `*(*(cx + REALM) + GLOBAL)`.
 static_assert(JSContext::offsetOfZone() == 84, "JSCONTEXT_ZONE_OFFSET");
+// 159 renamed the field (a bit set: incremental or concurrent marking);
+// the compiled pre-barrier gate tests it for nonzero either way.
+#if JSOP_SEMANTICS_VERSION >= 2
+static_assert(js::Zone::offsetOfNeedsMarkingBarrier() == 8,
+              "ZONE_NEEDS_BARRIER_OFFSET");
+#else
 static_assert(js::Zone::offsetOfNeedsIncrementalBarrier() == 8,
               "ZONE_NEEDS_BARRIER_OFFSET");
+#endif
 static_assert(JSContext::offsetOfRealm() == 88, "JSCONTEXT_REALM_OFFSET");
 static_assert(JS::Realm::offsetOfActiveGlobal() == 72, "REALM_GLOBAL_OFFSET");
 
@@ -376,7 +401,7 @@ struct RawObjectWords {
   uint32_t header;
 
   explicit RawObjectWords(const JSObject* obj) {
-    const auto* shadow = reinterpret_cast<const JS::shadow::Object*>(obj);
+    const auto* shadow = reinterpret_cast<const NightShadowNativeObject*>(obj);
     slots = uint32_t(reinterpret_cast<uintptr_t>(shadow->slots));
     elements = uint32_t(reinterpret_cast<uintptr_t>(shadow->_1));
     header = *reinterpret_cast<const uint32_t*>(

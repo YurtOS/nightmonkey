@@ -12,14 +12,21 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>  // malloc/free (regex matcher table)
+#include <bit>       // std::countl_zero
 #include <string>    // std::string, std::u16string
 #include <string.h>  // memcpy
 #include <unordered_map>  // the add-placement memo
 #include <vector>    // std::vector
 
 #include "jsapi.h"   // JS_NewPlainObject, JS_DefineFunction
-#include "jsmath.h"  // js::math_sin_fdlibm_impl, js::ecmaPow (leaf Math arms)
-#include "jsnum.h"   // js::ToNumeric
+#include "runtime/NightEngineVersion.h"  // JSOP_SEMANTICS_VERSION
+#if JSOP_SEMANTICS_VERSION >= 2
+#  include "builtin/Math.h"    // js::math_sin_fdlibm_impl, js::ecmaPow
+#  include "builtin/Number.h"  // js::ToNumeric
+#else
+#  include "jsmath.h"  // js::math_sin_fdlibm_impl, js::ecmaPow (leaf Math arms)
+#  include "jsnum.h"   // js::ToNumeric
+#endif
 
 #include "builtin/Array.h"  // js::NewDenseCopiedArray (JSOp::Rest)
 #include "builtin/RegExp.h"  // js::RegExpBuiltinExec*FromJit, IsOptimizableRegExpObject
@@ -1484,7 +1491,11 @@ static void BuildAtoms(uint32_t atom_ptr, uint32_t atom_len) {
 int32_t night_runtime_regex_ci_compare(uint32_t a_ptr, uint32_t b_ptr,
                                        uint32_t byte_len, uint32_t unicode) {
   JSContext* cx = CurrentNightContext();
+#if JSOP_SEMANTICS_VERSION >= 2
+  using MA = v8::internal::regexp::RegExpMacroAssembler;
+#else
   using MA = v8::internal::RegExpMacroAssembler;
+#endif
   js::irregexp::Isolate* iso = RtState(cx).cx->isolate;
   auto a = static_cast<v8::Address>(a_ptr);
   auto b = static_cast<v8::Address>(b_ptr);
@@ -3450,7 +3461,7 @@ uint32_t night_runtime_elem_grow(JSContext* cx, uint32_t top, uint64_t recv,
 // `guard.ctor`.
 static bool NightHasExactlyFields(js::NativeObject* obj, uint32_t w,
                                   uint32_t set) {
-  uint32_t span = set ? 32 - mozilla::CountLeadingZeroes32(set) : 0;
+  uint32_t span = set ? 32 - uint32_t(std::countl_zero(set)) : 0;
   return (w & ((1u << js::night::kCtorSetBits) - 1)) ==
              (set & ((1u << js::night::kCtorSetBits) - 1)) &&
          obj->slotSpan() == span;
@@ -3613,6 +3624,13 @@ int32_t night_runtime_method_arm(uint64_t recvBits, uint32_t cellAddr,
     return 0;
   }
   JS::PropertyKey id = (*RtNames(cx).ids)[atomId].get();
+#if JSOP_SEMANTICS_VERSION >= 2
+  // 159's object fuses do not track indexed properties (an index-like atom
+  // is an int key), and tryOptimizeConstantProperty release-asserts it.
+  if (!js::ObjectFuse::tracksPropertyKey(id)) {
+    return 0;
+  }
+#endif
   JSObject* proto = rv.toObject().staticPrototype();
   js::NativeObject* holder = nullptr;
   mozilla::Maybe<js::PropertyInfo> prop;
@@ -3654,7 +3672,11 @@ int32_t night_runtime_method_arm(uint64_t recvBits, uint32_t cellAddr,
     }
     // The flag reshaped the holder; its properties are the same.
     prop = h->lookupPure(id);
+#if JSOP_SEMANTICS_VERSION >= 2
+    if (!prop || !fuse->tryOptimizeConstantProperty(id, *prop)) {
+#else
     if (!prop || !fuse->tryOptimizeConstantProperty(*prop)) {
+#endif
       return 0;
     }
   }
@@ -4442,7 +4464,13 @@ bool night_runtime_new_object(JSContext* cx, uint32_t top, uint32_t cell,
   if (nslots > js::gc::GetGCKindSlots(kind)) {
     kind = js::gc::GetGCObjectKind(std::min<size_t>(nslots, js::NativeObject::MAX_FIXED_SLOTS));
   }
+#if JSOP_SEMANTICS_VERSION >= 2
+  js::NewObjectOptions options;
+  options.allocKind = kind;
+  JSObject* obj = js::NewPlainObject(cx, options);
+#else
   JSObject* obj = js::NewPlainObjectWithAllocKind(cx, kind);
+#endif
   if (!obj) {
     return false;
   }
@@ -7789,7 +7817,14 @@ bool night_runtime_dynamic_import(JSContext* cx, uint32_t top, uint32_t script,
   JS::RootedScript s(cx, LinMem<JSScript>(script));
   JS::RootedValue spec(cx, JS::Value::fromRawBits(specifier));
   JS::RootedValue opts(cx, JS::Value::fromRawBits(options));
+#if JSOP_SEMANTICS_VERSION >= 2
+  // The compiled tiers compile `import(x)` only (an ImportPhase other than
+  // Evaluation leaves the script interpreted).
+  JSObject* promise = js::StartDynamicModuleImport(cx, s, spec, opts,
+                                                   js::ImportPhase::Evaluation);
+#else
   JSObject* promise = js::StartDynamicModuleImport(cx, s, spec, opts);
+#endif
   if (!promise) {
     return false;
   }
@@ -7824,15 +7859,19 @@ bool night_runtime_get_import(JSContext* cx, uint32_t top, uint64_t env,
 }
 
 // The explicit-resource-management ops exist only when the engine enables
-// the proposal; without it the helpers are unreachable but still exported,
-// so the helper table is the same either way.
+// the proposal (147) or always (159, which dropped the build flag);
+// without them the helpers are unreachable but still exported, so the
+// helper table is the same either way.
+#if JSOP_SEMANTICS_VERSION >= 2 || defined(ENABLE_EXPLICIT_RESOURCE_MANAGEMENT)
+#  define NIGHT_EXPLICIT_RESOURCE_MANAGEMENT 1
+#endif
 
 // `AddDisposable`: `[val, method, needsClosure] ->`.
 bool night_runtime_add_disposable(JSContext* cx, uint32_t top, uint64_t env,
                                   uint64_t val, uint64_t method,
                                   uint64_t needsClosure, uint32_t hint) {
   SetNightTop(cx, top);
-#ifndef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
+#ifndef NIGHT_EXPLICIT_RESOURCE_MANAGEMENT
   MOZ_CRASH("AddDisposable without explicit resource management");
 #else
   JS::RootedObject envObj(cx, &JS::Value::fromRawBits(env).toObject());
@@ -7848,7 +7887,7 @@ bool night_runtime_add_disposable(JSContext* cx, uint32_t top, uint64_t env,
 bool night_runtime_take_dispose_capability(JSContext* cx, uint32_t top,
                                            uint64_t env) {
   SetNightTop(cx, top);
-#ifndef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
+#ifndef NIGHT_EXPLICIT_RESOURCE_MANAGEMENT
   MOZ_CRASH("TakeDisposeCapability without explicit resource management");
 #else
   JSObject* envObj = &JS::Value::fromRawBits(env).toObject();
@@ -7869,7 +7908,7 @@ bool night_runtime_create_suppressed_error(JSContext* cx, uint32_t top,
                                            uint64_t error,
                                            uint64_t suppressed) {
   SetNightTop(cx, top);
-#ifndef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
+#ifndef NIGHT_EXPLICIT_RESOURCE_MANAGEMENT
   MOZ_CRASH("CreateSuppressedError without explicit resource management");
 #else
   JS::RootedValue e(cx, JS::Value::fromRawBits(error));
@@ -7883,15 +7922,39 @@ bool night_runtime_create_suppressed_error(JSContext* cx, uint32_t top,
 #endif
 }
 
-// `Resume`: `[gen, val, kind] -> [result]`, the way the JITs do it
-// (jit::InterpretResume): through the self-hosted InterpretGeneratorResume,
-// which runs in the interpreter (it is ForceInterpreter) and whose own
-// `Resume` re-enters a NightMonkey generator through the resume hook.
+// `Resume`: `[gen, val, kind] -> [result]`. The suspended generator `gen`
+// (the self-hosted callers check that) runs to its next suspend point or
+// completion.
+//
+// 147: the way its JITs do it (jit::InterpretResume), through the
+// self-hosted InterpretGeneratorResume, which runs in the interpreter (it
+// is ForceInterpreter) and whose own `Resume` re-enters a NightMonkey
+// generator through the resume hook.
+//
+// 159 has neither: js::ResumeGenerator runs it, in the generator's realm
+// (as the interpreter's `Resume` enters it), and itself hands a generator
+// compiled here to the resume hook.
 bool night_runtime_resume(JSContext* cx, uint32_t top, uint64_t gen,
                           uint64_t val, uint64_t kind) {
   SetNightTop(cx, top);
   js::GeneratorResumeKind rk =
       js::IntToResumeKind(JS::Value::fromRawBits(kind).toInt32());
+#if JSOP_SEMANTICS_VERSION >= 2
+  JS::Rooted<js::AbstractGeneratorObject*> genObj(
+      cx, &JS::Value::fromRawBits(gen)
+               .toObject()
+               .as<js::AbstractGeneratorObject>());
+  JS::RootedValue v(cx, JS::Value::fromRawBits(val));
+  JS::RootedValue res(cx);
+  {
+    js::AutoRealm ar(cx, genObj);
+    if (!js::ResumeGenerator(cx, genObj, v, rk, &res)) {
+      return false;
+    }
+  }
+  WriteNightOut(top, res.get().asRawBits());
+  return true;
+#else
   JSAtom* kindAtom = js::ResumeKindToAtom(cx, rk);
   js::FixedInvokeArgs<3> args(cx);
   args[0].set(JS::Value::fromRawBits(gen));
@@ -7904,6 +7967,7 @@ bool night_runtime_resume(JSContext* cx, uint32_t top, uint64_t gen,
   }
   WriteNightOut(top, res.get().asRawBits());
   return true;
+#endif
 }
 
 // ===========================================================================

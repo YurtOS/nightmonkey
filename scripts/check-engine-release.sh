@@ -75,7 +75,7 @@ REQUIRED = [
   if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.jit_tests == 'sharded' }}
   run: |
     set -euo pipefail
-    tar -C "$GITHUB_WORKSPACE" -cf "$RUNNER_TEMP/shard-inputs.tar" build/bin
+    tar -C "$GITHUB_WORKSPACE" -cf "$RUNNER_TEMP/shard-inputs.tar" build/bin build/CMakeCache.txt
     tar -C "$RUNNER_TEMP/testsrc" -rf "$RUNNER_TEMP/shard-inputs.tar" js
     zstd -q -T0 --rm "$RUNNER_TEMP/shard-inputs.tar"
     ls -la "$RUNNER_TEMP/shard-inputs.tar.zst"

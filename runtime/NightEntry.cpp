@@ -10,6 +10,7 @@
  */
 
 #include "runtime/NightContext.h"
+#include "runtime/NightEngineVersion.h"  // kNightResumeThisMagic
 #include "runtime/NightEntry.h"
 
 #include "js/friend/StackLimits.h"            // js::ReportOverRecursed
@@ -30,6 +31,12 @@
 #include "vm/NativeObject-inl.h"  // js::ArrayObject::getDenseElement
 #include "vm/Stack-inl.h"
 
+#if JSOP_SEMANTICS_VERSION >= 2
+#  include "js/friend/MicroTask.h"  // JS::HasAnyMicroTasks
+#  include "js/Promise.h"        // JS::JobQueueMayNotBeEmpty
+#  include "vm/JSContext-inl.h"  // js::CheckForInterrupt
+#endif
+
 #ifdef ENABLE_JS_NIGHTMONKEY
 
 using namespace js;
@@ -45,6 +52,43 @@ namespace night {
 using NightFn = int32_t (*)(JSContext* cx, void* sp, uint32_t argc,
                             uint64_t* retvalOut, void* script,
                             uint64_t newTarget);
+
+#if JSOP_SEMANTICS_VERSION >= 2
+// Entering a compiled body: its frame is on no engine Activation. 159's
+// js::CanSkipAwait (builtin/Promise.cpp) lets an await skip its promise job
+// when the job queue is otherwise empty (cx->canSkipEnqueuingJobs) and the
+// awaiting frame is the first frame of the context's only activation, one
+// entered to resume a generator. Under a compiled frame that test is wrong:
+// an interpreted async generator resumed from compiled code (it.next() in a
+// compiled async function that was itself resumed from a job) sees itself
+// alone and skips its awaits, which the Debugger observes as missing
+// resumptions; and a compiled body's own CanSkipAwait cannot make the
+// interpreter's first-frame check at all (NightCanSkipAwait never skips).
+// (147 found the outermost async frame by FrameIter, which saw the
+// interpreted self-hosted resume frame under every compiled resumption.)
+// Withdraw the permission while the compiled frame is live, so every await
+// under it takes the standard enqueue path. Once it returns, the stack
+// below is as it was, so the permission is handed back -- if the queue is
+// still empty: the flag means "no job queued", and every enqueue clears it
+// (MicroTaskQueueSet::enqueueRegularMicroTask). Without the restore, a
+// compiled callback (e.g. a Debugger hook) would disable the skip for the
+// rest of an interpreted frame's job.
+class MOZ_RAII AutoCompiledFrameNoSkipAwait {
+  JSContext* cx_;
+  bool saved_;
+
+ public:
+  explicit AutoCompiledFrameNoSkipAwait(JSContext* cx)
+      : cx_(cx), saved_(cx->canSkipEnqueuingJobs) {
+    JS::JobQueueMayNotBeEmpty(cx);
+  }
+  ~AutoCompiledFrameNoSkipAwait() {
+    if (saved_ && !JS::HasAnyMicroTasks(cx_)) {
+      JS::JobQueueIsEmpty(cx_);
+    }
+  }
+};
+#endif
 
 // Build `script`'s incoming compiled-body frame on the AOT value stack and
 // dispatch to its AOT body, writing the boxed result into *rvalOut on success.
@@ -98,6 +142,9 @@ static EnterNightStatus EnterNight(JSContext* cx, JSScript* script,
   stack.setTop(frameTop);
 
   uint64_t retval = 0;
+#if JSOP_SEMANTICS_VERSION >= 2
+  AutoCompiledFrameNoSkipAwait noSkipAwait(cx);
+#endif
   NightFn fn = reinterpret_cast<NightFn>(static_cast<uintptr_t>(index));
   // The body receives its own JSScript (compiled-body ABI) so closure ops can
   // resolve function-template gcthings and build their environment, and its
@@ -164,6 +211,9 @@ static EnterNightStatus EnterNightGlobal(JSContext* cx, JSScript* script,
   stack.setTop(frameTop);
 
   uint64_t retval = 0;
+#if JSOP_SEMANTICS_VERSION >= 2
+  AutoCompiledFrameNoSkipAwait noSkipAwait(cx);
+#endif
   NightFn fn = reinterpret_cast<NightFn>(static_cast<uintptr_t>(index));
   // Global code has no new.target.
   int32_t err =
@@ -320,6 +370,9 @@ EnterNightStatus NightApplyOrCall(JSContext* cx, const Value& targetv,
 
   stack.setTop(frameTop);
   uint64_t retval = 0;
+#if JSOP_SEMANTICS_VERSION >= 2
+  AutoCompiledFrameNoSkipAwait noSkipAwait(cx);
+#endif
   NightFn fn = reinterpret_cast<NightFn>(static_cast<uintptr_t>(index));
   // apply/call forwarding is always an ordinary call: new.target = undefined.
   int32_t err =
@@ -333,6 +386,14 @@ EnterNightStatus NightApplyOrCall(JSContext* cx, const Value& targetv,
 }
 
 bool IsNightResumable(AbstractGeneratorObject* gen) {
+#if JSOP_SEMANTICS_VERSION >= 2
+  // A module (top-level await) generator holds its ModuleObject where a
+  // function generator holds its callee, and module scripts are never
+  // compiled (a Module body scope is declined).
+  if (gen->isModuleGenerator()) {
+    return false;
+  }
+#endif
   JSFunction& callee = gen->callee();
   return callee.hasBaseScript() && callee.baseScript()->hasBytecode() &&
          callee.nonLazyScript()->externalTierWord() != 0;
@@ -348,6 +409,9 @@ EnterNightStatus EnterNightResume(JSContext* cx,
                                   Handle<AbstractGeneratorObject*> genObj,
                                   HandleValue arg, HandleValue kindVal,
                                   MutableHandleValue rvalOut) {
+#if JSOP_SEMANTICS_VERSION >= 2
+  MOZ_ASSERT(!genObj->isModuleGenerator());
+#endif
   JSFunction* callee = &genObj->callee();
   JSScript* script = callee->nonLazyScript();
   uint32_t index = script->externalTierWord();
@@ -371,7 +435,7 @@ EnterNightStatus EnterNightResume(JSContext* cx,
   // The resume sentinel: a generator body's entry dispatch re-enters the
   // state machine when the frame `this` is this magic (never a legit fresh
   // `this`), avoiding an extra ABI param on every ordinary call.
-  sp[1] = JS::MagicValue(JS_GENERATOR_CLOSING);
+  sp[1] = JS::MagicValue(kNightResumeThisMagic);
   // Formal slots are never read on resume (the frontend routes formals
   // through bindings captured before InitialYield); undefined keeps the
   // scanned region valid.
@@ -387,6 +451,9 @@ EnterNightStatus EnterNightResume(JSContext* cx,
   frameTop[2] = arg;
 
   uint64_t retval = 0;
+#if JSOP_SEMANTICS_VERSION >= 2
+  AutoCompiledFrameNoSkipAwait noSkipAwait(cx);
+#endif
   NightFn fn = reinterpret_cast<NightFn>(static_cast<uintptr_t>(index));
   int32_t err =
       fn(cx, reinterpret_cast<void*>(sp), 0, &retval,
@@ -403,7 +470,21 @@ EnterNightStatus EnterNightResume(JSContext* cx,
     // Ran to completion (FinalYieldRval or a forced .return()).
     genObj->setClosed(cx);
   }
+  // Hand the result to the caller's rooted handle before anything below can
+  // collect garbage: `retval` is a raw word that nothing roots, and the
+  // interrupt poll can run a GC, interrupt callbacks and Debugger hooks.
   rvalOut.set(JS::Value::fromRawBits(retval));
+#if JSOP_SEMANTICS_VERSION >= 2
+  // 147 resumed async functions and async generators through interpreted
+  // self-hosted code (AsyncFunctionNext and friends), whose RetRval polled
+  // for an interrupt after every resumption. 159 resumes them from C++
+  // (js::ResumeGenerator), and a compiled body never polls, so an async loop
+  // in compiled code (e.g. `for await` over a sync iterator) would never
+  // service an interrupt. Poll where that return did.
+  if (!CheckForInterrupt(cx)) {
+    return EnterNightStatus::Error;
+  }
+#endif
   return EnterNightStatus::Ok;
 }
 

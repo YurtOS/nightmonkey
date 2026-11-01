@@ -11,6 +11,7 @@ license.workspace = true
 # the compiler is built for: exactly one.
 default = ["ff147"]
 ff147 = []
+ff159 = []
 parallel = ["dep:rayon"]
 
 [dependencies]

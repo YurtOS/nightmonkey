@@ -1038,8 +1038,19 @@ pub(super) const TAG_BOOLEAN: u64 = 0xFFFF_FF82;
 pub(super) const TAG_UNDEFINED: u64 = 0xFFFF_FF83;
 pub(super) const TAG_NULL: u64 = 0xFFFF_FF84;
 pub(super) const TAG_MAGIC: u64 = 0xFFFF_FF85;
+// 159 renumbered the GC-thing types (JSVAL_TYPE_PRIVATE_GCTHING 0x07,
+// SYMBOL 0x08, STRING 0x0e; 147: STRING 0x06, SYMBOL 0x07, PRIVATE_GCTHING
+// 0x08), so a string's tag is no longer the lowest GC-thing tag:
+// `VAL_GCTHING_TAG_MIN` (mir/abi.rs) is the boundary, never `TAG_STRING`.
+// runtime/NightEngineVersion.h static_asserts each against the engine.
+#[cfg(feature = "ff147")]
 pub(super) const TAG_STRING: u64 = 0xFFFF_FF86;
+#[cfg(feature = "ff147")]
 pub(super) const TAG_SYMBOL: u64 = 0xFFFF_FF87;
+#[cfg(feature = "ff159")]
+pub(super) const TAG_STRING: u64 = 0xFFFF_FF8E;
+#[cfg(feature = "ff159")]
+pub(super) const TAG_SYMBOL: u64 = 0xFFFF_FF88;
 pub(super) const TAG_BIGINT_HI: u32 = 0xFFFF_FF89;
 // `JSVAL_TAG_OBJECT` (= `JSVAL_TAG_CLEAR | JSVAL_TYPE_OBJECT` = 0xFFFFFF80|0x0c),
 // Value.h:200-212. On NUNBOX32 the low 32 bits of a boxed object Value are the
@@ -1081,16 +1092,71 @@ impl ConstValue {
     }
 }
 
-// MagicValue payloads (the low half of a TAG_MAGIC value).
-pub(super) const MAGIC_ELEMENTS_HOLE: u64 = 0;
-pub(super) const MAGIC_NO_ITER_VALUE: u64 = 1;
-pub(super) const MAGIC_IS_CONSTRUCTING: u64 = 5;
-pub(super) const MAGIC_UNINITIALIZED_LEXICAL: u64 = 10;
-/// `JS_GENERATOR_CLOSING`: staged by the interpreter's Resume hook in the
-/// frame `this` slot to mark a re-entry, and raised as a pending exception
-/// by a forced `.return()` so the enclosing finallys run (see
-/// runtime/NightGenerator.cpp).
-pub(super) const MAGIC_GENERATOR_CLOSING: u64 = 2;
+// MagicValue payloads (the low half of a TAG_MAGIC value): the engine's
+// `JSWhyMagic` numbering, which 159 changed (JS_UNINITIALIZED_LEXICAL moved
+// first, JS_GENERATOR_CLOSING removed). runtime/NightEngineVersion.h
+// static_asserts each against the engine.
+#[cfg(feature = "ff147")]
+mod magic {
+    pub(crate) const ELEMENTS_HOLE: u64 = 0;
+    pub(crate) const NO_ITER_VALUE: u64 = 1;
+    pub(crate) const GENERATOR_CLOSING: u64 = 2;
+    pub(crate) const IS_CONSTRUCTING: u64 = 5;
+    pub(crate) const UNINITIALIZED_LEXICAL: u64 = 10;
+}
+#[cfg(feature = "ff159")]
+mod magic {
+    pub(crate) const UNINITIALIZED_LEXICAL: u64 = 0;
+    pub(crate) const ELEMENTS_HOLE: u64 = 1;
+    pub(crate) const NO_ITER_VALUE: u64 = 2;
+    pub(crate) const IS_CONSTRUCTING: u64 = 5;
+    pub(crate) const ION_BAILOUT: u64 = 8;
+}
+pub(super) const MAGIC_ELEMENTS_HOLE: u64 = magic::ELEMENTS_HOLE;
+pub(super) const MAGIC_NO_ITER_VALUE: u64 = magic::NO_ITER_VALUE;
+pub(super) const MAGIC_IS_CONSTRUCTING: u64 = magic::IS_CONSTRUCTING;
+pub(super) const MAGIC_UNINITIALIZED_LEXICAL: u64 = magic::UNINITIALIZED_LEXICAL;
+/// `JS_GENERATOR_CLOSING` (147 only): raised as a pending exception by a
+/// forced `.return()` so the enclosing finallys run, and observed by
+/// `IsGenClosing` (see runtime/NightGenerator.cpp). 159 returns through
+/// ordinary bytecode instead.
+#[cfg(feature = "ff147")]
+pub(super) const MAGIC_GENERATOR_CLOSING: u64 = magic::GENERATOR_CLOSING;
+/// The resume sentinel, a magic value: `EnterNightResume`
+/// stages it in the frame `this` slot to mark a re-entry, and no call
+/// passes it as `this` (runtime/NightEngineVersion.h names the same one):
+/// `JS_GENERATOR_CLOSING` in 147. 159 has no generator-closing magic; its
+/// sentinel is `JS_ION_BAILOUT`, which only Ion creates and the wasm32
+/// engine has no Ion (not `JS_GENERIC_MAGIC`, which the runtime also
+/// returns as a failure value).
+#[cfg(feature = "ff147")]
+pub(super) const MAGIC_RESUME_THIS: u64 = magic::GENERATOR_CLOSING;
+#[cfg(feature = "ff159")]
+pub(super) const MAGIC_RESUME_THIS: u64 = magic::ION_BAILOUT;
+
+/// The values a resumed generator finds pushed at its suspend op's landing
+/// (`InitialYield`, `Yield`, `Await`): in 147 the sent value, the generator
+/// and the resume kind (`CheckResumeKind` then raises a throw or return);
+/// in 159 the sent value and the resume kind, which the bytecode itself
+/// tests (a return resumption is an ordinary `SetRval` and return through
+/// the finallys).
+#[cfg(feature = "ff147")]
+pub(super) const RESUME_VALUES: u32 = 3;
+#[cfg(feature = "ff159")]
+pub(super) const RESUME_VALUES: u32 = 2;
+
+/// Whether a forced `.return()` unwinds a generator body as a pending
+/// `JS_GENERATOR_CLOSING` exception (147: catches skip it, finallys run,
+/// the error epilogue turns it into a normal return). 159 resumes a return
+/// with ordinary bytecode (`SetRval`, then a return through the finallys),
+/// so generator bodies unwind like any other.
+pub(super) const GEN_CLOSING_UNWIND: bool = cfg!(feature = "ff147");
+
+/// `ImportPhase::Evaluation` (builtin/ModuleObject.h), the one phase of
+/// 159's `DynamicImport` operand the runtime implements (`import(x)`); a
+/// script importing another phase is interpreted.
+#[cfg(feature = "ff159")]
+pub(crate) const IMPORT_PHASE_EVALUATION: u8 = 1;
 
 // Fixed-slot object layout on wasm32 (JS_NUNBOX32). Consumed by the static
 // slot-access path; the reactor `static_assert`s these against the engine
@@ -4178,8 +4244,532 @@ mod tests {
         waffle::wasmparser::validate(&bytes).expect("emitted module validates");
     }
 
+    /// Translate `s` with an empty analysis.
+    fn translate_plain(s: &Script) -> Outcome {
+        let (mut m, helpers) = module_with_helpers();
+        let source = Source {
+            objects: vec![],
+            global_object: None,
+            selfhosted: Vec::new(),
+            regex_programs: Vec::new(),
+        };
+        let mut atoms = AtomTable::new(Names::default());
+        let outcome = translate_script(
+            &mut m,
+            helpers,
+            &source,
+            &mut atoms,
+            0,
+            s,
+            &Options::default(),
+        )
+        .expect("translate");
+        if let Outcome::Compiled { sig, body, .. } = &outcome {
+            m.funcs
+                .push(waffle::FuncDecl::Body(*sig, "f".to_string(), body.clone()));
+            let bytes = m.to_wasm_bytes().expect("serialize");
+            waffle::wasmparser::validate(&bytes).expect("emitted module validates");
+        }
+        outcome
+    }
+
+    /// A resumed generator finds exactly the values its suspending op
+    /// defines pushed at the landing (147: value, generator, resume kind;
+    /// 159: value, resume kind): the resume protocol the lowerings stage
+    /// and the engine's table agree.
+    #[test]
+    fn resume_pushes_what_the_suspend_ops_define() {
+        for op in [JSOp::InitialYield, JSOp::Yield, JSOp::Await] {
+            assert_eq!(op.ndefs(), RESUME_VALUES, "{op:?}");
+        }
+    }
+
+    /// `function* g() {}`: the generator prologue, its initial yield and
+    /// what follows a resume compile and validate.
+    #[test]
+    fn generator_initial_yield_compiles_and_validates() {
+        // Generator; Dup; InitialYield 0; AfterYield 0
+        let mut code = vec![
+            op_byte(JSOp::Generator),
+            op_byte(JSOp::Dup),
+            op_byte(JSOp::InitialYield),
+            0,
+            0,
+            0,
+            op_byte(JSOp::AfterYield),
+            0,
+            0,
+            0,
+            0,
+        ];
+        // 147: [gen, rval, gen, kind] -> CheckResumeKind -> [gen, rval].
+        #[cfg(feature = "ff147")]
+        code.push(op_byte(JSOp::CheckResumeKind));
+        // 159: [gen, rval, kind]; the bytecode itself tests the kind.
+        #[cfg(feature = "ff159")]
+        code.push(op_byte(JSOp::Pop));
+        // Pop; FinalYieldRval
+        code.extend([op_byte(JSOp::Pop), op_byte(JSOp::FinalYieldRval)]);
+        let mut s = script(code, 0);
+        s.is_generator_or_async = true;
+        s.resume_offsets = vec![Pc::new(6)];
+        match translate_plain(&s) {
+            Outcome::Compiled { .. } => {}
+            Outcome::Skipped(reason) => panic!("unexpectedly skipped: {reason}"),
+        }
+    }
+
+    /// `function* g() {}` as the 159 emitter writes it: after the initial
+    /// yield the bytecode itself tests the resume kind
+    /// (`emitCheckYieldResumeKind`): Next goes on, Throw throws the sent
+    /// value, Return stores it as the frame's rval and returns.
+    #[cfg(feature = "ff159")]
+    fn ff159_initial_yield_script() -> Script {
+        let jump = |op: JSOp, off: i32| {
+            let mut v = vec![op_byte(op)];
+            v.extend(off.to_le_bytes());
+            v
+        };
+        let mut code = vec![];
+        code.push(op_byte(JSOp::Generator)); // 0: [gen]
+        code.push(op_byte(JSOp::Dup)); // 1: [gen gen]
+        code.extend([op_byte(JSOp::InitialYield), 0, 0, 0]); // 2: [gen rval kind]
+        code.extend(jump(JSOp::AfterYield, 0)); // 6
+        code.push(op_byte(JSOp::Dup)); // 11: [gen rval kind kind]
+        code.extend(jump(JSOp::JumpIfFalse, 33 - 12)); // 12: Next -> 33
+        code.extend([op_byte(JSOp::ResumeKind), 1]); // 17: [gen rval kind Throw]
+        code.push(op_byte(JSOp::StrictEq)); // 19: [gen rval isThrow]
+        code.extend(jump(JSOp::JumpIfFalse, 26 - 20)); // 20: Return -> 26
+        code.push(op_byte(JSOp::Throw)); // 25: throw rval
+        code.extend(jump(JSOp::JumpTarget, 0)); // 26: [gen rval]
+        code.push(op_byte(JSOp::SetRval)); // 31: [gen]
+        code.push(op_byte(JSOp::FinalYieldRval)); // 32
+        code.extend(jump(JSOp::JumpTarget, 0)); // 33: [gen rval kind]
+        code.extend([op_byte(JSOp::Pop), op_byte(JSOp::Pop)]); // 38: [gen]
+        code.push(op_byte(JSOp::FinalYieldRval)); // 40
+        let mut s = script(code, 0);
+        s.is_generator_or_async = true;
+        s.resume_offsets = vec![Pc::new(6)];
+        s
+    }
+
+    /// Where a generator resume dispatch in `body` stores the sent value
+    /// and the resume kind it reads from `EnterNightResume`'s descriptor
+    /// ([index i32, kind i32, gen, arg]): the frame offsets of the stores
+    /// of `i64.load offset=16 D` (the value) and of the boxed
+    /// `i32.load offset=4 D` (the kind), for each descriptor address `D`.
+    #[cfg(feature = "ff159")]
+    fn resume_value_stores(body: &waffle::FunctionBody) -> Vec<(u32, u32)> {
+        use waffle::ValueDef;
+        let def = |v: Value| body.values[body.resolve_alias(v)].clone();
+        let load_of = |v: Value, want_i64: bool, off: u32| match def(v) {
+            ValueDef::Operator(Operator::I64Load { memory }, args, _)
+                if want_i64 && memory.offset == off =>
+            {
+                Some(body.resolve_alias(body.arg_pool[args][0]))
+            }
+            ValueDef::Operator(Operator::I32Load { memory }, args, _)
+                if !want_i64 && memory.offset == off =>
+            {
+                Some(body.resolve_alias(body.arg_pool[args][0]))
+            }
+            _ => None,
+        };
+        // The descriptor address a boxed int32 of `i32.load offset=4 D` is of.
+        let kind_desc = |v: Value| {
+            let ValueDef::Operator(Operator::I64Or, args, _) = def(v) else {
+                return None;
+            };
+            body.arg_pool[args].iter().find_map(|&x| match def(x) {
+                ValueDef::Operator(Operator::I64ExtendI32U, a, _) => {
+                    load_of(body.arg_pool[a][0], false, 4)
+                }
+                _ => None,
+            })
+        };
+        let (mut args, mut kinds) = (vec![], vec![]);
+        for (_, bd) in body.blocks.entries() {
+            for &v in &bd.insts {
+                let ValueDef::Operator(Operator::I64Store { memory }, a, _) = def(v) else {
+                    continue;
+                };
+                let stored = body.arg_pool[a][1];
+                if let Some(d) = load_of(stored, true, 16) {
+                    args.push((d, memory.offset));
+                }
+                if let Some(d) = kind_desc(stored) {
+                    kinds.push((d, memory.offset));
+                }
+            }
+        }
+        let mut out: Vec<(u32, u32)> = args
+            .iter()
+            .flat_map(|&(d, ao)| {
+                kinds
+                    .iter()
+                    .filter(move |k| k.0 == d)
+                    .map(move |k| (ao, k.1))
+            })
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// A resumed initial yield's landing gets the sent value in the slot
+    /// above the saved generator and the resume kind above it (159:
+    /// `[gen] -> [gen, rval, kind]`), in baseline's resume dispatch and in
+    /// MIR's lowered one.
+    #[cfg(feature = "ff159")]
+    #[test]
+    fn ff159_resume_values_land_in_order() {
+        use crate::wasm::baseline::layout::FrameLayout;
+        let s = ff159_initial_yield_script();
+        let l = FrameLayout::of(&s);
+        let expected = vec![(l.operand(1), l.operand(2))];
+        // Baseline.
+        let (mut m, helpers) = module_with_helpers();
+        let source = Source {
+            objects: vec![],
+            global_object: None,
+            selfhosted: Vec::new(),
+            regex_programs: Vec::new(),
+        };
+        let mut atoms = AtomTable::new(Names::default());
+        let body = match translate_script(
+            &mut m,
+            helpers,
+            &source,
+            &mut atoms,
+            0,
+            &s,
+            &Options::default(),
+        )
+        .expect("translate")
+        {
+            Outcome::Compiled { body, .. } => body,
+            Outcome::Skipped(r) => panic!("skipped: {r}"),
+        };
+        assert_eq!(resume_value_stores(&body), expected, "baseline");
+        // MIR.
+        let opts = Options::default();
+        let ctx = empty_ctx(helpers, &source, &opts);
+        let names = Names::default();
+        let (mm, f) = super::super::mir::build::build(&ctx, &names, ScriptId::new(0), &s, false)
+            .expect("MIR build");
+        let mut atoms = AtomTable::new(Names::default());
+        let lowered = crate::wasm::mir::lower::lower(
+            &mut m,
+            helpers,
+            &mm,
+            &mut atoms,
+            &f,
+            l,
+            crate::wasm::mir::lower::LowerOpts {
+                is_gen: true,
+                ..Default::default()
+            },
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )
+        .expect("lower");
+        assert_eq!(resume_value_stores(&lowered.body), expected, "MIR");
+    }
+
+    /// The 159 sequence compiles in baseline, whose stack layout puts the
+    /// landing at the yield's depth plus the two values it defines.
+    #[cfg(feature = "ff159")]
+    #[test]
+    fn ff159_resume_kind_check_compiles() {
+        let s = ff159_initial_yield_script();
+        let depths = super::super::baseline::layout::StackDepths::compute(&s).expect("depths");
+        assert_eq!(depths.at(Pc::new(6)), Some(1 + RESUME_VALUES));
+        match translate_plain(&s) {
+            Outcome::Compiled { .. } => {}
+            Outcome::Skipped(reason) => panic!("unexpectedly skipped: {reason}"),
+        }
+    }
+
+    /// MIR builds the 159 sequence: its resume root takes exactly the
+    /// values the resumed `InitialYield` defines ([sent value, resume
+    /// kind]) above the saved generator, and the kind test, the throw and
+    /// the return path consume them; a resume protocol pushing 147's three
+    /// values is refused at the root ("resume landing ... at depth").
+    #[cfg(feature = "ff159")]
+    #[test]
+    fn ff159_resume_kind_check_builds_in_mir() {
+        let s = ff159_initial_yield_script();
+        let (_m, helpers) = module_with_helpers();
+        let source = Source {
+            objects: vec![],
+            global_object: None,
+            selfhosted: Vec::new(),
+            regex_programs: Vec::new(),
+        };
+        let opts = Options::default();
+        let ctx = empty_ctx(helpers, &source, &opts);
+        let names = Names::default();
+        if let Err(e) = super::super::mir::build::build(&ctx, &names, ScriptId::new(0), &s, false) {
+            assert!(!e.contains("resume landing"), "{e}");
+            panic!("MIR declined the 159 sequence: {e}");
+        }
+    }
+
+    /// `import(x)`: 159's DynamicImport carries an import phase operand
+    /// (`ImportPhase::Evaluation` is 1); an evaluation-phase import
+    /// compiles, consuming the operand.
+    #[test]
+    fn dynamic_import_compiles_and_validates() {
+        // GetArg 0; Undefined; DynamicImport [phase]; Return
+        let mut code = vec![
+            op_byte(JSOp::GetArg),
+            0,
+            0,
+            op_byte(JSOp::Undefined),
+            op_byte(JSOp::DynamicImport),
+        ];
+        #[cfg(feature = "ff159")]
+        code.push(1);
+        code.push(op_byte(JSOp::Return));
+        match translate_plain(&script(code, 1)) {
+            Outcome::Compiled { .. } => {}
+            Outcome::Skipped(reason) => panic!("unexpectedly skipped: {reason}"),
+        }
+    }
+
+    /// `import.source(x)` / `import.defer(x)` (phases 0 and 2): the
+    /// runtime implements only the evaluation phase, so the script is
+    /// interpreted.
+    #[cfg(feature = "ff159")]
+    #[test]
+    fn dynamic_import_of_another_phase_is_skipped() {
+        for phase in [0, 2] {
+            let code = vec![
+                op_byte(JSOp::GetArg),
+                0,
+                0,
+                op_byte(JSOp::Undefined),
+                op_byte(JSOp::DynamicImport),
+                phase,
+                op_byte(JSOp::Return),
+            ];
+            match translate_plain(&script(code, 1)) {
+                Outcome::Skipped(reason) => {
+                    assert!(
+                        reason.contains(crate::wasm::baseline::UNSUPPORTED_OP),
+                        "{reason}"
+                    )
+                }
+                Outcome::Compiled { .. } => panic!("phase {phase} should not compile"),
+            }
+        }
+    }
+
+    /// MIR declines a non-evaluation import phase itself (an inlined
+    /// callee's import is never seen by its own baseline body), and builds
+    /// an evaluation-phase one.
+    #[cfg(feature = "ff159")]
+    #[test]
+    fn mir_declines_other_import_phases() {
+        let (_m, helpers) = module_with_helpers();
+        let source = Source {
+            objects: vec![],
+            global_object: None,
+            selfhosted: Vec::new(),
+            regex_programs: Vec::new(),
+        };
+        let opts = Options::default();
+        let ctx = empty_ctx(helpers, &source, &opts);
+        let names = Names::default();
+        for phase in [0u8, 1, 2] {
+            let code = vec![
+                op_byte(JSOp::GetArg),
+                0,
+                0,
+                op_byte(JSOp::Undefined),
+                op_byte(JSOp::DynamicImport),
+                phase,
+                op_byte(JSOp::Return),
+            ];
+            let s = script(code, 1);
+            let built = super::super::mir::build::build(&ctx, &names, ScriptId::new(0), &s, false);
+            match (phase, built) {
+                (IMPORT_PHASE_EVALUATION, Ok(_)) => {}
+                (IMPORT_PHASE_EVALUATION, Err(e)) => panic!("phase 1 declined: {e}"),
+                (_, Err(e)) => assert!(e.contains("DynamicImport phase"), "{e}"),
+                (_, Ok(_)) => panic!("phase {phase} built"),
+            }
+        }
+    }
+
+    /// The table this build targets is the one generated from the engine
+    /// it names, with that engine's semantics version.
+    #[test]
+    fn opcode_table_is_the_selected_engine_version() {
+        #[cfg(feature = "ff147")]
+        let expected = ("ff147", 1);
+        #[cfg(feature = "ff159")]
+        let expected = ("ff159", 2);
+        assert_eq!(
+            (
+                crate::opcodes::ENGINE_VERSION,
+                crate::opcodes::JSOP_SEMANTICS_VERSION
+            ),
+            expected
+        );
+    }
+
+    /// The engine's nunbox32 value types (js/public/Value.h `JSValueType`,
+    /// tag = `JSVAL_TAG_CLEAR | type`), as the patched engine of each
+    /// version defines them, with whether each is a GC thing. Written out
+    /// independently of the compiler's constants.
+    fn reference_value_types() -> [(&'static str, u32, bool); 10] {
+        #[cfg(feature = "ff147")]
+        let types = [
+            ("INT32", 0x01, false),
+            ("BOOLEAN", 0x02, false),
+            ("UNDEFINED", 0x03, false),
+            ("NULL", 0x04, false),
+            ("MAGIC", 0x05, false),
+            ("STRING", 0x06, true),
+            ("SYMBOL", 0x07, true),
+            ("PRIVATE_GCTHING", 0x08, true),
+            ("BIGINT", 0x09, true),
+            ("OBJECT", 0x0c, true),
+        ];
+        #[cfg(feature = "ff159")]
+        let types = [
+            ("INT32", 0x01, false),
+            ("BOOLEAN", 0x02, false),
+            ("UNDEFINED", 0x03, false),
+            ("NULL", 0x04, false),
+            ("MAGIC", 0x05, false),
+            ("PRIVATE_GCTHING", 0x07, true),
+            ("SYMBOL", 0x08, true),
+            ("BIGINT", 0x09, true),
+            ("OBJECT", 0x0c, true),
+            ("STRING", 0x0e, true),
+        ];
+        types.map(|(name, ty, gc)| (name, 0xFFFF_FF80 | ty, gc))
+    }
+
+    /// The resume sentinel staged as a generator frame's `this` must be a
+    /// magic nothing else can put there: not one `this` legitimately holds
+    /// (`JS_UNINITIALIZED_LEXICAL` in a derived constructor,
+    /// `JS_IS_CONSTRUCTING` for `new`) and not `JS_GENERIC_MAGIC`, which
+    /// the runtime returns as a failure value. 159 has no
+    /// `JS_GENERATOR_CLOSING`; `JS_ION_BAILOUT` is created only by Ion,
+    /// which the wasm32 engine does not have.
+    #[cfg(feature = "ff159")]
+    #[test]
+    fn resume_sentinel_is_a_magic_no_value_carries() {
+        // 159's JSWhyMagic, in order (js/public/Value.h).
+        let why = [
+            "UNINITIALIZED_LEXICAL",
+            "ELEMENTS_HOLE",
+            "NO_ITER_VALUE",
+            "ARG_POISON",
+            "SERIALIZE_NO_NODE",
+            "IS_CONSTRUCTING",
+            "HASH_KEY_EMPTY",
+            "ION_ERROR",
+            "ION_BAILOUT",
+            "OPTIMIZED_OUT",
+            "MISSING_ARGUMENTS",
+            "INTERRUPT_REGEXP",
+            "GENERIC_MAGIC",
+        ];
+        assert_eq!(why[MAGIC_RESUME_THIS as usize], "ION_BAILOUT");
+    }
+
+    /// Each tag the compiler emits is the engine's.
+    #[test]
+    fn value_tags_are_the_engines() {
+        let tag = |name: &str| {
+            reference_value_types()
+                .iter()
+                .find(|t| t.0 == name)
+                .unwrap()
+                .1
+        };
+        assert_eq!(TAG_CLEAR, 0xFFFF_FF80);
+        for (name, ours) in [
+            ("INT32", TAG_INT32 as u32),
+            ("BOOLEAN", TAG_BOOLEAN as u32),
+            ("UNDEFINED", TAG_UNDEFINED as u32),
+            ("NULL", TAG_NULL as u32),
+            ("MAGIC", TAG_MAGIC as u32),
+            ("STRING", TAG_STRING as u32),
+            ("SYMBOL", TAG_SYMBOL as u32),
+            ("BIGINT", TAG_BIGINT_HI),
+            ("OBJECT", TAG_OBJECT as u32),
+        ] {
+            assert_eq!(ours, tag(name), "TAG_{name}");
+        }
+    }
+
+    /// The tag-range predicates the lowerings emit, over every tag, against
+    /// the engine's meaning of each tag:
+    /// a double is below `TAG_CLEAR`; a number is at or below `TAG_INT32`;
+    /// int32, boolean, undefined and null are the four tags from
+    /// `TAG_INT32` (ToBoolean's and strict equality's inline cases); a GC
+    /// thing is at or above `VAL_GCTHING_TAG_MIN` (the post-barriers).
+    #[test]
+    fn value_tag_predicates_match_the_engine() {
+        use crate::wasm::mir::abi::VAL_GCTHING_TAG_MIN;
+        let types = reference_value_types();
+        // The engine's ValueLowerInclGCThingTag: its lowest GC-thing tag.
+        let lowest_gc = types.iter().filter(|t| t.2).map(|t| t.1).min();
+        assert_eq!(Some(VAL_GCTHING_TAG_MIN), lowest_gc);
+        for (name, tag, gc) in types {
+            assert!(tag >= TAG_CLEAR, "{name} is not a double");
+            assert_eq!(tag >= VAL_GCTHING_TAG_MIN, gc, "{name}: is a GC thing");
+            assert_eq!(
+                tag <= TAG_INT32 as u32,
+                name == "INT32",
+                "{name}: is a number"
+            );
+            assert_eq!(
+                tag.wrapping_sub(TAG_INT32 as u32) < 4,
+                matches!(name, "INT32" | "BOOLEAN" | "UNDEFINED" | "NULL"),
+                "{name}: is an immediate with a ToBoolean inline case"
+            );
+        }
+    }
+
+    /// 159's renumbering: the three removed ops (CheckResumeKind,
+    /// IsGenClosing, ForceInterpreter) shift every op after them.
+    #[cfg(feature = "ff159")]
+    #[test]
+    fn ff159_numbering() {
+        assert_eq!(
+            crate::opcodes::OPCODES_H_SHA256,
+            "ace0a53d231375492c36142be7c64043de38a17b1752ad2dc32644715ea84c0b"
+        );
+        let ops: Vec<JSOp> = (0..=255u8).filter_map(JSOp::from_byte).collect();
+        assert_eq!(ops.len(), 239);
+        for removed in ["CheckResumeKind", "IsGenClosing", "ForceInterpreter"] {
+            assert!(
+                ops.iter().all(|op| format!("{op:?}") != removed),
+                "{removed}"
+            );
+        }
+        // Before the first removal: unchanged from 147.
+        assert_eq!(JSOp::from_byte(56), Some(JSOp::DynamicImport));
+        assert_eq!(JSOp::from_byte(142), Some(JSOp::Yield));
+        // Past IsGenClosing (147: 143) and CheckResumeKind (147: 151).
+        assert_eq!(JSOp::from_byte(146), Some(JSOp::Await));
+        assert_eq!(JSOp::from_byte(149), Some(JSOp::ResumeKind));
+        assert_eq!(JSOp::from_byte(150), Some(JSOp::Resume));
+        // Past ForceInterpreter (147: 239), the last op.
+        assert_eq!(JSOp::from_byte(238), Some(JSOp::Debugger));
+        assert_eq!(JSOp::from_byte(239), None);
+    }
+
     /// A script containing an op in the bail set is skipped (left interpreted),
     /// never partially compiled. `Pow` has no compiled form yet.
+    #[cfg(feature = "ff147")]
     #[test]
     fn unsupported_op_is_skipped() {
         // GetArg 0; ForceInterpreter; Return -- ForceInterpreter is a permanent
@@ -4409,6 +4999,465 @@ mod tests {
             code.push(op_byte(Return));
             baseline_compile_and_validate(script(code, 2));
         }
+    }
+
+    /// Lower one MIR function (text) to its Wasm body.
+    fn lower_mir_text(src: &str, push_atom: bool) -> (waffle::FunctionBody, Helpers) {
+        use crate::wasm::baseline::layout::FrameLayout;
+        let mut mm = crate::mir::parse(src).expect("parse");
+        if push_atom {
+            // The push arm is emitted only where the function names `push`.
+            mm.atoms.push(crate::ids::JsString::from_chars(
+                "push".encode_utf16().collect(),
+            ));
+        }
+        let (mut m, helpers) = module_with_helpers();
+        let f = &mm.funcs[0];
+        let layout = FrameLayout::full(f.frame.formals, f.frame.locals);
+        let mut atoms = AtomTable::new(Names::default());
+        let lowered = crate::wasm::mir::lower::lower(
+            &mut m,
+            helpers,
+            &mm,
+            &mut atoms,
+            f,
+            layout,
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )
+        .expect("lower");
+        (lowered.body, helpers)
+    }
+
+    /// What [`element_safety`] found in a body.
+    #[derive(Debug, Default)]
+    struct ElementSafety {
+        /// Elements loads not behind a native guard on their object, or of
+        /// an object the oracle cannot identify, as (block, load).
+        unguarded: Vec<(waffle::Block, Value)>,
+        /// Elements loads of an identified object.
+        loads: usize,
+        /// Native guards (see below).
+        guards: usize,
+        /// Offset-12 loads from an exempt table address (see below).
+        exempt: usize,
+    }
+
+    /// Every load of an object's elements pointer (`OBJ_ELEMENTS_OFFSET`)
+    /// in `body` must be behind a native guard on that object. A
+    /// non-native object (a proxy) keeps other data at that offset: 159's
+    /// `ProxyDataLayout` has its often-null `expando` there, and the
+    /// elements header read below it traps.
+    ///
+    /// Every `i32.load` is examined whose effective offset is
+    /// `OBJ_ELEMENTS_OFFSET`: its immediate plus the constants its address
+    /// adds through chains of `add(x, K)`, `sub(x, K)` and `mul(x, 1)`, of
+    /// any depth. The address term those chains leave must be `i32.wrap_i64`
+    /// of a boxed value (the object), or one of the exempt tables the
+    /// lowerings read (`KnownCells`), else it is reported as unidentified:
+    /// - the call cell's constant address (`CALL_CELL_ADDR_PLACEHOLDER`,
+    ///   patched later): the push fixture's classify reads its word 12;
+    /// - a hash-table row `add(base, mul(and(_, mask), stride))`, `mask`
+    ///   and `stride` constants (`stride` nonzero, `mask` below 2^16, so the
+    ///   row stays in the table whatever the hashed inputs), `base` a known
+    ///   table base: `append_row`'s constant append-cache base (the push
+    ///   fixture's proto word at row offset 12) or the word at
+    ///   `strlit_slot + STRLIT_ELEM_ADD_OFF` (`elem_add_arm`'s element-add
+    ///   transition row, whose key word the setelem fixture reads at 12).
+    ///
+    /// An address of that row shape with any other base, index or stride is
+    /// examined as an object address, and fails unless it is one.
+    ///
+    /// A native guard is a block ending in `br_if` on a test of the
+    /// object: its shape's native bit (`and(flags, SHAPE_IS_NATIVE_BIT)`,
+    /// native when nonzero), or its class against one of the native class
+    /// cells the lowering reads (`clasp == load(cell)`, for `class_cells`
+    /// (address, offset) pairs: native when equal); or on `eqz` of such a
+    /// test (polarity flipped; `eqz(eqz(t))` is `t`). Its success successor
+    /// is the one taken when the object is native; a load is guarded when
+    /// that successor has the guard block as its only predecessor and
+    /// dominates the load's block, so every path to the load took the
+    /// success edge.
+    ///
+    /// Covered: the elements loads in the lowerings the fixtures below
+    /// exercise (`js.setelem`'s dense overwrite through `dense_slot` and its
+    /// append arm, the push arm). Not covered (no fixture lowers them):
+    /// `pop_arm`, `elem_addr` (LoadElem / StoreElem), `init_elem_inline`,
+    /// the arguments/array length arm (strings.rs), the for-in elements
+    /// check (iteration.rs), `LengthArray` and `StoreElem`'s own read
+    /// (inst_access.rs), and the baseline tier's dense read
+    /// (baseline/codegen.rs).
+    ///
+    /// Mutation evidence (each turns the setelem and/or push test red):
+    /// `check_native` deleted from either arm or from `dense_slot`;
+    /// computed without a branch;
+    /// branched on `eqz` (inverted); moved after the elements load; deleted
+    /// with the load's address rewritten as `or(obj, 0)` or `and(obj, -1)`;
+    /// the class test against a constant, or against the object's own
+    /// class; an extra elements read through `and(obj, 0xFFFFFFF8)` before
+    /// the guard; an extra unguarded read through the prototype
+    /// (`load(load(load(obj)))`); the real load moved before the guard
+    /// through `and(obj, -1)` with a dead guarded load left in its place; an
+    /// extra pre-guard `load(add(obj, 12), 0)`; pre-guard reads through
+    /// `add(12, mul(obj, 1))`, `add(add(obj, 4), 8)`, `sub(obj, -12)` and
+    /// `add(0, mul(obj, 1))` (with the push row's word moved to keep the
+    /// count); the call cell read rewritten as a table row over
+    /// `mul(sub(wrap(callee), base), 1)`.
+    fn element_safety(body: &waffle::FunctionBody, known: &KnownCells) -> ElementSafety {
+        use crate::wasm::mir::abi::{
+            BASESHAPE_CLASP_OFFSET, CALL_CELL_ADDR_PLACEHOLDER, OBJ_ELEMENTS_OFFSET,
+            SHAPE_BASESHAPE_OFFSET, SHAPE_IMMUTABLE_FLAGS_OFFSET, SHAPE_IS_NATIVE_BIT,
+            SHAPE_OFFSET,
+        };
+        use waffle::{Terminator, ValueDef};
+        let def = |v: Value| body.values[body.resolve_alias(v)].clone();
+        let args_of = |v: Value| match def(v) {
+            ValueDef::Operator(op, args, _) => Some((op, body.arg_pool[args].to_vec())),
+            _ => None,
+        };
+        // The boxed value an object pointer was unboxed from.
+        let root = |v: Value| match args_of(v) {
+            Some((Operator::I32WrapI64, a)) => Some(body.resolve_alias(a[0])),
+            _ => None,
+        };
+        let load_at = |v: Value, off: u32| match args_of(v) {
+            Some((Operator::I32Load { memory }, a)) if memory.offset == off => Some(a[0]),
+            _ => None,
+        };
+        let const_of = |v: Value| match args_of(v) {
+            Some((Operator::I32Const { value }, _)) => Some(value),
+            _ => None,
+        };
+        let is_const = |v: Value, k: u32| const_of(v) == Some(k);
+        // An exempt table address (see above).
+        let is_table = |v: Value| {
+            if const_of(v) == Some(CALL_CELL_ADDR_PLACEHOLDER) {
+                return true;
+            }
+            let Some((Operator::I32Add, x)) = args_of(v) else {
+                return false;
+            };
+            let base_ok = |b: Value| match (const_of(b), args_of(b)) {
+                (Some(c), _) => known.table_bases.contains(&c),
+                (None, Some((Operator::I32Load { memory }, l))) => {
+                    memory.offset == 0
+                        && const_of(l[0]).is_some_and(|c| known.table_base_cells.contains(&c))
+                }
+                _ => false,
+            };
+            let row_ok = |r: Value| {
+                let Some((Operator::I32Mul, m)) = args_of(r) else {
+                    return false;
+                };
+                [(m[0], m[1]), (m[1], m[0])].into_iter().any(|(idx, stride)| {
+                    const_of(stride).is_some_and(|k| k != 0)
+                        && matches!(args_of(idx), Some((Operator::I32And, a))
+                            if [a[0], a[1]].iter().any(|&k| const_of(k).is_some_and(|k| k < 1 << 16)))
+                })
+            };
+            (base_ok(x[0]) && row_ok(x[1])) || (base_ok(x[1]) && row_ok(x[0]))
+        };
+        // An address as (term, K): the term its `add`/`sub` constant and
+        // `mul(_, 1)` chains leave, and the constant they add.
+        let split = |mut v: Value| {
+            let mut k = 0u32;
+            for _ in 0..64 {
+                match args_of(v) {
+                    Some((Operator::I32Add, x)) => match (const_of(x[0]), const_of(x[1])) {
+                        (_, Some(c)) => (v, k) = (x[0], k.wrapping_add(c)),
+                        (Some(c), _) => (v, k) = (x[1], k.wrapping_add(c)),
+                        _ => break,
+                    },
+                    Some((Operator::I32Sub, x)) => match const_of(x[1]) {
+                        Some(c) => (v, k) = (x[0], k.wrapping_sub(c)),
+                        None => break,
+                    },
+                    Some((Operator::I32Mul, x)) => match (const_of(x[0]), const_of(x[1])) {
+                        (_, Some(1)) => v = x[0],
+                        (Some(1), _) => v = x[1],
+                        _ => break,
+                    },
+                    _ => break,
+                }
+            }
+            (v, k)
+        };
+        let clasp_of = |x: Value| {
+            load_at(x, BASESHAPE_CLASP_OFFSET)
+                .and_then(|base| load_at(base, SHAPE_BASESHAPE_OFFSET))
+                .and_then(|shape| load_at(shape, SHAPE_OFFSET))
+                .and_then(root)
+        };
+        let is_class_cell = |x: Value| match args_of(x) {
+            Some((Operator::I32Load { memory }, a)) => known
+                .class
+                .iter()
+                .any(|&(addr, off)| memory.offset == off && is_const(a[0], addr)),
+            _ => false,
+        };
+        // The object `v` is true exactly when native for, if it is a
+        // native-bit or class test.
+        let native_test = |v: Value| -> Option<Value> {
+            let (op, a) = args_of(v)?;
+            match op {
+                Operator::I32And if a.len() == 2 => {
+                    [(a[0], a[1]), (a[1], a[0])].into_iter().find_map(|(x, k)| {
+                        if !is_const(k, SHAPE_IS_NATIVE_BIT) {
+                            return None;
+                        }
+                        load_at(x, SHAPE_IMMUTABLE_FLAGS_OFFSET)
+                            .and_then(|shape| load_at(shape, SHAPE_OFFSET))
+                            .and_then(root)
+                    })
+                }
+                Operator::I32Eq if a.len() == 2 => [(a[0], a[1]), (a[1], a[0])]
+                    .into_iter()
+                    .find_map(|(x, cell)| clasp_of(x).filter(|_| is_class_cell(cell))),
+                _ => None,
+            }
+        };
+        // (object, native when the value is true) for a branch condition.
+        let condition = |mut v: Value| {
+            let mut native_if_true = true;
+            loop {
+                if let Some(o) = native_test(v) {
+                    return Some((o, native_if_true));
+                }
+                match args_of(v) {
+                    Some((Operator::I32Eqz, a)) => {
+                        v = a[0];
+                        native_if_true = !native_if_true;
+                    }
+                    _ => return None,
+                }
+            }
+        };
+        let mut out = ElementSafety::default();
+        // (object, success successor) of each native guard.
+        let mut guards = vec![];
+        let mut loads = vec![];
+        for (b, bd) in body.blocks.entries() {
+            if let Terminator::CondBr {
+                cond,
+                if_true,
+                if_false,
+            } = &bd.terminator
+            {
+                if let Some((o, native_if_true)) = condition(*cond) {
+                    let success = if native_if_true {
+                        if_true.block
+                    } else {
+                        if_false.block
+                    };
+                    if if_true.block != if_false.block && body.blocks[success].preds == [b] {
+                        guards.push((o, success));
+                    }
+                }
+            }
+            for &v in &bd.insts {
+                let Some((Operator::I32Load { memory }, a)) = args_of(v) else {
+                    continue;
+                };
+                // A table row is matched whole (its own address); anything
+                // else through its constant chains.
+                let (term, k) = if is_table(a[0]) {
+                    (a[0], 0)
+                } else {
+                    split(a[0])
+                };
+                if memory.offset.wrapping_add(k) != OBJ_ELEMENTS_OFFSET {
+                    continue;
+                }
+                match root(term) {
+                    Some(o) => loads.push((b, v, o)),
+                    None if is_table(term) => out.exempt += 1,
+                    None => out.unguarded.push((b, v)),
+                }
+            }
+        }
+        let cfg = waffle::cfg::CFGInfo::new(body);
+        out.loads = loads.len();
+        out.guards = guards.len();
+        out.unguarded.extend(
+            loads
+                .into_iter()
+                .filter(|&(b, _, o)| {
+                    !guards
+                        .iter()
+                        .any(|&(go, s)| go == o && (s == b || cfg.dominates(s, b)))
+                })
+                .map(|(b, v, _)| (b, v)),
+        );
+        out
+    }
+
+    /// The cells and tables of `h` the lowerings read (see
+    /// [`element_safety`]).
+    struct KnownCells {
+        /// Native class cells, as (address, offset): the Array class and
+        /// the arguments classes (`elements.rs`).
+        class: Vec<(u32, u32)>,
+        /// Constant table bases (`append_row`).
+        table_bases: Vec<u32>,
+        /// Constant addresses holding a table base (`elem_add_arm`).
+        table_base_cells: Vec<u32>,
+    }
+
+    fn known_cells(h: &Helpers) -> KnownCells {
+        KnownCells {
+            class: vec![
+                (h.array_class_slot, 0),
+                (h.args_class_base, 0),
+                (h.args_class_base, 4),
+            ],
+            table_bases: vec![h.append_cache_base],
+            table_base_cells: vec![h.strlit_slot + crate::region_shape::STRLIT_ELEM_ADD_OFF],
+        }
+    }
+
+    /// The oracle's class arm, on hand-built bodies: `load(obj.elements)`
+    /// behind `br_if clasp(obj) == <comparand>`.
+    #[test]
+    fn element_safety_class_arm() {
+        use crate::wasm::mir::abi::{
+            BASESHAPE_CLASP_OFFSET, OBJ_ELEMENTS_OFFSET, SHAPE_BASESHAPE_OFFSET, SHAPE_OFFSET,
+        };
+        use waffle::{BlockTarget, Terminator};
+        let (m, h) = module_with_helpers();
+        let mem = h.mem;
+        let ld = |b: &mut waffle::FunctionBody, blk, addr, off| {
+            let memory = waffle::MemoryArg {
+                align: 2,
+                offset: off,
+                memory: mem,
+            };
+            b.add_op(blk, Operator::I32Load { memory }, &[addr], &[Type::I32])
+        };
+        // `comparand` for the class test; `eqz` wraps the condition in that
+        // many `eqz`s.
+        let body_with = |comparand: &str, eqz: usize| {
+            let mut b = waffle::FunctionBody::new(&m, h.night_abi_sig2);
+            let entry = b.entry;
+            let (ok, fail) = (b.add_block(), b.add_block());
+            let boxed = b.add_op(entry, Operator::I64Const { value: 0 }, &[], &[Type::I64]);
+            let obj = b.add_op(entry, Operator::I32WrapI64, &[boxed], &[Type::I32]);
+            let shape = ld(&mut b, entry, obj, SHAPE_OFFSET);
+            let base = ld(&mut b, entry, shape, SHAPE_BASESHAPE_OFFSET);
+            let clasp = ld(&mut b, entry, base, BASESHAPE_CLASP_OFFSET);
+            let other = match comparand {
+                "cell" => {
+                    let c = b.add_op(
+                        entry,
+                        Operator::I32Const {
+                            value: h.array_class_slot,
+                        },
+                        &[],
+                        &[Type::I32],
+                    );
+                    ld(&mut b, entry, c, 0)
+                }
+                "const" => b.add_op(
+                    entry,
+                    Operator::I32Const { value: 0x1234 },
+                    &[],
+                    &[Type::I32],
+                ),
+                _ => clasp,
+            };
+            let mut eq = b.add_op(entry, Operator::I32Eq, &[clasp, other], &[Type::I32]);
+            for _ in 0..eqz {
+                eq = b.add_op(entry, Operator::I32Eqz, &[eq], &[Type::I32]);
+            }
+            b.set_terminator(
+                entry,
+                Terminator::CondBr {
+                    cond: eq,
+                    if_true: BlockTarget {
+                        block: ok,
+                        args: vec![],
+                    },
+                    if_false: BlockTarget {
+                        block: fail,
+                        args: vec![],
+                    },
+                },
+            );
+            ld(&mut b, ok, obj, OBJ_ELEMENTS_OFFSET);
+            b.set_terminator(ok, Terminator::Unreachable);
+            b.set_terminator(fail, Terminator::Unreachable);
+            b
+        };
+        let found = |r: ElementSafety| (r.unguarded.len(), r.loads, r.guards);
+        let r = element_safety(&body_with("cell", 0), &known_cells(&h));
+        assert_eq!(found(r), (0, 1, 1));
+        for wrong in ["const", "self"] {
+            let r = element_safety(&body_with(wrong, 0), &known_cells(&h));
+            assert_eq!(found(r), (1, 1, 0), "{wrong}");
+        }
+        // `eqz(eqz(t))` is `t`: still a guard on the true edge. One `eqz`
+        // flips it: the true edge (to the load) is then the failure edge.
+        let r = element_safety(&body_with("cell", 2), &known_cells(&h));
+        assert_eq!(found(r), (0, 1, 1));
+        let r = element_safety(&body_with("cell", 1), &known_cells(&h));
+        assert_eq!(found(r), (1, 1, 1));
+    }
+
+    /// `o[i] = v` (generic `js.setelem`): the dense overwrite and the
+    /// append arm read `o`'s elements only behind its native check.
+    #[test]
+    fn setelem_reads_elements_only_of_native_objects() {
+        let (body, h) = lower_mir_text(
+            "func @s3 (formals=3, locals=0, depths={0:0}) {
+  root entry b0
+b0(v0: obj{Function(s3)}, v1: val, v2: val, v3: val, v4: val):
+  js.setelem v2, v3, v4 -> ok_clean b1, ok_dirty b1, err b9
+b1:
+  v5 = const.val undefined
+  return v5
+b9:
+  v6 = const.val undefined
+  exit.throw pc=0 this=v1 args=[v2, v3, v4] locals=[] rval=v6 stack=[]
+}
+",
+            false,
+        );
+        let r = element_safety(&body, &known_cells(&h));
+        assert_eq!(r.unguarded, vec![]);
+        // The dense overwrite (dense_slot) and the append arm, each behind
+        // its own native-bit guard: fewer means the oracle lost track.
+        assert!(r.loads >= 2 && r.guards >= 2, "{r:?}");
+        // `elem_add_arm`'s element-add transition row (its key word).
+        assert_eq!(r.exempt, 1, "{r:?}");
+    }
+
+    /// `o.push(v)` (a `call` in a function naming `push`): the push arm
+    /// reads `o`'s elements only behind its native check.
+    #[test]
+    fn push_reads_elements_only_of_native_objects() {
+        let (body, h) = lower_mir_text(
+            "func @s3 (formals=3, locals=0, depths={0:0}) {
+  root entry b0
+b0(v0: obj{Function(s3)}, v1: val, v2: val, v3: val, v4: val):
+  call v2, v3, v4 -> ok_clean b1(v5: val), ok_dirty b2(v8: val), err b9
+b1(v5: val):
+  return v5
+b2(v8: val):
+  return v8
+b9:
+  v7 = const.val undefined
+  exit.throw pc=0 this=v1 args=[v2, v3, v4] locals=[] rval=v7 stack=[]
+}
+",
+            true,
+        );
+        let r = element_safety(&body, &known_cells(&h));
+        assert_eq!(r.unguarded, vec![]);
+        // The push arm's load behind its native-bit guard.
+        assert!(r.loads >= 1 && r.guards >= 1, "{r:?}");
+        // The classify call cell and `append_row`'s proto word.
+        assert_eq!(r.exempt, 2, "{r:?}");
     }
 
     /// The MIR fixtures that use only lowered ops lower to a valid module:

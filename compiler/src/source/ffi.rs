@@ -432,16 +432,7 @@ pub extern "C" fn night_source_script_add_try_note(
     length: u32,
 ) {
     let script = SourceObjectId::new(script);
-    let kind = match kind {
-        0 => bytecode::TryNoteKind::Catch,
-        1 => bytecode::TryNoteKind::Finally,
-        2 => bytecode::TryNoteKind::ForIn,
-        3 => bytecode::TryNoteKind::Destructuring,
-        4 => bytecode::TryNoteKind::ForOf,
-        5 => bytecode::TryNoteKind::ForOfIterClose,
-        6 => bytecode::TryNoteKind::Loop,
-        _ => panic!("invalid TryNoteKind"),
-    };
+    let kind = bytecode::TryNoteKind::from_engine(u32::from(kind)).expect("invalid TryNoteKind");
     let note = bytecode::TryNote {
         kind,
         stack_depth,

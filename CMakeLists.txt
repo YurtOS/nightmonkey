@@ -143,6 +143,19 @@ project(nightmonkey C CXX)
 set(NIGHT_CXX_FLAGS ${SM_CXX_CMD} ${SM_OS_CXXFLAGS} ${SM_OPTIMIZE_FLAGS}
     ${SM_DEBUG_FLAGS} ${SM_EXTRA_CXXFLAGS})
 set(NIGHT_DEFINES ENABLE_JS_NIGHTMONKEY=1)
+# The bytecode semantics version of the selected opcode table, for the C++
+# runtime's per-version code (runtime/NightEngineVersion.h, which checks it
+# against the engine's JSOP_SEMANTICS_VERSION).
+set(NIGHT_OPCODE_TABLE "${CMAKE_SOURCE_DIR}/compiler/src/opcodes/${NIGHT_ENGINE_VERSION}.rs")
+if(NOT EXISTS "${NIGHT_OPCODE_TABLE}")
+  message(FATAL_ERROR "NIGHT_ENGINE_VERSION=${NIGHT_ENGINE_VERSION}: no opcode table ${NIGHT_OPCODE_TABLE}")
+endif()
+file(STRINGS "${NIGHT_OPCODE_TABLE}" NIGHT_SEMANTICS_LINE
+     REGEX "^pub const JSOP_SEMANTICS_VERSION: u32 = [0-9]+")
+if(NOT NIGHT_SEMANTICS_LINE MATCHES "^pub const JSOP_SEMANTICS_VERSION: u32 = ([0-9]+)")
+  message(FATAL_ERROR "${NIGHT_OPCODE_TABLE} records no JSOP_SEMANTICS_VERSION: regenerate it with scripts/gen_opcodes.py")
+endif()
+list(APPEND NIGHT_DEFINES "NIGHT_JSOP_SEMANTICS_VERSION=${CMAKE_MATCH_1}")
 foreach(d ${SM_DEBUG_DEFINES})
   list(APPEND NIGHT_DEFINES "${d}=1")
 endforeach()

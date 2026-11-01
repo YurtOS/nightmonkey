@@ -9,6 +9,7 @@ license.workspace = true
 default = ["ff147", "parallel"]
 # Engine version (see compiler/src/opcodes/): exactly one.
 ff147 = ["night-compiler/ff147", "night-snapshot/ff147"]
+ff159 = ["night-compiler/ff159", "night-snapshot/ff159"]
 parallel = ["dep:rayon", "night-compiler/parallel", "waffle/parallel"]
 wizen = ["dep:wizer", "dep:libc"]
 

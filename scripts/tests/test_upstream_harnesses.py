@@ -35,7 +35,10 @@ class UpstreamHarnessTests(unittest.TestCase):
             harness = self.firefox / "js/src" / upstream
             harness.parent.mkdir(parents=True)
             harness.write_text(
-                'import os, sys\nprint(os.environ["HARNESS_OUTPUT"])\n'
+                'import os, shutil, sys\nprint(os.environ["HARNESS_OUTPUT"])\n'
+                'if "EXCLUDES_COPY" in os.environ and "--exclude-from" in sys.argv:\n'
+                '    shutil.copyfile(sys.argv[sys.argv.index("--exclude-from") + 1],\n'
+                '                    os.environ["EXCLUDES_COPY"])\n'
                 'sys.exit(int(os.environ.get("HARNESS_STATUS", "0")))\n'
             )
 
@@ -51,6 +54,39 @@ class UpstreamHarnessTests(unittest.TestCase):
             env={**os.environ, "HARNESS_OUTPUT": output, "HARNESS_STATUS": str(status)},
             capture_output=True, text=True, check=False,
         )
+
+    def jit_excludes(self, version, lane_env):
+        """The exclusion list run-jit-tests.sh hands jit_test.py for a build
+        configured for engine `version` (None: no CMake cache)."""
+        tests = self.root / "tests"
+        (tests / "wasi-jit-test-excludes.txt").write_text("both.js\n")
+        (tests / "jit-test-excludes.txt").write_text("aot.js\n")
+        (tests / "wasi-jit-test-excludes-ff159.txt").write_text("both159.js\n")
+        (tests / "jit-test-excludes-ff159.txt").write_text("aot159.js\n")
+        cache = self.build / "CMakeCache.txt"
+        if version:
+            cache.write_text(f"NIGHT_ENGINE_VERSION:STRING={version}\n")
+        elif cache.exists():
+            cache.unlink()
+        copy = self.root / "excludes-copy"
+        result = subprocess.run(
+            ["bash", str(self.scripts / "run-jit-tests.sh"), str(self.firefox), str(self.build)],
+            env={**os.environ, **lane_env, "EXCLUDES_COPY": str(copy),
+                 "HARNESS_OUTPUT": "TEST-PASS | a.js\nPASSED ALL\nPassed: 1\nFailed: 0"},
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return copy.read_text().split()
+
+    def test_jit_excludes_are_scoped_to_the_build_engine_version(self):
+        # A version's own lists apply only to builds for that engine (a test
+        # 159 changed must not lose its 147 coverage); the AOT lists only to
+        # the AOT lane.
+        aot, interp = {}, {"NIGHT_INPROCESS_OFF": "1"}
+        self.assertEqual(self.jit_excludes("ff159", aot), ["both.js", "both159.js", "aot.js", "aot159.js"])
+        self.assertEqual(self.jit_excludes("ff159", interp), ["both.js", "both159.js"])
+        self.assertEqual(self.jit_excludes("ff147", aot), ["both.js", "aot.js"])
+        self.assertEqual(self.jit_excludes(None, aot), ["both.js", "aot.js"])
 
     def test_jit_accepts_its_own_positive_summary(self):
         result = self.run_wrapper("jit", "TEST-PASS | first.js\nTEST-PASS | second.js\nPASSED ALL\nPassed: 2\nFailed: 0")

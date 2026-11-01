@@ -1,0 +1,18 @@
+# Additions to jit-test-excludes.txt (the AOT lane only) for builds against
+# the Firefox 159 engine (NIGHT_ENGINE_VERSION=ff159; scripts/run-jit-tests.sh).
+# One path per line, relative to js/src/jit-test/tests; a comment gives the
+# reason. None is in 147's tree.
+
+# Compiled frames are absent from captured stacks (same family as
+# errors/capture-stack.js and errors/capture-stack-jit.js).
+cacheir/bound-function-stack-walk.js
+errors/stack-trace-limit.js
+structured-clone/bug2004509.js
+test_oom_comprehensive.js
+
+# AOT value stack is traced conservatively (no scope-note liveness): a dead
+# module stays alive (same family as gc/bug-1603330.js).
+debug/bug-2061782.js
+
+# AOT string literals are pinned atoms (same family as gc/bug-1997896.js).
+gc/bug2045307.js

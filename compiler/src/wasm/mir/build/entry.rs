@@ -163,8 +163,9 @@ impl<'s, 'a> Run<'s, 'a> {
     /// The `Resume` root for resume index `index` at landing `pc`: the
     /// frame as the resume restored it, all `Val(⊤)`, guarded up to the
     /// types the slots had at the yield (`before`, whose top `popped`
-    /// values the yield consumed; the landing's three resume values are
-    /// `Val(⊤)`). The walk goes on from there; a miss exits at the landing.
+    /// values the yield consumed; the landing's resume values,
+    /// `RESUME_VALUES` of them (3 on ff147, 2 on ff159), are `Val(⊤)`).
+    /// The walk goes on from there; a miss exits at the landing.
     pub(super) fn resume_root(
         &mut self,
         index: u32,
@@ -179,10 +180,11 @@ impl<'s, 'a> Run<'s, 'a> {
             .at(pc)
             .ok_or("resume landing without a stack depth")? as usize;
         let saved = before.len() - fl - popped;
-        if depth != saved + 3 {
+        let pushed = crate::wasm::translate::RESUME_VALUES as usize;
+        if depth != saved + pushed {
             return Err(format!(
                 "BUG: resume landing {pc} at depth {depth}, not {}",
-                saved + 3
+                saved + pushed
             ));
         }
         let live = self.s.live.get(&pc).cloned();
@@ -192,7 +194,7 @@ impl<'s, 'a> Run<'s, 'a> {
                 *t = Ty::Dead;
             }
         }
-        tys.extend([Ty::Val(TagSet::ALL); 3]);
+        tys.extend(std::iter::repeat_n(Ty::Val(TagSet::ALL), pushed));
         let o = self.new_block();
         self.f.roots.push(Root {
             kind: RootKind::Resume { index, pc },

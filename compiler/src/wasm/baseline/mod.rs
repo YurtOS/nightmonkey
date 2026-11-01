@@ -106,6 +106,7 @@ pub fn build_body(
     resumes: &[layout::ResumeWord],
     onramps: &[(crate::ids::Pc, Vec<layout::ResumeWord>)],
 ) -> Result<Result<Built, String>, String> {
+    #[cfg(feature = "ff147")]
     if script
         .parser()
         .opcodes()

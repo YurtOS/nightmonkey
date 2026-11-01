@@ -1,7 +1,7 @@
 //! The engine's opcode table: the `JSOp` enum with each opcode's length and
 //! stack effect, generated from SpiderMonkey's `vm/Opcodes.h` by
 //! `scripts/gen_opcodes.py` and checked in, one file per supported engine
-//! version. A cargo feature named after the version (`ff147`, ...) selects
+//! version. A cargo feature named after the version (`ff147`, `ff159`) selects
 //! the one a build targets; exactly one must be enabled.
 //!
 //! Each table records a digest of the `Opcodes.h` it came from, and a build
@@ -17,8 +17,18 @@ mod ff147;
 #[cfg(feature = "ff147")]
 pub use ff147::*;
 
-#[cfg(not(any(feature = "ff147")))]
+#[cfg(feature = "ff159")]
+mod ff159;
+#[cfg(feature = "ff159")]
+pub use ff159::*;
+
+#[cfg(not(any(feature = "ff147", feature = "ff159")))]
 compile_error!(
     "night-compiler: select an engine version by enabling exactly one of the \
-     `ff147` features (compiler/src/opcodes/)"
+     `ff147`, `ff159` features (compiler/src/opcodes/)"
+);
+#[cfg(all(feature = "ff147", feature = "ff159"))]
+compile_error!(
+    "night-compiler: the `ff147` and `ff159` engine versions are exclusive; \
+     build a non-default version with `--no-default-features --features <version>`"
 );

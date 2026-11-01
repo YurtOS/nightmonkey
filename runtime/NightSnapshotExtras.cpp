@@ -6,6 +6,7 @@
 // (forced irregexp bytecode compilation), plus their serialization into the
 // registration block for the external `nightmonkey` transform.
 
+#include "runtime/NightEngineVersion.h"  // JSOP_SEMANTICS_VERSION
 #include "runtime/NightSnapshotExtras.h"
 #include "runtime/NightHooks.h"
 
@@ -145,6 +146,12 @@ bool js::night::CollectRegexPrograms(
     JSContext* cx, JS::Handle<JSScript*> root,
     std::set<std::pair<std::u16string, uint32_t>>& seen,
     std::vector<night::NightRegexProgram>& out) {
+#if JSOP_SEMANTICS_VERSION >= 2
+  // None on 159: the compiler does not translate its irregexp bytecode
+  // (compiler/src/wasm/regex.rs), so compiling every literal to hand it
+  // over would only cost time.
+  return true;
+#endif
   JS::Rooted<GCVector<JSScript*, 0, SystemAllocPolicy>> worklist(cx);
   if (!worklist.append(root)) {
     return false;
