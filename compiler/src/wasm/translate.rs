@@ -5051,15 +5051,24 @@ mod tests {
     /// `ProxyDataLayout` has its often-null `expando` there, and the
     /// elements header read below it traps.
     ///
-    /// Every `i32.load` whose effective offset is `OBJ_ELEMENTS_OFFSET` (its
-    /// immediate, or its immediate plus `K` when the address is
-    /// `add(x, K)` for a constant `K`) is examined. Its address must be
-    /// `i32.wrap_i64` of a boxed value (the object), or one of two exempt
-    /// table forms, else it is reported as unidentified:
-    /// - a constant (a call cell's `CALL_CELL_ADDR_PLACEHOLDER` address);
-    /// - an append-cache row as `append_row` emits it: `add(base, mul(index,
-    ///   stride))`, `base` a constant or a load from a constant, `stride` a
-    ///   constant.
+    /// Every `i32.load` is examined whose effective offset is
+    /// `OBJ_ELEMENTS_OFFSET`: its immediate plus the constants its address
+    /// adds through chains of `add(x, K)`, `sub(x, K)` and `mul(x, 1)`, of
+    /// any depth. The address term those chains leave must be `i32.wrap_i64`
+    /// of a boxed value (the object), or one of the exempt tables the
+    /// lowerings read (`KnownCells`), else it is reported as unidentified:
+    /// - the call cell's constant address (`CALL_CELL_ADDR_PLACEHOLDER`,
+    ///   patched later): the push fixture's classify reads its word 12;
+    /// - a hash-table row `add(base, mul(and(_, mask), stride))`, `mask`
+    ///   and `stride` constants (`stride` nonzero, `mask` below 2^16, so the
+    ///   row stays in the table whatever the hashed inputs), `base` a known
+    ///   table base: `append_row`'s constant append-cache base (the push
+    ///   fixture's proto word at row offset 12) or the word at
+    ///   `strlit_slot + STRLIT_ELEM_ADD_OFF` (`elem_add_arm`'s element-add
+    ///   transition row, whose key word the setelem fixture reads at 12).
+    ///
+    /// An address of that row shape with any other base, index or stride is
+    /// examined as an object address, and fails unless it is one.
     ///
     /// A native guard is a block ending in `br_if` on a test of the
     /// object: its shape's native bit (`and(flags, SHAPE_IS_NATIVE_BIT)`,
@@ -5078,10 +5087,12 @@ mod tests {
     /// `pop_arm`, `elem_addr` (LoadElem / StoreElem), `init_elem_inline`,
     /// the arguments/array length arm (strings.rs), the for-in elements
     /// check (iteration.rs), `LengthArray` and `StoreElem`'s own read
-    /// (inst_access.rs).
+    /// (inst_access.rs), and the baseline tier's dense read
+    /// (baseline/codegen.rs).
     ///
     /// Mutation evidence (each turns the setelem and/or push test red):
-    /// `check_native` deleted from either arm; computed without a branch;
+    /// `check_native` deleted from either arm or from `dense_slot`;
+    /// computed without a branch;
     /// branched on `eqz` (inverted); moved after the elements load; deleted
     /// with the load's address rewritten as `or(obj, 0)` or `and(obj, -1)`;
     /// the class test against a constant, or against the object's own
@@ -5089,11 +5100,16 @@ mod tests {
     /// the guard; an extra unguarded read through the prototype
     /// (`load(load(load(obj)))`); the real load moved before the guard
     /// through `and(obj, -1)` with a dead guarded load left in its place; an
-    /// extra pre-guard `load(add(obj, 12), 0)`.
-    fn element_safety(body: &waffle::FunctionBody, class_cells: &[(u32, u32)]) -> ElementSafety {
+    /// extra pre-guard `load(add(obj, 12), 0)`; pre-guard reads through
+    /// `add(12, mul(obj, 1))`, `add(add(obj, 4), 8)`, `sub(obj, -12)` and
+    /// `add(0, mul(obj, 1))` (with the push row's word moved to keep the
+    /// count); the call cell read rewritten as a table row over
+    /// `mul(sub(wrap(callee), base), 1)`.
+    fn element_safety(body: &waffle::FunctionBody, known: &KnownCells) -> ElementSafety {
         use crate::wasm::mir::abi::{
-            BASESHAPE_CLASP_OFFSET, OBJ_ELEMENTS_OFFSET, SHAPE_BASESHAPE_OFFSET,
-            SHAPE_IMMUTABLE_FLAGS_OFFSET, SHAPE_IS_NATIVE_BIT, SHAPE_OFFSET,
+            BASESHAPE_CLASP_OFFSET, CALL_CELL_ADDR_PLACEHOLDER, OBJ_ELEMENTS_OFFSET,
+            SHAPE_BASESHAPE_OFFSET, SHAPE_IMMUTABLE_FLAGS_OFFSET, SHAPE_IS_NATIVE_BIT,
+            SHAPE_OFFSET,
         };
         use waffle::{Terminator, ValueDef};
         let def = |v: Value| body.values[body.resolve_alias(v)].clone();
@@ -5115,23 +5131,58 @@ mod tests {
             _ => None,
         };
         let is_const = |v: Value, k: u32| const_of(v) == Some(k);
-        // The exempt table addresses (see above).
+        // An exempt table address (see above).
         let is_table = |v: Value| {
-            if const_of(v).is_some() {
+            if const_of(v) == Some(CALL_CELL_ADDR_PLACEHOLDER) {
                 return true;
             }
             let Some((Operator::I32Add, x)) = args_of(v) else {
                 return false;
             };
-            let base_ok = |b: Value| {
-                const_of(b).is_some()
-                    || matches!(args_of(b), Some((Operator::I32Load { .. }, l)) if const_of(l[0]).is_some())
+            let base_ok = |b: Value| match (const_of(b), args_of(b)) {
+                (Some(c), _) => known.table_bases.contains(&c),
+                (None, Some((Operator::I32Load { memory }, l))) => {
+                    memory.offset == 0
+                        && const_of(l[0]).is_some_and(|c| known.table_base_cells.contains(&c))
+                }
+                _ => false,
             };
             let row_ok = |r: Value| {
-                matches!(args_of(r), Some((Operator::I32Mul, m))
-                    if const_of(m[0]).is_some() || const_of(m[1]).is_some())
+                let Some((Operator::I32Mul, m)) = args_of(r) else {
+                    return false;
+                };
+                [(m[0], m[1]), (m[1], m[0])].into_iter().any(|(idx, stride)| {
+                    const_of(stride).is_some_and(|k| k != 0)
+                        && matches!(args_of(idx), Some((Operator::I32And, a))
+                            if [a[0], a[1]].iter().any(|&k| const_of(k).is_some_and(|k| k < 1 << 16)))
+                })
             };
             (base_ok(x[0]) && row_ok(x[1])) || (base_ok(x[1]) && row_ok(x[0]))
+        };
+        // An address as (term, K): the term its `add`/`sub` constant and
+        // `mul(_, 1)` chains leave, and the constant they add.
+        let split = |mut v: Value| {
+            let mut k = 0u32;
+            for _ in 0..64 {
+                match args_of(v) {
+                    Some((Operator::I32Add, x)) => match (const_of(x[0]), const_of(x[1])) {
+                        (_, Some(c)) => (v, k) = (x[0], k.wrapping_add(c)),
+                        (Some(c), _) => (v, k) = (x[1], k.wrapping_add(c)),
+                        _ => break,
+                    },
+                    Some((Operator::I32Sub, x)) => match const_of(x[1]) {
+                        Some(c) => (v, k) = (x[0], k.wrapping_sub(c)),
+                        None => break,
+                    },
+                    Some((Operator::I32Mul, x)) => match (const_of(x[0]), const_of(x[1])) {
+                        (_, Some(1)) => v = x[0],
+                        (Some(1), _) => v = x[1],
+                        _ => break,
+                    },
+                    _ => break,
+                }
+            }
+            (v, k)
         };
         let clasp_of = |x: Value| {
             load_at(x, BASESHAPE_CLASP_OFFSET)
@@ -5140,7 +5191,8 @@ mod tests {
                 .and_then(root)
         };
         let is_class_cell = |x: Value| match args_of(x) {
-            Some((Operator::I32Load { memory }, a)) => class_cells
+            Some((Operator::I32Load { memory }, a)) => known
+                .class
                 .iter()
                 .any(|&(addr, off)| memory.offset == off && is_const(a[0], addr)),
             _ => false,
@@ -5208,34 +5260,19 @@ mod tests {
                 let Some((Operator::I32Load { memory }, a)) = args_of(v) else {
                     continue;
                 };
-                // The address whose word at `OBJ_ELEMENTS_OFFSET` this
-                // reads: the load's own, or `x` of an `add(x, K)` address
-                // that the immediate completes to that offset.
-                let addr = if memory.offset == OBJ_ELEMENTS_OFFSET {
-                    a[0]
+                // A table row is matched whole (its own address); anything
+                // else through its constant chains.
+                let (term, k) = if is_table(a[0]) {
+                    (a[0], 0)
                 } else {
-                    match args_of(a[0]) {
-                        Some((Operator::I32Add, x)) if !is_table(a[0]) => {
-                            match (const_of(x[0]), const_of(x[1])) {
-                                (_, Some(k))
-                                    if memory.offset.wrapping_add(k) == OBJ_ELEMENTS_OFFSET =>
-                                {
-                                    x[0]
-                                }
-                                (Some(k), _)
-                                    if memory.offset.wrapping_add(k) == OBJ_ELEMENTS_OFFSET =>
-                                {
-                                    x[1]
-                                }
-                                _ => continue,
-                            }
-                        }
-                        _ => continue,
-                    }
+                    split(a[0])
                 };
-                match root(addr) {
+                if memory.offset.wrapping_add(k) != OBJ_ELEMENTS_OFFSET {
+                    continue;
+                }
+                match root(term) {
                     Some(o) => loads.push((b, v, o)),
-                    None if is_table(addr) => out.exempt += 1,
+                    None if is_table(term) => out.exempt += 1,
                     None => out.unguarded.push((b, v)),
                 }
             }
@@ -5256,14 +5293,28 @@ mod tests {
         out
     }
 
-    /// The native class cells the lowering compares a class against
-    /// (`elements.rs`: the Array class, and the arguments classes).
-    fn class_cells(h: &Helpers) -> Vec<(u32, u32)> {
-        vec![
-            (h.array_class_slot, 0),
-            (h.args_class_base, 0),
-            (h.args_class_base, 4),
-        ]
+    /// The cells and tables of `h` the lowerings read (see
+    /// [`element_safety`]).
+    struct KnownCells {
+        /// Native class cells, as (address, offset): the Array class and
+        /// the arguments classes (`elements.rs`).
+        class: Vec<(u32, u32)>,
+        /// Constant table bases (`append_row`).
+        table_bases: Vec<u32>,
+        /// Constant addresses holding a table base (`elem_add_arm`).
+        table_base_cells: Vec<u32>,
+    }
+
+    fn known_cells(h: &Helpers) -> KnownCells {
+        KnownCells {
+            class: vec![
+                (h.array_class_slot, 0),
+                (h.args_class_base, 0),
+                (h.args_class_base, 4),
+            ],
+            table_bases: vec![h.append_cache_base],
+            table_base_cells: vec![h.strlit_slot + crate::region_shape::STRLIT_ELEM_ADD_OFF],
+        }
     }
 
     /// The oracle's class arm, on hand-built bodies: `load(obj.elements)`
@@ -5339,17 +5390,17 @@ mod tests {
             b
         };
         let found = |r: ElementSafety| (r.unguarded.len(), r.loads, r.guards);
-        let r = element_safety(&body_with("cell", 0), &class_cells(&h));
+        let r = element_safety(&body_with("cell", 0), &known_cells(&h));
         assert_eq!(found(r), (0, 1, 1));
         for wrong in ["const", "self"] {
-            let r = element_safety(&body_with(wrong, 0), &class_cells(&h));
+            let r = element_safety(&body_with(wrong, 0), &known_cells(&h));
             assert_eq!(found(r), (1, 1, 0), "{wrong}");
         }
         // `eqz(eqz(t))` is `t`: still a guard on the true edge. One `eqz`
         // flips it: the true edge (to the load) is then the failure edge.
-        let r = element_safety(&body_with("cell", 2), &class_cells(&h));
+        let r = element_safety(&body_with("cell", 2), &known_cells(&h));
         assert_eq!(found(r), (0, 1, 1));
-        let r = element_safety(&body_with("cell", 1), &class_cells(&h));
+        let r = element_safety(&body_with("cell", 1), &known_cells(&h));
         assert_eq!(found(r), (1, 1, 1));
     }
 
@@ -5372,12 +5423,12 @@ b9:
 ",
             false,
         );
-        let r = element_safety(&body, &class_cells(&h));
+        let r = element_safety(&body, &known_cells(&h));
         assert_eq!(r.unguarded, vec![]);
         // The dense overwrite (dense_slot) and the append arm, each behind
         // its own native-bit guard: fewer means the oracle lost track.
         assert!(r.loads >= 2 && r.guards >= 2, "{r:?}");
-        // The append arm's cache row.
+        // `elem_add_arm`'s element-add transition row (its key word).
         assert_eq!(r.exempt, 1, "{r:?}");
     }
 
@@ -5401,11 +5452,11 @@ b9:
 ",
             true,
         );
-        let r = element_safety(&body, &class_cells(&h));
+        let r = element_safety(&body, &known_cells(&h));
         assert_eq!(r.unguarded, vec![]);
         // The push arm's load behind its native-bit guard.
         assert!(r.loads >= 1 && r.guards >= 1, "{r:?}");
-        // The call cell and the append cache row.
+        // The classify call cell and `append_row`'s proto word.
         assert_eq!(r.exempt, 2, "{r:?}");
     }
 
