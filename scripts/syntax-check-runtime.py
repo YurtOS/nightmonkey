@@ -20,8 +20,23 @@ import sys
 from pathlib import Path
 
 
+def include_dirs(dirs):
+    """The overlay include directories, absolute (the compiles run in the
+    build's directories); a missing one is an error."""
+    out = []
+    for d in dirs:
+        path = Path(d).resolve()
+        if not path.is_dir():
+            raise SystemExit(f"--include-dir {d}: not a directory")
+        out.append(str(path))
+    return out
+
+
 def command_for(entry, overlay):
-    args = shlex.split(entry["command"])
+    """The entry's compile as a syntax-only check: without its output and
+    -c, with the overlay include directories first among the compiler's
+    flags (after any launcher such as ccache)."""
+    args = list(entry["arguments"]) if "arguments" in entry else shlex.split(entry["command"])
     out = []
     skip = False
     for a in args:
@@ -31,10 +46,11 @@ def command_for(entry, overlay):
         if a == "-o":
             skip = True
             continue
-        if a == "-c":
+        if a == "-c" or (a.startswith("-o") and len(a) > 2):
             continue
         out.append(a)
-    out = out[:1] + [f"-I{d}" for d in overlay] + out[1:]
+    first_flag = next((i for i, a in enumerate(out) if a.startswith("-")), len(out))
+    out = out[:first_flag] + [f"-I{d}" for d in overlay] + out[first_flag:]
     return out + ["-fsyntax-only", "-ferror-limit=50"]
 
 
@@ -45,20 +61,34 @@ def main():
     parser.add_argument("--jobs", type=int, default=8)
     parser.add_argument("--filter", default="", help="only files whose path contains this")
     args = parser.parse_args()
+    overlay = include_dirs(args.include_dir)
     entries = json.loads((args.build / "compile_commands.json").read_text())
     entries = [e for e in entries if args.filter in e["file"]]
     if not entries:
         raise SystemExit("no compile commands")
 
+    def label(entry):
+        # The object file names a translation unit uniquely (a source built
+        # into two targets, such as the shell's, has one per target).
+        if "output" in entry:
+            return entry["output"]
+        args = list(entry["arguments"]) if "arguments" in entry else shlex.split(entry["command"])
+        for i, a in enumerate(args):
+            if a == "-o" and i + 1 < len(args):
+                return args[i + 1]
+            if a.startswith("-o") and len(a) > 2:
+                return a[2:]
+        return entry["file"]
+
     def run(entry):
-        r = subprocess.run(command_for(entry, args.include_dir), cwd=entry["directory"],
+        r = subprocess.run(command_for(entry, overlay), cwd=entry["directory"],
                            capture_output=True, text=True)
-        return entry["file"], r.returncode, r.stderr
+        return label(entry), r.returncode, r.stderr
 
     failed = 0
     with concurrent.futures.ThreadPoolExecutor(args.jobs) as pool:
         for path, status, err in pool.map(run, entries):
-            name = Path(path).name
+            name = path
             if status == 0:
                 print(f"ok    {name}")
             else:

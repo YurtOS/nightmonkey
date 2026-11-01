@@ -229,7 +229,14 @@ engine's interpreter.
 What is verified for `ff159`: the Rust crates build and pass their tests
 and Clippy, and the C++ runtime compiles (`-fsyntax-only`, its layout
 `static_assert`s included) against the 159 headers overlaid on the 147
-release's generated headers (`scripts/syntax-check-runtime.py`). Not
+release's generated headers:
+
+```
+scripts/overlay-engine-headers.py <147-release>/spidermonkey <firefox-git> <159-ref> <159 Opcodes.h> dist159
+cmake -S . -B b159 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DSPIDERMONKEY_DIST=$PWD/dist159 \
+  -DNIGHT_ENGINE_VERSION=ff159 -DNIGHT_TOOLCHAIN_ROOT=... -DNIGHT_SYSROOT=...
+scripts/syntax-check-runtime.py b159
+``` Not
 yet verified: a build and link against a real 159 engine release, and
 any JavaScript execution (local regressions, jit-tests, jstests) on it.
 
