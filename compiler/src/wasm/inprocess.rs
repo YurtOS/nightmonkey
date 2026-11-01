@@ -776,6 +776,8 @@ mod tests {
         (out, n_allocs, reserved)
     }
 
+    // A compiled matcher needs 147's irregexp bytecode (159's is declined).
+    #[cfg(feature = "ff147")]
     #[test]
     fn regex_matcher_uses_reserved_base_and_preserves_missing_variant() {
         let mut source = toy_source();

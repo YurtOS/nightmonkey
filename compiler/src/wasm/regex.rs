@@ -27,6 +27,9 @@
 //! status: 0 = failure (no match), 1 = success (output regs filled),
 //! -2 = retry (rerun in the interpreter).
 
+// The decoder below reads 147's bytecode; 159 declines every program.
+#![cfg_attr(feature = "ff159", allow(dead_code, unused_imports))]
+
 use crate::constants::{BT_BUDGET, MAX_BT_LABELS, MAX_BYTECODE_LEN};
 use std::collections::HashMap;
 
@@ -708,6 +711,27 @@ impl Ctx {
 /// Translate one program. On success, returns the finished body for the
 /// 6-i32-param -> i32 regex ABI signature.
 pub fn translate(
+    module: &Module,
+    sig: Signature,
+    mem: Memory,
+    ci_helper: Option<Func>,
+    inp: &RegexTranslateInput,
+) -> Result<FunctionBody, String> {
+    // 159 replaced the irregexp bytecode format (regexp-bytecodes.h: typed
+    // operands, new layouts, renumbered ops); this decoder reads 147's.
+    // Declined, the regex runs in the engine's own interpreter.
+    #[cfg(feature = "ff159")]
+    {
+        let _ = (module, sig, mem, ci_helper, inp);
+        Err("the ff159 irregexp bytecode format is not translated".to_string())
+    }
+    #[cfg(feature = "ff147")]
+    translate_ff147(module, sig, mem, ci_helper, inp)
+}
+
+/// [`translate`] for 147's irregexp bytecode.
+#[cfg(feature = "ff147")]
+fn translate_ff147(
     module: &Module,
     sig: Signature,
     mem: Memory,
