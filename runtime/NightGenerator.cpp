@@ -170,16 +170,16 @@ int32_t NightGenClosing(JSContext* cx) {
 // and returns through its finallys. The compiler emits no call to these
 // (GEN_CLOSING_UNWIND in compiler/src/wasm/translate.rs); they stay
 // exported so the helper table is the same for every engine version.
-bool NightGenCheckResume(JSContext* cx, uint64_t genBits, uint64_t valBits,
-                         uint32_t kind, JS::Value* rvalSlot) {
+bool NightGenCheckResume(JSContext*, uint64_t, uint64_t, uint32_t,
+                         JS::Value*) {
   MOZ_CRASH("CheckResumeKind does not exist in this engine's bytecode");
 }
 
-int32_t NightGenIsClosing(JSContext* cx) {
+int32_t NightGenIsClosing(JSContext*) {
   MOZ_CRASH("this engine has no generator-closing magic");
 }
 
-int32_t NightGenClosing(JSContext* cx) {
+int32_t NightGenClosing(JSContext*) {
   MOZ_CRASH("this engine has no generator-closing magic");
 }
 #endif
