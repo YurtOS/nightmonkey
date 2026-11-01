@@ -46,10 +46,19 @@ impl<'a> Gen<'a> {
                 return Err(format!("{} ({op:?})", super::super::UNSUPPORTED_OP));
             }
             DynamicImport => {
-                // 159: the import phase, evaluation (`build_body` declines
-                // the others).
+                // 159: the import phase. The runtime implements the
+                // evaluation phase (`import(x)`) only: another declines the
+                // script, which is then interpreted.
                 #[cfg(feature = "ff159")]
-                p.next_uint8().unwrap();
+                {
+                    let phase = p.next_uint8().unwrap();
+                    if phase != crate::wasm::translate::IMPORT_PHASE_EVALUATION {
+                        return Err(format!(
+                            "{} (DynamicImport phase {phase})",
+                            super::super::UNSUPPORTED_OP
+                        ));
+                    }
+                }
                 let spec = self.slot(d - 2);
                 let opts = self.slot(d - 1);
                 let script = self.script_ptr();
