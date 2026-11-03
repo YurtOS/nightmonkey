@@ -39,7 +39,7 @@ set(NIGHT_YURT_JIT_LIBS "" CACHE STRING "objects/libraries providing the yurt_ji
 set(NIGHT_CARGO "cargo" CACHE STRING "cargo executable")
 set(NIGHT_STACK_SIZE "67108864" CACHE STRING "linear-memory stack size of the shells, in bytes")
 set(NIGHT_CARGO_TARGET_DIR "" CACHE PATH "cargo target directory (default: <build>/cargo; share it between build trees)")
-set(NIGHT_ENGINE_VERSION "ff147" CACHE STRING
+set(NIGHT_ENGINE_VERSION "ff159" CACHE STRING
     "engine version the compiler is built for: a checked-in opcode table compiler/src/opcodes/<version>.rs and the cargo feature of the same name")
 # A packaged engine's config names a bare clang/clang++ and no sysroot; the
 # consumer provides both. When set, these replace the config's compilers and

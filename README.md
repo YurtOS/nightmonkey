@@ -214,37 +214,30 @@ changes. CMake passes it to the C++ runtime, whose per-version code keys
 on it; `runtime/NightEngineVersion.h` checks it against the engine's and
 checks the value tags and magic payloads the compiler emits.
 
-Engine versions: `ff147` (Firefox 147, semantics 1, the default; the
-shipping engine, built and tested by CI) and `ff159` (Firefox 159,
-semantics 2; `cargo build --no-default-features --features ff159`,
-`-DNIGHT_ENGINE_VERSION=ff159`). Besides the bytecode, the version
-selects what 159 changed outside `Opcodes.h`: the value tags of strings,
-symbols and private GC things and the GC-thing tag boundary, the
-`JSWhyMagic` numbering, the `TryNoteKind` numbering (no
-`ForOfIterClose`), and the engine declarations the C++ runtime uses. On
-ff159 compiled regular expressions are declined (159 changed the
-irregexp bytecode format the translator reads), so regexes run in the
-engine's interpreter.
+Engine versions: `ff159` (Firefox 159, semantics 2, the default; the
+shipping engine, built and tested by CI against `engine-v159.0-1`) and
+`ff147` (Firefox 147, semantics 1; `cargo build --no-default-features
+--features ff147`, `-DNIGHT_ENGINE_VERSION=ff147`). CI runs ff147's Rust
+tests and Clippy as the non-default version; it no longer builds its C++
+runtime against an engine, since `engine/ENGINE_RELEASE` names the 159
+release. Besides the bytecode, the version selects what 159 changed
+outside `Opcodes.h`: the value tags of strings, symbols and private GC
+things and the GC-thing tag boundary, the `JSWhyMagic` numbering, the
+`TryNoteKind` numbering (no `ForOfIterClose`), and the engine
+declarations the C++ runtime uses. On ff159 compiled regular expressions
+are declined (159 changed the irregexp bytecode format the translator
+reads), so regexes run in the engine's interpreter.
 
-What is verified for `ff159`: the Rust crates build and pass their tests
-and Clippy, and the C++ runtime compiles (`-fsyntax-only`, its layout
-`static_assert`s included) against the 159 headers overlaid on the 147
-release's generated headers:
-
-```
-scripts/overlay-engine-headers.py <147-release>/spidermonkey <firefox-git> <159-ref> <159 Opcodes.h> dist159
-cmake -S . -B b159 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DSPIDERMONKEY_DIST=$PWD/dist159 \
-  -DNIGHT_ENGINE_VERSION=ff159 -DNIGHT_TOOLCHAIN_ROOT=... -DNIGHT_SYSROOT=...
-scripts/syntax-check-runtime.py b159
-```
-
-Beyond that, ff159 has been built and run against a real 159.0 engine with the
-Yurt patch queue (YurtOS/yurt-firefox#33): on an EC2 box and in that
-repository's gate, which builds this tree with `NIGHT_ENGINE_VERSION=ff159` and
-runs the jit-tests in both lanes. The versioned exclude lists
-(`tests/*-ff159.txt`) record what that run showed does not apply to this build.
-Not yet verified: jstests on 159 (there is no `jstests-excludes-ff159.txt`),
-the nightly and weekly lanes, and a published 159 engine release.
+What is verified for `ff159`: it is the engine CI builds and tests against
+(`engine-v159.0-1`, published by YurtOS/yurt-firefox), the Rust crates pass
+their tests and Clippy, and the jit-tests ran in both lanes against it
+(YurtOS/yurt-firefox#33's gate and release acceptance: AOT 13451 and
+interpreter 13641 verified executions, 0 failures). The versioned exclude lists
+(`tests/*-ff159.txt`) record what those runs showed does not apply to this
+build. Not yet verified: jstests on 159 (there is no
+`jstests-excludes-ff159.txt`) and the nightly and weekly lanes. To check the
+C++ runtime against another engine's headers without building it, see
+`scripts/overlay-engine-headers.py` and `scripts/syntax-check-runtime.py`.
 
 CI (`.github/workflows/ci.yml`) runs Rust formatting, check, tests and Clippy,
 workflow lint and script regressions on pull requests and pushes to `yurt`.

@@ -289,6 +289,28 @@ def step_text(workflow, name):
     return "\n".join(out).rstrip()
 
 
+class EngineVersionAgreementTests(unittest.TestCase):
+    """The pinned engine release and the default engine version name the same Firefox.
+
+    CI builds against engine/ENGINE_RELEASE with the default NIGHT_ENGINE_VERSION; if they
+    disagree, the opcode table check (or worse, a table that is not the engine's) fails the
+    build late. engine-v<version>-<n> with version "159.0" selects ff159.
+    """
+
+    def test_default_version_is_the_pinned_releases_major(self):
+        release = (REPO / "engine/ENGINE_RELEASE").read_text().splitlines()
+        tag = next(line.split("=", 1)[1] for line in release if line.startswith("tag="))
+        major = tag.removeprefix("engine-v").split(".", 1)[0]
+        cmake = (REPO / "CMakeLists.txt").read_text()
+        default = next(line.split('"')[1] for line in cmake.splitlines()
+                       if line.startswith("set(NIGHT_ENGINE_VERSION "))
+        self.assertEqual(default, f"ff{major}", f"CMake defaults to {default}, ENGINE_RELEASE pins {tag}")
+        for crate in ("compiler", "snapshot", "guest", "nightmonkey"):
+            cargo = (REPO / crate / "Cargo.toml").read_text()
+            line = next(l for l in cargo.splitlines() if l.startswith("default = "))
+            self.assertIn(f'"ff{major}"', line, f"{crate} default features: {line}")
+
+
 class RegressionStepsTests(unittest.TestCase):
     """The release job is the only engine job: it runs the regression steps
     the source build ran (engine.yml, removed), on the build it makes."""

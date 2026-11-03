@@ -9,7 +9,7 @@ license.workspace = true
 [features]
 # The engine version whose opcode table (compiler/src/opcodes/<version>.rs)
 # the compiler is built for: exactly one.
-default = ["ff147"]
+default = ["ff159"]
 ff147 = []
 ff159 = []
 parallel = ["dep:rayon"]
