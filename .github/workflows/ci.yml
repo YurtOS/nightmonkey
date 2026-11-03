@@ -81,17 +81,17 @@ jobs:
         if: matrix.check == 'test'
         run: cargo test --workspace --locked
       # The non-default engine versions (compiler/src/opcodes/).
-      - name: Test workspace (ff159)
+      - name: Test workspace (ff147)
         if: matrix.check == 'test'
-        run: cargo test --workspace --locked --no-default-features --features ff159
+        run: cargo test --workspace --locked --no-default-features --features ff147
       - name: Lint workspace
         if: matrix.check == 'clippy'
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Lint workspace (ff159)
+      - name: Lint workspace (ff147)
         if: matrix.check == 'clippy'
         run: |
-          cargo clippy --workspace --all-targets --locked --no-default-features --features ff159 -- -D warnings
-          cargo clippy --workspace --all-targets --locked --no-default-features --features ff159,parallel -- -D warnings
+          cargo clippy --workspace --all-targets --locked --no-default-features --features ff147 -- -D warnings
+          cargo clippy --workspace --all-targets --locked --no-default-features --features ff147,parallel -- -D warnings
 
   workflows:
     needs: tier

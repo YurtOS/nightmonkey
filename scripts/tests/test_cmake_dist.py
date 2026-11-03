@@ -266,7 +266,9 @@ class CMakeDistTests(unittest.TestCase):
 
     def test_opcode_check_refuses_a_different_opcodes_h(self):
         self.package_config()
-        build = self.configured(self.source_with_fixture_table(), **self.provisioned())
+        # The fixture table is an ff147 one, so name the version instead of using the default.
+        build = self.configured(self.source_with_fixture_table(), NIGHT_ENGINE_VERSION="ff147",
+                                **self.provisioned())
         status, output = self.build_opcodes_check(build)
         self.assertEqual(status, 0, output)
         # The check is a build target, so the header is read at build time.
