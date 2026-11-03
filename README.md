@@ -191,7 +191,7 @@ feature-guard any per-version differences. The CMake build checks that
 the selected table is what the engine being built against generates:
 
 ```
-scripts/gen_opcodes.py check ff147 /path/to/release/spidermonkey/include-private/vm/Opcodes.h
+scripts/gen_opcodes.py check ff159 /path/to/release/spidermonkey/include-private/vm/Opcodes.h
 ```
 
 so an engine whose bytecode differs from the table, in shape or in

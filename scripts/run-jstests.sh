@@ -41,7 +41,7 @@ fi
 # engine-release.yml) carry the value read from the objdir that built the
 # engine, in xul-info.txt at their root: that one wins. It must be one line,
 # ABI:OS:DEBUG. The default, for a Firefox checkout, is the value the
-# release records (engine-v147.0.4-1): wasm32 target (toolchain.configure's
+# release records (engine-v147.0.4-1, same for engine-v159.0-1): wasm32 target (toolchain.configure's
 # "<cpu>-gcc3"), OS_TARGET WASI, not a debug build.
 xul_info=wasm32-gcc3:WASI:false
 if [ -e "$firefox/xul-info.txt" ]; then

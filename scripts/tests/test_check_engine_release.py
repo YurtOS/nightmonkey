@@ -305,6 +305,11 @@ class EngineVersionAgreementTests(unittest.TestCase):
         default = next(line.split('"')[1] for line in cmake.splitlines()
                        if line.startswith("set(NIGHT_ENGINE_VERSION "))
         self.assertEqual(default, f"ff{major}", f"CMake defaults to {default}, ENGINE_RELEASE pins {tag}")
+        # CI runs the other version explicitly (ci.yml); if the default ever became that one
+        # it would test the same version twice, so the steps must name something else.
+        ci = (REPO / ".github/workflows/ci.yml").read_text()
+        self.assertNotIn(f"--features {default}\n", ci)
+        self.assertNotIn(f"--features {default},parallel", ci)
         for crate in ("compiler", "snapshot", "guest", "nightmonkey"):
             cargo = (REPO / crate / "Cargo.toml").read_text()
             line = next(l for l in cargo.splitlines() if l.startswith("default = "))
