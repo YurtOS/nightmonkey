@@ -5089,17 +5089,21 @@ mod tests {
     /// Covered: the elements loads in the lowerings the fixtures below
     /// exercise (`js.setelem`'s dense overwrite through `dense_slot` and its
     /// append arm, `js.getelem`'s dense read through `dense_slot`, the push
-    /// arm, and the pop arm behind its array-class test). Not covered (no
-    /// fixture lowers them, or their guard is a MIR-level type fact the
-    /// oracle does not model): `elem_addr` (LoadElem / StoreElem),
-    /// `init_elem_inline`, the arguments/array length arm (strings.rs), the
-    /// for-in elements check (iteration.rs), `LengthArray` and `StoreElem`'s
-    /// own read (inst_access.rs), and the baseline tier's dense read
-    /// (baseline/codegen.rs).
+    /// arm, and the pop arm behind its array-class test). Not covered: no
+    /// fixture lowers `init_elem_inline`, the arguments/array length arm
+    /// (strings.rs; it does test the array class before its load), the
+    /// for-in elements check (iteration.rs; it checks only the object tag)
+    /// or the baseline tier's dense read (baseline/codegen.rs; it checks the
+    /// native bit). `elem_addr` (LoadElem / StoreElem), `LengthArray` and
+    /// `StoreElem`'s own read (inst_access.rs) are also uncovered, and their
+    /// guard is a MIR-level type fact the oracle does not model.
     ///
     /// Mutation evidence (each turns the setelem and/or push test red; the
-    /// pop test goes red with its class check deleted from `pop_arm`, the
-    /// getelem test with `check_native` deleted from `dense_slot`):
+    /// pop test goes red with its class check deleted from `pop_arm`, moved
+    /// after the load, inverted, compared to a constant, or testing the
+    /// wrong object, and when the arm is not emitted; the getelem test with
+    /// `check_native` deleted from or moved after the load in `dense_slot`,
+    /// and when `dense_element` is skipped):
     /// `check_native` deleted from either arm or from `dense_slot`;
     /// computed without a branch;
     /// branched on `eqz` (inverted); moved after the elements load; deleted
@@ -5491,7 +5495,8 @@ b9:
         );
         let r = element_safety(&body, &known_cells(&h));
         assert_eq!(r.unguarded, vec![]);
-        assert!(r.loads >= 1 && r.guards >= 1, "{r:?}");
+        // `dense_slot`'s one load behind its native-bit guard, no table read.
+        assert_eq!((r.loads, r.guards, r.exempt), (1, 1, 0), "{r:?}");
     }
 
     /// `o.pop()` (a two-operand `call` in a function naming `pop`): the pop
@@ -5516,7 +5521,9 @@ b9:
         );
         let r = element_safety(&body, &known_cells(&h));
         assert_eq!(r.unguarded, vec![]);
-        assert!(r.loads >= 1 && r.guards >= 1, "{r:?}");
+        // The pop arm's one load behind its array-class test; the exempt
+        // read is the classify call cell's word.
+        assert_eq!((r.loads, r.guards, r.exempt), (1, 1, 1), "{r:?}");
     }
 
     /// The MIR fixtures that use only lowered ops lower to a valid module:
