@@ -5092,8 +5092,9 @@ mod tests {
     /// arm, and the pop arm behind its array-class test). Not covered: no
     /// fixture lowers `init_elem_inline`, the arguments/array length arm
     /// (strings.rs; it does test the array class before its load), the
-    /// for-in elements check (iteration.rs; it checks only the object tag)
-    /// or the baseline tier's dense read (baseline/codegen.rs; it checks the
+    /// for-in elements check (iteration.rs; the receiver's read follows its
+    /// object-tag and iterator-cache checks, a prototype's only a non-null
+    /// test) or the baseline tier's dense read (baseline/codegen.rs; it checks the
     /// native bit). `elem_addr` (LoadElem / StoreElem), `LengthArray` and
     /// `StoreElem`'s own read (inst_access.rs) are also uncovered, and their
     /// guard is a MIR-level type fact the oracle does not model.
