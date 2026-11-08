@@ -5003,12 +5003,17 @@ mod tests {
 
     /// Lower one MIR function (text) to its Wasm body.
     fn lower_mir_text(src: &str, push_atom: bool) -> (waffle::FunctionBody, Helpers) {
+        lower_mir_text_atoms(src, if push_atom { &["push"] } else { &[] })
+    }
+
+    /// `lower_mir_text` with the function naming each of `names` (the push
+    /// and pop arms are emitted only where it names `push` / `pop`).
+    fn lower_mir_text_atoms(src: &str, names: &[&str]) -> (waffle::FunctionBody, Helpers) {
         use crate::wasm::baseline::layout::FrameLayout;
         let mut mm = crate::mir::parse(src).expect("parse");
-        if push_atom {
-            // The push arm is emitted only where the function names `push`.
+        for name in names {
             mm.atoms.push(crate::ids::JsString::from_chars(
-                "push".encode_utf16().collect(),
+                name.encode_utf16().collect(),
             ));
         }
         let (mut m, helpers) = module_with_helpers();
@@ -5083,14 +5088,23 @@ mod tests {
     ///
     /// Covered: the elements loads in the lowerings the fixtures below
     /// exercise (`js.setelem`'s dense overwrite through `dense_slot` and its
-    /// append arm, the push arm). Not covered (no fixture lowers them):
-    /// `pop_arm`, `elem_addr` (LoadElem / StoreElem), `init_elem_inline`,
-    /// the arguments/array length arm (strings.rs), the for-in elements
-    /// check (iteration.rs), `LengthArray` and `StoreElem`'s own read
-    /// (inst_access.rs), and the baseline tier's dense read
-    /// (baseline/codegen.rs).
+    /// append arm, `js.getelem`'s dense read through `dense_slot`, the push
+    /// arm, and the pop arm behind its array-class test). Not covered: no
+    /// fixture lowers `init_elem_inline`, the arguments/array length arm
+    /// (strings.rs; it does test the array class before its load), the
+    /// for-in elements check (iteration.rs; the receiver's read follows its
+    /// object-tag and iterator-cache checks, a prototype's only a non-null
+    /// test) or the baseline tier's dense read (baseline/codegen.rs; it checks the
+    /// native bit). `elem_addr` (LoadElem / StoreElem), `LengthArray` and
+    /// `StoreElem`'s own read (inst_access.rs) are also uncovered, and their
+    /// guard is a MIR-level type fact the oracle does not model.
     ///
-    /// Mutation evidence (each turns the setelem and/or push test red):
+    /// Mutation evidence (each turns the setelem and/or push test red; the
+    /// pop test goes red with its class check deleted from `pop_arm`, moved
+    /// after the load, inverted, compared to a constant, or testing the
+    /// wrong object, and when the arm is not emitted; the getelem test with
+    /// `check_native` deleted from or moved after the load in `dense_slot`,
+    /// and when `dense_element` is skipped):
     /// `check_native` deleted from either arm or from `dense_slot`;
     /// computed without a branch;
     /// branched on `eqz` (inverted); moved after the elements load; deleted
@@ -5458,6 +5472,59 @@ b9:
         assert!(r.loads >= 1 && r.guards >= 1, "{r:?}");
         // The classify call cell and `append_row`'s proto word.
         assert_eq!(r.exempt, 2, "{r:?}");
+    }
+
+    /// `o[i]` (generic `js.getelem`): the dense read goes through
+    /// `dense_slot`, which reads `o`'s elements only behind its native check.
+    #[test]
+    fn getelem_reads_elements_only_of_native_objects() {
+        let (body, h) = lower_mir_text(
+            "func @s3 (formals=2, locals=0, depths={0:0}) {
+  root entry b0
+b0(v0: obj{Function(s3)}, v1: val, v2: val, v3: val):
+  js.getelem v2, v3 -> ok_clean b1(v4: val), ok_dirty b2(v5: val), err b9
+b1(v4: val):
+  return v4
+b2(v5: val):
+  return v5
+b9:
+  v6 = const.val undefined
+  exit.throw pc=0 this=v1 args=[v2, v3] locals=[] rval=v6 stack=[]
+}
+",
+            false,
+        );
+        let r = element_safety(&body, &known_cells(&h));
+        assert_eq!(r.unguarded, vec![]);
+        // `dense_slot`'s one load behind its native-bit guard, no table read.
+        assert_eq!((r.loads, r.guards, r.exempt), (1, 1, 0), "{r:?}");
+    }
+
+    /// `o.pop()` (a two-operand `call` in a function naming `pop`): the pop
+    /// arm reads `o`'s elements only behind its array-class test.
+    #[test]
+    fn pop_reads_elements_only_of_arrays() {
+        let (body, h) = lower_mir_text_atoms(
+            "func @s2 (formals=2, locals=0, depths={0:0}) {
+  root entry b0
+b0(v0: obj{Function(s2)}, v1: val, v2: val, v3: val):
+  call v2, v3 -> ok_clean b1(v5: val), ok_dirty b2(v8: val), err b9
+b1(v5: val):
+  return v5
+b2(v8: val):
+  return v8
+b9:
+  v7 = const.val undefined
+  exit.throw pc=0 this=v1 args=[v2, v3] locals=[] rval=v7 stack=[]
+}
+",
+            &["pop"],
+        );
+        let r = element_safety(&body, &known_cells(&h));
+        assert_eq!(r.unguarded, vec![]);
+        // The pop arm's one load behind its array-class test; the exempt
+        // read is the classify call cell's word.
+        assert_eq!((r.loads, r.guards, r.exempt), (1, 1, 1), "{r:?}");
     }
 
     /// The MIR fixtures that use only lowered ops lower to a valid module:
