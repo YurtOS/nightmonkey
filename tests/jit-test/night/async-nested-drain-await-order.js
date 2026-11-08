@@ -5,7 +5,7 @@
 // eval so the compiler leaves it interpreted. Order must be A (the
 // caller continues) then B (the generator's resumption after its await).
 // The same on 147, where the engine does not skip awaits this way.
-// Not covered (engine-side fix needed, issue #24): a drain inside the
+// Not covered (engine-side fix needed, issue #32): a drain inside the
 // resumed generator itself, or inside a helper after its entry.
 
 var log = [];

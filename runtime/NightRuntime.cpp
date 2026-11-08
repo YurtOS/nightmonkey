@@ -2182,7 +2182,7 @@ static inline void SetNightTop(JSContext* cx, uint32_t top) {
   // generator has been resumed (the generator's own body, or a Debugger
   // hook firing inside it, drains and then awaits) or one inside a helper
   // after its entry; those need the engine to treat a live external-tier
-  // frame as a previous activation (see issue #24).
+  // frame as a previous activation (issue #32, split from #24).
   cx->canSkipEnqueuingJobs = false;
 #endif
 }
