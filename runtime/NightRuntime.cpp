@@ -2168,18 +2168,21 @@ static JSObject* ReceiverObjectAtom(JSContext* cx, uint64_t recv,
 static inline void SetNightTop(JSContext* cx, uint32_t top) {
   js::nightrt::TheNightStackInline(cx).setTop(LinMem<JS::Value>(top));
 #if JSOP_SEMANTICS_VERSION >= 2
-  // Every engine re-entry from compiled code starts here, so this is where
-  // 159's await-skip permission is withdrawn again. NightEntry.cpp's
+  // Withdraw 159's await-skip permission on every helper entry, i.e. on
+  // every re-entry into the engine from compiled code. NightEntry.cpp's
   // AutoCompiledFrameNoSkipAwait clears it once on entry to a compiled
   // frame, but a native called from that frame can set it back:
   // drainJobQueue() (or AutoDebuggerJobQueueInterruption::runJobs after a
   // Debugger hook) sets cx->canSkipEnqueuingJobs before the last job it
   // runs and nothing clears it on return. Left set, an interpreted async
-  // generator resumed from this frame would see itself alone on the
-  // context and skip an await it must not (log order B,A instead of A,B).
-  // The flag can only become true inside such a native, and the next
-  // thing that can resume a generator is another re-entry, which comes
-  // through here. One byte store; the frame's exit restore is unchanged.
+  // generator resumed by the next call out of this frame would see itself
+  // alone on the context and skip an await it must not (log order B,A
+  // instead of A,B). This covers a drain that returns before the next
+  // helper entry. It does NOT cover a drain that runs after the
+  // generator has been resumed (the generator's own body, or a Debugger
+  // hook firing inside it, drains and then awaits) or one inside a helper
+  // after its entry; those need the engine to treat a live external-tier
+  // frame as a previous activation (see issue #24).
   cx->canSkipEnqueuingJobs = false;
 #endif
 }
