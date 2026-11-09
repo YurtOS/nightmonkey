@@ -6,6 +6,7 @@
 #include "runtime/Night.h"
 #include "runtime/NightContext.h"
 #include "runtime/NightEntry.h"
+#include "runtime/NightEngineVersion.h"  // JSOP_SEMANTICS_VERSION
 #include "runtime/NightEnv.h"
 #include "runtime/NightObjectWord.h"
 #include "runtime/NightRegExp.h"
@@ -164,6 +165,16 @@ static void SourceAssigned(JSContext* cx) {
   NightBlowDynamicCodeFuse();
 }
 
+#if JSOP_SEMANTICS_VERSION >= 2
+// 159's js::CanSkipAwait asks before it skips an await: compiled frames sit
+// on no engine activation, so while one is executing (AutoLiveCompiledFrame)
+// an interpreted generator resumed under it must not look alone.
+static bool ExternalFramesLive(JSContext* cx) {
+  nightrt::NightContextState* state = nightrt::NightStateOf(cx);
+  return state && state->liveFrames != 0;
+}
+#endif
+
 JS::ExternalCompilerHooks js::night::gNightHooks = {
     /* newContext */ NightNewContext,
     /* destroyContext */ NightDestroyContext,
@@ -184,6 +195,9 @@ JS::ExternalCompilerHooks js::night::gNightHooks = {
     /* sourceAssigned */ SourceAssigned,
     /* minConstructorThisSlots */ 0,
     /* regexpMatch */ irregexp::TryNightRegexMatch,
+#if JSOP_SEMANTICS_VERSION >= 2
+    /* externalFramesLive */ ExternalFramesLive,
+#endif
 };
 
 void js::night::NightInstallHooks(JSRuntime* rt) {

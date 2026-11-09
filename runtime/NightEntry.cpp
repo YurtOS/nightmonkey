@@ -32,8 +32,6 @@
 #include "vm/Stack-inl.h"
 
 #if JSOP_SEMANTICS_VERSION >= 2
-#  include "js/friend/MicroTask.h"  // JS::HasAnyMicroTasks
-#  include "js/Promise.h"        // JS::JobQueueMayNotBeEmpty
 #  include "vm/JSContext-inl.h"  // js::CheckForInterrupt
 #endif
 
@@ -59,34 +57,27 @@ using NightFn = int32_t (*)(JSContext* cx, void* sp, uint32_t argc,
 // when the job queue is otherwise empty (cx->canSkipEnqueuingJobs) and the
 // awaiting frame is the first frame of the context's only activation, one
 // entered to resume a generator. Under a compiled frame that test is wrong:
-// an interpreted async generator resumed from compiled code (it.next() in a
-// compiled async function that was itself resumed from a job) sees itself
-// alone and skips its awaits, which the Debugger observes as missing
-// resumptions; and a compiled body's own CanSkipAwait cannot make the
-// interpreter's first-frame check at all (NightCanSkipAwait never skips).
-// (147 found the outermost async frame by FrameIter, which saw the
-// interpreted self-hosted resume frame under every compiled resumption.)
-// Withdraw the permission while the compiled frame is live, so every await
-// under it takes the standard enqueue path. Once it returns, the stack
-// below is as it was, so the permission is handed back -- if the queue is
-// still empty: the flag means "no job queued", and every enqueue clears it
-// (MicroTaskQueueSet::enqueueRegularMicroTask). Without the restore, a
-// compiled callback (e.g. a Debugger hook) would disable the skip for the
-// rest of an interpreted frame's job.
-class MOZ_RAII AutoCompiledFrameNoSkipAwait {
-  JSContext* cx_;
-  bool saved_;
+// an interpreted async generator resumed from compiled code sees itself
+// alone and would skip awaits the interpreter (which would find the caller's
+// activation below) does not. The engine asks the hook table
+// (externalFramesLive, patch 0013) before it skips, and this counts the
+// compiled frames that are executing: while one is, no await skips, whatever
+// state a nested drainJobQueue() or a Debugger hook leaves the flag in.
+// Counted around the body's execution only, so a suspended generator (whose
+// frame has exited) does not count, and once the frame returns the stack is
+// as it was and the engine's own test applies again.
+class MOZ_RAII AutoLiveCompiledFrame {
+  nightrt::NightContextState* state_;
 
  public:
-  explicit AutoCompiledFrameNoSkipAwait(JSContext* cx)
-      : cx_(cx), saved_(cx->canSkipEnqueuingJobs) {
-    JS::JobQueueMayNotBeEmpty(cx);
+  explicit AutoLiveCompiledFrame(JSContext* cx)
+      : state_(nightrt::NightStateOf(cx)) {
+    MOZ_ASSERT(state_);
+    state_->liveFrames++;
   }
-  ~AutoCompiledFrameNoSkipAwait() {
-    if (saved_ && !JS::HasAnyMicroTasks(cx_)) {
-      JS::JobQueueIsEmpty(cx_);
-    }
-  }
+  ~AutoLiveCompiledFrame() { state_->liveFrames--; }
+  AutoLiveCompiledFrame(const AutoLiveCompiledFrame&) = delete;
+  AutoLiveCompiledFrame& operator=(const AutoLiveCompiledFrame&) = delete;
 };
 #endif
 
@@ -143,7 +134,7 @@ static EnterNightStatus EnterNight(JSContext* cx, JSScript* script,
 
   uint64_t retval = 0;
 #if JSOP_SEMANTICS_VERSION >= 2
-  AutoCompiledFrameNoSkipAwait noSkipAwait(cx);
+  AutoLiveCompiledFrame liveFrame(cx);
 #endif
   NightFn fn = reinterpret_cast<NightFn>(static_cast<uintptr_t>(index));
   // The body receives its own JSScript (compiled-body ABI) so closure ops can
@@ -212,7 +203,7 @@ static EnterNightStatus EnterNightGlobal(JSContext* cx, JSScript* script,
 
   uint64_t retval = 0;
 #if JSOP_SEMANTICS_VERSION >= 2
-  AutoCompiledFrameNoSkipAwait noSkipAwait(cx);
+  AutoLiveCompiledFrame liveFrame(cx);
 #endif
   NightFn fn = reinterpret_cast<NightFn>(static_cast<uintptr_t>(index));
   // Global code has no new.target.
@@ -371,7 +362,7 @@ EnterNightStatus NightApplyOrCall(JSContext* cx, const Value& targetv,
   stack.setTop(frameTop);
   uint64_t retval = 0;
 #if JSOP_SEMANTICS_VERSION >= 2
-  AutoCompiledFrameNoSkipAwait noSkipAwait(cx);
+  AutoLiveCompiledFrame liveFrame(cx);
 #endif
   NightFn fn = reinterpret_cast<NightFn>(static_cast<uintptr_t>(index));
   // apply/call forwarding is always an ordinary call: new.target = undefined.
@@ -452,7 +443,7 @@ EnterNightStatus EnterNightResume(JSContext* cx,
 
   uint64_t retval = 0;
 #if JSOP_SEMANTICS_VERSION >= 2
-  AutoCompiledFrameNoSkipAwait noSkipAwait(cx);
+  AutoLiveCompiledFrame liveFrame(cx);
 #endif
   NightFn fn = reinterpret_cast<NightFn>(static_cast<uintptr_t>(index));
   int32_t err =

@@ -53,6 +53,12 @@ struct NightContextState {
   NightStack stack;
   NightLeafMatch leafMatch;
   js::night::NightRuntimeState* runtime = nullptr;
+  // How many compiled frames are executing on this context's native stack
+  // (AutoLiveCompiledFrame, runtime/NightEntry.cpp). A suspended generator
+  // does not count: its frame has exited. 159's js::CanSkipAwait asks for it
+  // through ExternalCompilerHooks::externalFramesLive. Appended last: the
+  // property-IC base must stay at offset 0.
+  uint32_t liveFrames = 0;
 };
 
 // Null when the context has no state (the hooks are not installed, or the
