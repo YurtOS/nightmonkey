@@ -81,6 +81,19 @@ class MOZ_RAII AutoLiveCompiledFrame {
 };
 #endif
 
+// A call frame that does not fit even on an EMPTY AOT value stack (a call with
+// hundreds of thousands of arguments, e.g. Array.apply / f.apply with
+// getMaxArgs() of them) is not recursion: the stack is not exhausted by
+// callers, no call depth would help. The interpreter, whose frames live on
+// its own stack, runs it (as it does with in-process compiling off);
+// raising over-recursion would be a failure the interpreter lane does not
+// have. A frame that merely does not fit NOW is still over-recursion.
+static bool FrameNeverFits(const js::nightrt::NightStack& stack,
+                           size_t nslots) {
+  return stack.base() + 2 + nslots + js::nightrt::kNightStackHeadroomSlots >
+         stack.limit();
+}
+
 // Build `script`'s incoming compiled-body frame on the AOT value stack and
 // dispatch to its AOT body, writing the boxed result into *rvalOut on success.
 // Returns NotEntered when the script has no AOT body, so the caller falls
@@ -112,6 +125,9 @@ static EnterNightStatus EnterNight(JSContext* cx, JSScript* script,
   uint32_t nformals = script->function() ? script->function()->nargs() : 0;
   uint32_t nslots = argc > nformals ? argc : nformals;
   JS::Value* frameTop = sp + 2 + nslots;
+  if (FrameNeverFits(stack, nslots)) {
+    return EnterNightStatus::NotEntered;
+  }
   if (frameTop + js::nightrt::kNightStackHeadroomSlots > stack.limit()) {
     // The AOT stack is the tier's recursion budget: exhausting it is
     // over-recursion, not a reason to continue on the interpreter's stack.
@@ -325,6 +341,9 @@ EnterNightStatus NightApplyOrCall(JSContext* cx, const Value& targetv,
 
   uint32_t nslots = nactuals > nformals ? nactuals : nformals;
   JS::Value* frameTop = sp + 2 + nslots;
+  if (FrameNeverFits(stack, nslots)) {
+    return EnterNightStatus::NotEntered;
+  }
   if (frameTop + js::nightrt::kNightStackHeadroomSlots > stack.limit()) {
     // The AOT stack is the tier's recursion budget: exhausting it is
     // over-recursion, not a reason to continue on the interpreter's stack.
