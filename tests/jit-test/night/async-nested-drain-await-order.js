@@ -55,6 +55,7 @@ async function* g4() { eval(""); await 0; log4.push("B"); }
 var o4 = {
   get [Symbol.toPrimitive]() {
     var f = it4.next.bind(it4);
+    Promise.resolve().then(() => {});
     drainJobQueue();
     return f;
   }

@@ -76,6 +76,8 @@ class MOZ_RAII AutoLiveCompiledFrame {
     state_->liveFrames++;
   }
   ~AutoLiveCompiledFrame() { state_->liveFrames--; }
+  AutoLiveCompiledFrame(const AutoLiveCompiledFrame&) = delete;
+  AutoLiveCompiledFrame& operator=(const AutoLiveCompiledFrame&) = delete;
 };
 #endif
 

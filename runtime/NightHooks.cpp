@@ -6,8 +6,8 @@
 #include "runtime/Night.h"
 #include "runtime/NightContext.h"
 #include "runtime/NightEntry.h"
-#include "runtime/NightEnv.h"
 #include "runtime/NightEngineVersion.h"  // JSOP_SEMANTICS_VERSION
+#include "runtime/NightEnv.h"
 #include "runtime/NightObjectWord.h"
 #include "runtime/NightRegExp.h"
 #include "runtime/NightRegistration.h"
