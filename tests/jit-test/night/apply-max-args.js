@@ -37,14 +37,15 @@ try {
   assertEq(it.next(7).value, 7);
   gres = "ran";
 } catch (e) { assertEq(e instanceof InternalError, true); gres = "threw"; }
-var ares = null;
+var ares = null, aval = -1;
 try {
-  af.apply(null, sparse).then(v => { assertEq(v, n); });
+  af.apply(null, sparse).then(v => { aval = v; });
   ares = "ran";
 } catch (e) { assertEq(e instanceof InternalError, true); ares = "threw"; }
 drainJobQueue();
 assertEq(gres === "ran" || gres === "threw", true);
 assertEq(ares === "ran" || ares === "threw", true);
+if (ares === "ran") assertEq(aval, n);
 
 // One more argument than the engine allows is a RangeError in every lane.
 var tooMany = false;
