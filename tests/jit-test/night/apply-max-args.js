@@ -23,3 +23,30 @@ function r(k) { return r(k + 1) + 1; }
 var threw = false;
 try { r(0); } catch (e) { threw = e instanceof InternalError; }
 assertEq(threw, true);
+
+// A generator or async function is never started on the interpreter by this
+// path (a script keeps one tier for its whole run): either the call raises
+// over-recursion (compiled lane) or it runs (interpreter lane), and what runs
+// resumes correctly.
+function* gen() { var a = yield arguments.length; return a; }
+async function af() { await 0; return arguments.length; }
+var gres = null;
+try {
+  var it = gen.apply(null, sparse);
+  assertEq(it.next().value, n);
+  assertEq(it.next(7).value, 7);
+  gres = "ran";
+} catch (e) { assertEq(e instanceof InternalError, true); gres = "threw"; }
+var ares = null;
+try {
+  af.apply(null, sparse).then(v => { assertEq(v, n); });
+  ares = "ran";
+} catch (e) { assertEq(e instanceof InternalError, true); ares = "threw"; }
+drainJobQueue();
+assertEq(gres === "ran" || gres === "threw", true);
+assertEq(ares === "ran" || ares === "threw", true);
+
+// One more argument than the engine allows is a RangeError in every lane.
+var tooMany = false;
+try { f.apply(null, new Array(n + 1).fill(0)); } catch (e) { tooMany = e instanceof RangeError; }
+assertEq(tooMany, true);
