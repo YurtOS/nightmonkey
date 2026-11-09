@@ -45,7 +45,5 @@ non262/String/normalize-generateddata-part0.js
 non262/String/normalize-generateddata-part1.js
 non262/String/normalize-generateddata-part2.js
 non262/String/normalize-generateddata-part3.js
-# Array.apply passes; the subsequent f.apply at getMaxArgs()=500000 exceeds the tier's 2 MiB value stack with its 64 KiB reserve (NightEntry.cpp). A probe passes at 253000 arguments and reports over-recursion at 254000; the interpreter accepts 500000. See #22.
-non262/Array/regress-350256-02.js
 # This 64k+ literal script exceeds jstests' 150 s timeout: with a 600 s limit it completes and passes in 183.2 s on c7a.2xlarge; the interpreter passes in 0.1 s. Profiling and the underlying performance work remain tracked in #22.
 non262/regress/regress-155081.js
