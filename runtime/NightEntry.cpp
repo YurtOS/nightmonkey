@@ -81,6 +81,28 @@ class MOZ_RAII AutoLiveCompiledFrame {
 };
 #endif
 
+// A call frame that does not fit even on an EMPTY AOT value stack (a call with
+// hundreds of thousands of arguments, e.g. Array.apply / f.apply with
+// getMaxArgs() of them) is not recursion: no call depth would help. The
+// interpreter, whose frames live on its own stack, runs it (as it does with
+// in-process compiling off); raising over-recursion would be a failure the
+// interpreter lane does not have. Integer arithmetic, not pointers: nslots
+// comes from an array length and the stack is in a 32-bit address space.
+//
+// Not for a generator or an async function: a script is AOT-compiled or
+// interpreted for the WHOLE run (NightGenerator.cpp), and a suspended
+// generator's storage layout is the tier's own. The interpreter creating one
+// would hand a later resume to EnterNightResume with the wrong layout. Such a
+// call keeps raising over-recursion (a documented difference from the
+// interpreter lane).
+static bool FrameNeverFits(JSScript* script, size_t nslots) {
+  if (script->isGenerator() || script->isAsync()) {
+    return false;
+  }
+  return 2 + nslots + js::nightrt::kNightStackHeadroomSlots >
+         js::nightrt::kNightStackSlots;
+}
+
 // Build `script`'s incoming compiled-body frame on the AOT value stack and
 // dispatch to its AOT body, writing the boxed result into *rvalOut on success.
 // Returns NotEntered when the script has no AOT body, so the caller falls
@@ -112,6 +134,9 @@ static EnterNightStatus EnterNight(JSContext* cx, JSScript* script,
   uint32_t nformals = script->function() ? script->function()->nargs() : 0;
   uint32_t nslots = argc > nformals ? argc : nformals;
   JS::Value* frameTop = sp + 2 + nslots;
+  if (FrameNeverFits(script, nslots)) {
+    return EnterNightStatus::NotEntered;
+  }
   if (frameTop + js::nightrt::kNightStackHeadroomSlots > stack.limit()) {
     // The AOT stack is the tier's recursion budget: exhausting it is
     // over-recursion, not a reason to continue on the interpreter's stack.
@@ -325,6 +350,9 @@ EnterNightStatus NightApplyOrCall(JSContext* cx, const Value& targetv,
 
   uint32_t nslots = nactuals > nformals ? nactuals : nformals;
   JS::Value* frameTop = sp + 2 + nslots;
+  if (FrameNeverFits(script, nslots)) {
+    return EnterNightStatus::NotEntered;
+  }
   if (frameTop + js::nightrt::kNightStackHeadroomSlots > stack.limit()) {
     // The AOT stack is the tier's recursion budget: exhausting it is
     // over-recursion, not a reason to continue on the interpreter's stack.
