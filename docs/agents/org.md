@@ -169,9 +169,17 @@ the PR is ready at the head being merged: review loop finished, Verification
 passing, required hosted checks green, ready report posted. Merge with
 `--match-head-commit` on the head the ready report named, and name a merge
 method (`--squash` unless the user names another; gh requires one when it is not
-interactive). A push after an approval voids it; a conditional authorization
-applies again only once the ready report for the new head is posted (not for a
-PR in a stack: `drive-pr-stack` asks again). Ask before closing a PR, too.
+interactive). A standing authorization is valid when the user gives it in their
+own words and names its scope (a PR, a stack, one issue's work). It works like
+the conditional one: it takes effect once the PR is ready at the head being
+merged, ends with its scope, survives a push (it applies again once the ready
+report for the new head is posted), and never covers closing a PR. For a stack
+it must name the stack; `drive-pr-stack` then merges the named PRs in order
+without asking again. It does not make the merge automatic: merge only when
+confident, otherwise ask. A push after an approval voids it; a conditional
+authorization applies again only once the ready report for the new head is
+posted (not for a PR in a stack: `drive-pr-stack` asks again, unless a standing
+authorization names the stack). Ask before closing a PR, too.
 
 [`drive-pr-to-mergeable`](https://github.com/YurtOS/yurtos-kernel/blob/main/.claude/skills/drive-pr-to-mergeable/SKILL.md)
 ("Merge authority") applies this section inside its review loop: which question
