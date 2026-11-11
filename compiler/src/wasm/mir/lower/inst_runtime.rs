@@ -298,7 +298,8 @@ impl<'a> Lower<'a> {
                     }
                     RtOp::SpreadCall(construct) => {
                         let c = self.i32c(construct);
-                        (h.spread_call, vec![a[0], a[1], a[2], a[3], c])
+                        let caller = self.actuals().0;
+                        (h.spread_call, vec![a[0], a[1], a[2], a[3], c, caller])
                     }
                     RtOp::CheckPrivateField(cond, kind) => {
                         let (cv, kv) = (self.i32c(cond), self.i32c(kind));

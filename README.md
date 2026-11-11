@@ -367,6 +367,9 @@ allocation profile; each carries a comment). For a build configured with
 `NIGHT_ENGINE_VERSION=ff159`, `scripts/run-jit-tests.sh` also applies
 `tests/wasi-jit-test-excludes-ff159.txt` and (AOT lane)
 `tests/jit-test-excludes-ff159.txt`, so the 147 lanes keep their coverage.
+`scripts/run-jstests.sh` does the same with `tests/jstests-excludes-ff147.txt`
+for a 147 build: tests only that engine fails (a compiled caller of
+`loadRelativeToScript`, which 159's patch 0015 makes findable).
 The SpiderMonkey tree carries
 no test annotations for NightMonkey. NightMonkey's own regression tests
 (`tests/jit-test/`) run in both lanes with `scripts/run-night-tests.sh`.

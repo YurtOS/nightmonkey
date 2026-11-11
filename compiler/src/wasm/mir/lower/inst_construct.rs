@@ -134,9 +134,10 @@ impl<'a> Lower<'a> {
                 });
                 self.cur = generic;
                 let (av, nv, wv) = (self.i32c(argc), self.i32c(nslots), self.i32c(word));
+                let caller = self.actuals().0;
                 let ok = self.call1(
                     self.h.construct,
-                    &[self.cx, top, base, av, nv, wv],
+                    &[self.cx, top, base, av, nv, wv, caller],
                     Type::I32,
                 );
                 let r = self.load_i64(top, 0);

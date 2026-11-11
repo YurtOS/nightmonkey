@@ -61,7 +61,8 @@ impl<'a> Gen<'a> {
             Call | CallContent | CallIgnoresRv | CallIter | CallContentIter => {
                 let argc = u32::from(p.next_uint16().unwrap());
                 if matches!(op, CallIter | CallContentIter) {
-                    self.call_op(h.call_iter, argc, argc + 2, &[]);
+                    let caller = self.sp;
+                    self.call_op(h.call_iter, argc, argc + 2, &[caller]);
                 } else {
                     self.call_direct_or_generic(argc);
                 }
@@ -86,7 +87,8 @@ impl<'a> Gen<'a> {
                 };
                 let nslots = self.i32c(n);
                 let stamp = self.i32c(w);
-                self.call_op(h.construct, argc, argc + 3, &[nslots, stamp]);
+                let caller = self.sp;
+                self.call_op(h.construct, argc, argc + 3, &[nslots, stamp, caller]);
             }
             SpreadCall | SpreadNew | SpreadSuperCall => {
                 let construct = op != SpreadCall;
@@ -100,7 +102,8 @@ impl<'a> Gen<'a> {
                     self.i64c(TAG_NULL << 32)
                 };
                 let c = self.i32c(u32::from(construct));
-                let r = self.rt(h.spread_call, &[callee, thisv, arr, nt, c]);
+                let caller = self.sp;
+                let r = self.rt(h.spread_call, &[callee, thisv, arr, nt, c, caller]);
                 self.set_slot(d - need, r);
             }
             _ => return Ok(false),

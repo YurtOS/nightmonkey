@@ -127,6 +127,24 @@ static inline T* LinMem(uintptr_t addr) {
   return reinterpret_cast<T*>(addr);
 }
 
+// The generic call helpers' record of the compiled frame making the call
+// (see night_runtime_call's `callerSp`): 159 only, where the engine can be
+// asked who called a native (ExternalCompilerHooks::innermostFrame).
+#if JSOP_SEMANTICS_VERSION >= 2
+class MOZ_RAII CallerFrameGuard {
+  js::nightrt::AutoCallerFrame guard_;
+
+ public:
+  CallerFrameGuard(JSContext* cx, uint32_t callerSp)
+      : guard_(cx, callerSp ? LinMem<JS::Value>(callerSp) : nullptr) {}
+};
+#else
+class CallerFrameGuard {
+ public:
+  CallerFrameGuard(JSContext*, uint32_t) {}
+};
+#endif
+
 // Little-endian cursor over a merge-embedded byte table. `u32()` reads without
 // its own bounds check -- callers gate on `remaining()` exactly as the
 // hand-written parsers did; the raw `p`/`end` stay accessible for
@@ -6085,8 +6103,10 @@ bool night_runtime_to_async_iter(JSContext* cx, uint32_t top, uint64_t iter,
 // here.
 bool night_runtime_spread_call(JSContext* cx, uint32_t top, uint64_t calleeBits,
                                uint64_t thisvBits, uint64_t arrBits,
-                               uint64_t newTargetBits, uint32_t constructing) {
+                               uint64_t newTargetBits, uint32_t constructing,
+                               uint32_t callerSp) {
   SetNightTop(cx, top);
+  CallerFrameGuard caller(cx, callerSp);
   JS::RootedValue callee(cx, JS::Value::fromRawBits(calleeBits));
   JS::RootedValue thisv(cx, JS::Value::fromRawBits(thisvBits));
   JS::RootedValue arr(cx, JS::Value::fromRawBits(arrBits));
@@ -6658,7 +6678,7 @@ bool night_runtime_add(JSContext* cx, uint32_t top, uint64_t a, uint64_t b) {
 }
 
 bool night_runtime_call_iter(JSContext* cx, uint32_t top, uint32_t sp,
-                             uint32_t argc) {
+                             uint32_t argc, uint32_t callerSp) {
   JS::Value* frame = LinMem<JS::Value>(sp);
   if (frame[0].isPrimitive()) {
     SetNightTop(cx, top);
@@ -6677,12 +6697,13 @@ bool night_runtime_call_iter(JSContext* cx, uint32_t top, uint32_t sp,
                          fallback);
     return false;
   }
-  return night_runtime_call(cx, top, sp, argc);
+  return night_runtime_call(cx, top, sp, argc, callerSp);
 }
 
 bool night_runtime_call(JSContext* cx, uint32_t top, uint32_t sp,
-                        uint32_t argc) {
+                        uint32_t argc, uint32_t callerSp) {
   SetNightTop(cx, top);
+  CallerFrameGuard caller(cx, callerSp);
   // The frame at `sp` is [callee, this, arg0..arg_{argc-1}] as boxed Values
   // (rooted: `top` covers it). Invoke via the engine call path (which itself
   // dispatches to AOT/interpreter/native).
@@ -6884,19 +6905,19 @@ bool night_runtime_call(JSContext* cx, uint32_t top, uint32_t sp,
 // mirrors night_runtime_call's native tail without the classify / apply-call /
 // RegExp / rope-flatten / tracing branches.
 bool night_runtime_native_dispatch(JSContext* cx, uint32_t top, uint32_t sp,
-                                   uint32_t argc) {
+                                   uint32_t argc, uint32_t callerSp) {
   SetNightTop(cx, top);
   JS::Value* frame = LinMem<JS::Value>(sp);
   JSFunction* fun = &frame[0].toObject().as<JSFunction>();
   // Defensive: cells are only armed for natives, but never call a non-native
   // native() -- fall back to the generic path (also handles apply/call/etc).
   if (MOZ_UNLIKELY(!fun->isNativeFun())) {
-    return night_runtime_call(cx, top, sp, argc);
+    return night_runtime_call(cx, top, sp, argc, callerSp);
   }
   // fun_apply/fun_call want night_runtime_call's AOT-forwarding fast arms.
   JSNative native = fun->native();
   if (MOZ_UNLIKELY(native == js::fun_apply || native == js::fun_call)) {
-    return night_runtime_call(cx, top, sp, argc);
+    return night_runtime_call(cx, top, sp, argc, callerSp);
   }
   // The defineProperty family must run night_runtime_call's binding-fuse blow
   // intercept (a global-binding redefinition bypasses every compiled write
@@ -6909,7 +6930,7 @@ bool night_runtime_native_dispatch(JSContext* cx, uint32_t top, uint32_t sp,
                RtFns(cx).reflectDefineProperty->get().asRawBits()) ||
           (RtFns(cx).defineProperties &&
            frame[0].asRawBits() == RtFns(cx).defineProperties->get().asRawBits()))) {
-    return night_runtime_call(cx, top, sp, argc);
+    return night_runtime_call(cx, top, sp, argc, callerSp);
   }
   // RegExpMatcher/RegExpSearcher with an AOT wasm matcher: run the collapsed
   // fast path (matcher call + statics + result in one frame), skipping the
@@ -6968,6 +6989,7 @@ bool night_runtime_native_dispatch(JSContext* cx, uint32_t top, uint32_t sp,
       }
     }
   }
+  CallerFrameGuard caller(cx, callerSp);
   js::AutoCheckRecursionLimit recursion(cx);
   if (!recursion.check(cx)) {
     return false;
@@ -7059,8 +7081,9 @@ bool night_runtime_apply_fwd(JSContext* cx, uint32_t top, uint64_t applyFnBits,
 // to the out-slot at `top`.
 bool night_runtime_construct(JSContext* cx, uint32_t top, uint32_t sp,
                              uint32_t argc, uint32_t nSlots,
-                             uint32_t stampWord) {
+                             uint32_t stampWord, uint32_t callerSp) {
   SetNightTop(cx, top);
+  CallerFrameGuard caller(cx, callerSp);
 #ifdef ENABLE_JS_NIGHTMONKEY
   return js::night::NightConstruct(cx, LinMem<void>(sp), argc, nSlots,
                                    stampWord, LinMem<uint64_t>(top));
@@ -7769,7 +7792,7 @@ bool night_runtime_eval(JSContext* cx, uint32_t top, uint32_t sp,
   SetNightTop(cx, top);
   JS::Value* frame = LinMem<JS::Value>(sp);
   if (!cx->global()->valueIsEval(frame[0])) {
-    return night_runtime_call(cx, top, sp, argc);
+    return night_runtime_call(cx, top, sp, argc, 0);
   }
   JS::RootedValue arg(cx, argc > 0 ? frame[2] : JS::UndefinedValue());
   JS::RootedObject envChain(cx, &JS::Value::fromRawBits(env).toObject());
@@ -7792,7 +7815,7 @@ bool night_runtime_spread_eval(JSContext* cx, uint32_t top, uint64_t callee,
   SetNightTop(cx, top);
   if (!cx->global()->valueIsEval(JS::Value::fromRawBits(callee))) {
     return night_runtime_spread_call(cx, top, callee, thisv, arr,
-                                     JS::NullValue().asRawBits(), 0);
+                                     JS::NullValue().asRawBits(), 0, 0);
   }
   JS::RootedObject arrObj(cx, &JS::Value::fromRawBits(arr).toObject());
   JS::RootedValue arg(cx);

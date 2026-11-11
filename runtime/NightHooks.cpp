@@ -14,6 +14,8 @@
 #include "runtime/NightStack.h"
 #include "vm/GeneratorObject.h"
 #include "vm/Interpreter.h"
+#include "vm/JSFunction.h"
+#include "vm/JSScript.h"
 #include "vm/NativeObject.h"
 
 using namespace js;
@@ -173,6 +175,37 @@ static bool ExternalFramesLive(JSContext* cx) {
   nightrt::NightContextState* state = nightrt::NightStateOf(cx);
   return state && state->liveFrames != 0;
 }
+
+// The engine's scripted-caller queries (JS::DescribeScriptedCaller,
+// js::DescribeScriptedCallerForCompilation) cannot see compiled frames; this
+// names the innermost one that is calling out, if any (patch 0015). Its
+// script comes from slot 0 of the frame the call helper recorded
+// (nightrt::AutoCallerFrame): the callee, or for global code the script as a
+// private GC thing. Slot 0 is traced in place, so the script is current even
+// after a compacting GC; nothing here is held across a call.
+static JSScript* InnermostFrame(JSContext* cx, js::Activation** activation) {
+  nightrt::NightContextState* state = nightrt::NightStateOf(cx);
+  if (!state || !state->callerFrame) {
+    return nullptr;
+  }
+  JS::Value slot0 = state->callerFrame[0];
+  JSScript* script = nullptr;
+  if (slot0.isObject()) {
+    JSObject& obj = slot0.toObject();
+    if (obj.is<JSFunction>()) {
+      JSFunction& fun = obj.as<JSFunction>();
+      if (fun.hasBaseScript() && fun.baseScript()->hasBytecode()) {
+        script = fun.nonLazyScript();
+      }
+    }
+  } else if (slot0.isPrivateGCThing()) {
+    script = static_cast<JSScript*>(slot0.toGCThing());
+  }
+  if (script) {
+    *activation = state->callerActivation;
+  }
+  return script;
+}
 #endif
 
 JS::ExternalCompilerHooks js::night::gNightHooks = {
@@ -197,6 +230,7 @@ JS::ExternalCompilerHooks js::night::gNightHooks = {
     /* regexpMatch */ irregexp::TryNightRegexMatch,
 #if JSOP_SEMANTICS_VERSION >= 2
     /* externalFramesLive */ ExternalFramesLive,
+    /* innermostFrame */ InnermostFrame,
 #endif
 };
 
