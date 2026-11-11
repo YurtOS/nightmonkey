@@ -19,6 +19,6 @@ license = "Apache-2.0 WITH LLVM-exception"
 [profile.release]
 debug = false
 
-# waffle 0.3.3 with a near-linear dominator pass (third_party/waffle/NIGHTMONKEY.md, #29).
+# waffle 0.3.3 with a faster dominator pass (third_party/waffle/NIGHTMONKEY.md, #29).
 [patch.crates-io]
 waffle = { path = "third_party/waffle" }
