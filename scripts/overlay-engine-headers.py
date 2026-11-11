@@ -13,6 +13,12 @@ include-private), deletes the base's headers that <ref> no longer has
 as the opcode table check reads it) and regenerates js/PrefsGenerated.h
 from <ref>'s StaticPrefList.yaml (needs PyYAML).
 
+Only include-private is pruned of headers <ref> no longer has: include/js and
+include/mozilla keep the base's base-only headers (today only
+js/public/ShadowRealmCallbacks.h, which 159 removed and the runtime does not
+include). A runtime that includes one still passes the check, so a removed
+public header is not caught here; the real build against the engine is.
+
 The result is a hybrid: every generated header other than
 PrefsGenerated.h (js-confdefs.h, CacheIROpsGenerated.h, selfhosted.out.h,
 ...) is still the base engine's. A clean syntax check against it is
