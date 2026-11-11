@@ -18,3 +18,7 @@ license = "Apache-2.0 WITH LLVM-exception"
 # being built against; a plain `cargo build` needs nothing from the engine.
 [profile.release]
 debug = false
+
+# waffle 0.3.3 with a faster dominator pass (third_party/waffle/NIGHTMONKEY.md, #29).
+[patch.crates-io]
+waffle = { path = "third_party/waffle" }
