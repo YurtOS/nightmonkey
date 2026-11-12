@@ -23,8 +23,11 @@
 /// `JSVAL_TAG_PRIVATE_GCTHING` in 159.
 #[cfg(feature = "ff147")]
 pub(crate) const VAL_GCTHING_TAG_MIN: u32 = 0xFFFF_FF86;
-#[cfg(feature = "ff159")]
+#[cfg(all(feature = "ff159", not(feature = "ff160")))]
 pub(crate) const VAL_GCTHING_TAG_MIN: u32 = 0xFFFF_FF87;
+// 160 (JSVAL_TAG_PRIVATE_GCTHING, 0x0b).
+#[cfg(feature = "ff160")]
+pub(crate) const VAL_GCTHING_TAG_MIN: u32 = 0xFFFF_FF8B;
 
 // --- JSObject / NativeObject ----------------------------------------------
 //

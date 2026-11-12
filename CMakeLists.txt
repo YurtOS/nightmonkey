@@ -156,6 +156,13 @@ if(NOT NIGHT_SEMANTICS_LINE MATCHES "^pub const JSOP_SEMANTICS_VERSION: u32 = ([
   message(FATAL_ERROR "${NIGHT_OPCODE_TABLE} records no JSOP_SEMANTICS_VERSION: regenerate it with scripts/gen_opcodes.py")
 endif()
 list(APPEND NIGHT_DEFINES "NIGHT_JSOP_SEMANTICS_VERSION=${CMAKE_MATCH_1}")
+# The Firefox major version of the selected engine (ff160 -> 160), for what the
+# opcode table cannot tell apart: 160 has 159's opcodes and semantics version
+# but different Value tags (runtime/NightEngineVersion.h).
+if(NOT NIGHT_ENGINE_VERSION MATCHES "^ff([0-9]+)$")
+  message(FATAL_ERROR "NIGHT_ENGINE_VERSION=${NIGHT_ENGINE_VERSION}: expected ff<Firefox major version>")
+endif()
+list(APPEND NIGHT_DEFINES "NIGHT_ENGINE_FF=${CMAKE_MATCH_1}")
 foreach(d ${SM_DEBUG_DEFINES})
   list(APPEND NIGHT_DEFINES "${d}=1")
 endforeach()

@@ -10,6 +10,7 @@ default = ["ff159", "parallel"]
 # Engine version (see compiler/src/opcodes/): exactly one.
 ff147 = ["night-compiler/ff147", "night-snapshot/ff147"]
 ff159 = ["night-compiler/ff159", "night-snapshot/ff159"]
+ff160 = ["ff159", "night-compiler/ff160", "night-snapshot/ff160"]
 parallel = ["dep:rayon", "night-compiler/parallel", "waffle/parallel"]
 wizen = ["dep:wizer", "dep:libc"]
 

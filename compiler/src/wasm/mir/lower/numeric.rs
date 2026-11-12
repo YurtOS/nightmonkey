@@ -335,13 +335,13 @@ impl<'a> Lower<'a> {
         let slow = self.body.add_block();
         let r = match cc {
             JsCc::StrictEq | JsCc::StrictNe => {
-                // int32, boolean, undefined, null (consecutive tags), symbol
-                // or object.
+                // int32, boolean, undefined, null (the tags from TAG_INT32
+                // through TAG_INT32 + TAG_IMMEDIATE_SPAN), symbol or object.
                 let simple = |l: &mut Self, t: Value| {
                     let lo = l.i32c(TAG_INT32 as u32);
                     let rel = l.bin(Operator::I32Sub, t, lo, Type::I32);
-                    let three = l.i32c(3);
-                    let prim = l.bin(Operator::I32LeU, rel, three, Type::I32);
+                    let span = l.i32c(TAG_IMMEDIATE_SPAN);
+                    let prim = l.bin(Operator::I32LeU, rel, span, Type::I32);
                     let sym = l.tag_is(t, TAG_SYMBOL as u32);
                     let obj = l.tag_is(t, TAG_OBJECT as u32);
                     let x = l.bin(Operator::I32Or, prim, sym, Type::I32);

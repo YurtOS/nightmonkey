@@ -222,22 +222,22 @@ impl<'a> Gen<'a> {
     }
 
     /// ToBoolean's inline cases, decided from the tag: int32, boolean,
-    /// undefined and null (the contiguous tags `TAG_INT32..=TAG_NULL`), and
-    /// doubles. Returns (whether `v` is one of them, its truth value if so).
+    /// undefined and null (the tags from `TAG_INT32` through
+    /// `TAG_INT32 + TAG_IMMEDIATE_SPAN`: consecutive in 147 and 159, spaced
+    /// out in 160, whose gaps no Value carries), and doubles. Returns
+    /// (whether `v` is one of them, its truth value if so).
     pub(super) fn truthy_inline(&mut self, v: Value) -> (Value, Value) {
-        const _: () = assert!(
-            TAG_BOOLEAN == TAG_INT32 + 1
-                && TAG_UNDEFINED == TAG_INT32 + 2
-                && TAG_NULL == TAG_INT32 + 3
-        );
         let t = self.tag_of(v);
         let base = self.i32c(TAG_INT32 as u32);
         let rel = self.binop(Operator::I32Sub, t, base, Type::I32);
-        let four = self.i32c(4);
-        let tagged = self.binop(Operator::I32LtU, rel, four, Type::I32);
+        let count = self.i32c(TAG_IMMEDIATE_SPAN + 1);
+        let tagged = self.binop(Operator::I32LtU, rel, count, Type::I32);
         // Int32 and boolean: a nonzero payload. Undefined and null: false.
-        let two = self.i32c(2);
-        let has_payload = self.binop(Operator::I32LtU, rel, two, Type::I32);
+        let int_k = self.i32c(TAG_INT32 as u32);
+        let is_int = self.binop(Operator::I32Eq, t, int_k, Type::I32);
+        let bool_k = self.i32c(TAG_BOOLEAN as u32);
+        let is_bool = self.binop(Operator::I32Eq, t, bool_k, Type::I32);
+        let has_payload = self.binop(Operator::I32Or, is_int, is_bool, Type::I32);
         let low = self.unop(Operator::I32WrapI64, v, Type::I32);
         let z = self.i32c(0);
         let nz = self.binop(Operator::I32Ne, low, z, Type::I32);
@@ -280,15 +280,19 @@ impl<'a> Gen<'a> {
         let same = self.binop(Operator::I32Eq, ta, tb, Type::I32);
         let base = self.i32c(TAG_INT32 as u32);
         let rel = self.binop(Operator::I32Sub, ta, base, Type::I32);
-        let four = self.i32c(4);
-        let prim = self.binop(Operator::I32LtU, rel, four, Type::I32);
+        let count = self.i32c(TAG_IMMEDIATE_SPAN + 1);
+        let prim = self.binop(Operator::I32LtU, rel, count, Type::I32);
         let obj_k = self.i32c(TAG_OBJECT as u32);
         let obj = self.binop(Operator::I32Eq, ta, obj_k, Type::I32);
         let kind_ok = self.binop(Operator::I32Or, prim, obj, Type::I32);
         let inline = self.binop(Operator::I32And, same, kind_ok, Type::I32);
         let bits_eq = self.binop(Operator::I64Eq, a, b, Type::I32);
-        let two = self.i32c(2);
-        let unit = self.binop(Operator::I32GeU, rel, two, Type::I32);
+        // Undefined and null have one value each, whatever the payload.
+        let undef_k = self.i32c(TAG_UNDEFINED as u32);
+        let is_undef = self.binop(Operator::I32Eq, ta, undef_k, Type::I32);
+        let null_k = self.i32c(TAG_NULL as u32);
+        let is_null = self.binop(Operator::I32Eq, ta, null_k, Type::I32);
+        let unit = self.binop(Operator::I32Or, is_undef, is_null, Type::I32);
         let unit = self.binop(Operator::I32And, unit, prim, Type::I32);
         let eq = self.binop(Operator::I32Or, bits_eq, unit, Type::I32);
         (inline, eq)

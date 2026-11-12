@@ -214,7 +214,10 @@ changes. CMake passes it to the C++ runtime, whose per-version code keys
 on it; `runtime/NightEngineVersion.h` checks it against the engine's and
 checks the value tags and magic payloads the compiler emits.
 
-Engine versions: `ff159` (Firefox 159, semantics 2, the default; the
+Engine versions: `ff160` (Firefox 160, semantics 2: 159's opcode table and
+semantics with re-encoded value tags; `--no-default-features --features
+ff160`, `-DNIGHT_ENGINE_VERSION=ff160`; CI runs its Rust tests and Clippy, and
+no engine release carries 160 yet), `ff159` (Firefox 159, semantics 2, the default; the
 shipping engine, built and tested by CI against `engine-v159.0-1`) and
 `ff147` (Firefox 147, semantics 1; `cargo build --no-default-features
 --features ff147`, `-DNIGHT_ENGINE_VERSION=ff147`). CI runs ff147's Rust

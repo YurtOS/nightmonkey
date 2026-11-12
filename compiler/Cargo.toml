@@ -12,6 +12,10 @@ license.workspace = true
 default = ["ff159"]
 ff147 = []
 ff159 = []
+# 160 has 159's opcode table and bytecode semantics (every `ff159` gate holds)
+# and different Value tags: the feature implies ff159 and the tag constants
+# check for it first.
+ff160 = ["ff159"]
 parallel = ["dep:rayon"]
 
 [dependencies]
