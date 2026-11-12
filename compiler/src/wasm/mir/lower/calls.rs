@@ -530,9 +530,10 @@ impl<'a> Lower<'a> {
             let (nat_b, gen_b) = (self.body.add_block(), self.body.add_block());
             self.cond_br(native, Self::to(nat_b), Self::to(gen_b));
             self.cur = nat_b;
+            let caller = self.actuals().0;
             let ok_nat = self.call1(
                 self.h.native_dispatch,
-                &[self.cx, top, base, argc_v],
+                &[self.cx, top, base, argc_v, caller],
                 Type::I32,
             );
             self.terminate(Terminator::Br {
@@ -546,7 +547,10 @@ impl<'a> Lower<'a> {
         // An iterator method's call reports an uncallable callee as the
         // iterator protocol does.
         let generic_f = if iter { self.h.call_iter } else { self.h.call };
-        let ok_generic = self.call1(generic_f, &[self.cx, top, base, argc_v], Type::I32);
+        // The calling frame's base, for the engine's scripted-caller queries
+        // (`night_runtime_call`'s `callerSp`).
+        let caller = self.actuals().0;
+        let ok_generic = self.call1(generic_f, &[self.cx, top, base, argc_v, caller], Type::I32);
         self.terminate(Terminator::Br {
             target: BlockTarget {
                 block: join,
@@ -674,7 +678,8 @@ impl<'a> Lower<'a> {
         self.cur = generic_b;
         let argc_v = self.i32c(argc);
         let generic_f = if iter { self.h.call_iter } else { self.h.call };
-        let ok_generic = self.call1(generic_f, &[self.cx, top, base, argc_v], Type::I32);
+        let caller = self.actuals().0;
+        let ok_generic = self.call1(generic_f, &[self.cx, top, base, argc_v, caller], Type::I32);
         self.terminate(Terminator::Br {
             target: BlockTarget {
                 block: join,

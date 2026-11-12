@@ -1,0 +1,10 @@
+# Exclusions that apply only to a build for engine ff147, on top of
+# jstests-excludes.txt (scripts/run-jstests.sh). 159's patch 0015
+# (innermostFrame hook) lets the engine find a compiled caller; 147 has no
+# such hook, so loadRelativeToScript from compiled code still reports
+# "unable to resolve path" there. See #28. (The four normalize-generateddata
+# parts that load this way pass on 147 without running: it has no
+# String.prototype.normalize.)
+non262/extensions/clone-v1-typed-array.js
+non262/object/15.2.3.6-function-length.js
+non262/object/15.2.3.6-new-definition.js

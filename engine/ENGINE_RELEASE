@@ -1,9 +1,9 @@
 # The YurtOS/yurt-firefox engine release CI builds against
 # (engine-release.yml). Written by scripts/update-engine-release.sh;
 # checked by scripts/check-engine-release.sh.
-tag=engine-v159.0-2
-manifest=67ef0481223fe44c75f40bed41edf921f5d0e0d1a604da0b0fe630b694af2eee
-wasm32-wasi=b7a6ef56eeafa926d09c0d8f9dc907976b3c76d1867b94e2825196723abd3f1f
+tag=engine-v159.0-3
+manifest=4a9f06b0a3005235727ea630f465bd1e378cdbfba1cb82c3705a171f0be6ee3c
+wasm32-wasi=7250d5781020644d1082c40b370ee0c5a95b88a487700d7abcfa291b210cebfb
 testsrc=853ad941934cdbcfecafe1e8fe51238312b8d51b89e485dcf8739b019f4f0698
 jstests=effe8690758cf65df87a0b463d44341a2a76f5f7918b66b872853c2702537949
 toolchain-clang=005772bae81d40cb204ee16ff5cb2b34d7c4a76f42ac31728ff18ba781d76017

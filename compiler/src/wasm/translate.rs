@@ -69,12 +69,13 @@ pub struct Helpers {
     /// pair the compiled arm proved both-string. Quiet alloc -- no user
     /// code, no pre-existing-heap writes.
     pub concat: Func,
-    /// `night_runtime_call(cx, sp, argc, out) -> ok` (generic call).
+    /// `night_runtime_call(cx, top, frame, argc, callerSp) -> ok` (generic
+    /// call; `callerSp` is the calling frame's base).
     pub call: Func,
     /// `night_runtime_call` for a `CallIter`/`CallContentIter` site: a
     /// primitive callee reports the iterable as not iterable.
     pub call_iter: Func,
-    /// `night_runtime_native_dispatch(cx, top, sp, argc) -> ok`: lean native invoke
+    /// `night_runtime_native_dispatch(cx, top, sp, argc, callerSp) -> ok`: lean native invoke
     /// for a callee already proved (by identity cell) a pristine builtin --
     /// recursion check + AutoRealm + `fun->native()`, no classify/apply/rope
     /// machinery. Used by the String.prototype direct-dispatch arms (Part B).
@@ -3063,8 +3064,11 @@ mod tests {
             params: vec![Type::I32, Type::I32, Type::I64, Type::I64],
             returns: vec![Type::I32],
         });
+        // call / call_iter / native_dispatch: (cx, top, frame, argc, callerSp)
+        // -> ok. `callerSp` is the calling compiled frame's base (0: none),
+        // which the helper records for the engine's scripted-caller queries.
         let call_sig = m.signatures.push(SignatureData {
-            params: vec![Type::I32, Type::I32, Type::I32, Type::I32],
+            params: vec![Type::I32; 5],
             returns: vec![Type::I32],
         });
         let getp_sig = m.signatures.push(SignatureData {
@@ -3122,9 +3126,9 @@ mod tests {
         });
         let apply_fwd = stub(&mut m, apply_fwd_sig, true, "night_runtime_apply_fwd");
         // construct: (cx i32, top i32, frame i32, argc i32, nSlots i32,
-        // stampWord i32) -> i32.
+        // stampWord i32, callerSp i32) -> i32.
         let construct_sig = m.signatures.push(SignatureData {
-            params: vec![Type::I32; 6],
+            params: vec![Type::I32; 7],
             returns: vec![Type::I32],
         });
         let construct = stub(&mut m, construct_sig, true, "night_runtime_construct");
@@ -3669,7 +3673,7 @@ mod tests {
             returns: vec![Type::I32],
         });
         let create_this = stub(&mut m, create_this_sig, true, "night_runtime_create_this");
-        // rest: (cx, top, sp i32, argc i32, nformal i32) -> ok (= construct_sig).
+        // rest: (cx, top, sp i32, argc i32, nformal i32) -> ok.
         let rest = stub(&mut m, rest_sig, true, "night_runtime_rest");
         // implicit_this / check_this_reinit / obj_with_proto: (cx, top, v i64) ->
         // ok (= tonum_sig shape).
@@ -3932,7 +3936,7 @@ mod tests {
         // to_async_iter: (cx, top, iter i64, next i64) -> ok (= gete_sig shape).
         let to_async_iter = stub(&mut m, gete_sig, true, "night_runtime_to_async_iter");
         // spread_call: (cx, top, callee i64, this i64, arr i64, newTarget i64,
-        // constructing i32) -> ok.
+        // constructing i32, callerSp i32) -> ok.
         let spread_sig = m.signatures.push(SignatureData {
             params: vec![
                 Type::I32,
@@ -3941,6 +3945,7 @@ mod tests {
                 Type::I64,
                 Type::I64,
                 Type::I64,
+                Type::I32,
                 Type::I32,
             ],
             returns: vec![Type::I32],

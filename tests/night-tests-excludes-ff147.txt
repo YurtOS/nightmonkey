@@ -1,0 +1,7 @@
+# Night tests (tests/jit-test, paths relative to it) that a build for engine ff147
+# cannot pass; scripts/run-night-tests.sh skips them for that build.
+#
+# 159's patch 0015 (innermostFrame hook) lets the engine find a compiled caller of
+# a native; 147 has no such hook, so loadRelativeToScript / indirect eval / new
+# Function called from compiled code still report no caller there. See #28.
+night/caller-script.js

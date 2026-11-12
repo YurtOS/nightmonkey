@@ -278,7 +278,8 @@ bool night_runtime_to_async_iter(JSContext* cx, uint32_t top, uint64_t iter,
 NIGHT_RUNTIME_EXPORT(night_runtime_spread_call)
 bool night_runtime_spread_call(JSContext* cx, uint32_t top, uint64_t calleeBits,
                                uint64_t thisvBits, uint64_t arrBits,
-                               uint64_t newTargetBits, uint32_t constructing);
+                               uint64_t newTargetBits, uint32_t constructing,
+                               uint32_t callerSp);
 
 // `OptimizeSpreadCall`: forward-array-or-undefined for a spread argument `v`
 // to the out-slot. May GC.
@@ -845,16 +846,22 @@ bool night_runtime_concat(JSContext* cx, uint32_t top, uint64_t a, uint64_t b);
 
 // Generic call: invoke the callee in the frame at `sp` with `argc` args
 // Writes the return value to the out-slot at `top`.
+//
+// `callerSp` (this and the helpers below that take it) is the base of the
+// compiled frame making the call, or 0 when the caller has no frame to name:
+// the callee may ask the engine who called it (loadRelativeToScript, indirect
+// eval, `new Function`), and compiled frames are on no engine Activation, so
+// the helper records it (nightrt::AutoCallerFrame, 159 only).
 NIGHT_RUNTIME_EXPORT(night_runtime_call)
 bool night_runtime_call(JSContext* cx, uint32_t top, uint32_t sp,
-                        uint32_t argc);
+                        uint32_t argc, uint32_t callerSp);
 
 // `night_runtime_call` for a `CallIter`/`CallContentIter` site: a primitive
 // callee reports the iterable (the frame's `this`) as not iterable, the way
 // the interpreter does, instead of the callee as not a function.
 NIGHT_RUNTIME_EXPORT(night_runtime_call_iter)
 bool night_runtime_call_iter(JSContext* cx, uint32_t top, uint32_t sp,
-                             uint32_t argc);
+                             uint32_t argc, uint32_t callerSp);
 
 // Lean native dispatch: the callee in the frame at `sp` was already proved a
 // pristine builtin native by a callee-identity cell (String.prototype
@@ -864,7 +871,7 @@ bool night_runtime_call_iter(JSContext* cx, uint32_t top, uint32_t sp,
 // native callee.
 NIGHT_RUNTIME_EXPORT(night_runtime_native_dispatch)
 bool night_runtime_native_dispatch(JSContext* cx, uint32_t top, uint32_t sp,
-                                   uint32_t argc);
+                                   uint32_t argc, uint32_t callerSp);
 
 // Compile-time apply-forward: a recognized
 // `T.apply(thisArg, arguments)` super-call whose `arguments` is only forwarded.
@@ -885,7 +892,7 @@ bool night_runtime_apply_fwd(JSContext* cx, uint32_t top, uint64_t applyFnBits,
 NIGHT_RUNTIME_EXPORT(night_runtime_construct)
 bool night_runtime_construct(JSContext* cx, uint32_t top, uint32_t sp,
                              uint32_t argc, uint32_t nSlots,
-                             uint32_t stampWord);
+                             uint32_t stampWord, uint32_t callerSp);
 
 // Host print of a single boxed Value (one of the allowlisted opaque globals).
 NIGHT_RUNTIME_EXPORT(night_runtime_print)

@@ -66,12 +66,17 @@ using NightFn = int32_t (*)(JSContext* cx, void* sp, uint32_t argc,
 // Counted around the body's execution only, so a suspended generator (whose
 // frame has exited) does not count, and once the frame returns the stack is
 // as it was and the engine's own test applies again.
+//
+// It also records the frame as the innermost compiled one for the engine's
+// scripted-caller queries (nightrt::AutoCallerFrame): `frame` is the frame's
+// base, whose slot 0 holds the callee (or, for global code, the script).
 class MOZ_RAII AutoLiveCompiledFrame {
   nightrt::NightContextState* state_;
+  nightrt::AutoCallerFrame callerFrame_;
 
  public:
-  explicit AutoLiveCompiledFrame(JSContext* cx)
-      : state_(nightrt::NightStateOf(cx)) {
+  AutoLiveCompiledFrame(JSContext* cx, JS::Value* frame)
+      : state_(nightrt::NightStateOf(cx)), callerFrame_(cx, frame) {
     MOZ_ASSERT(state_);
     state_->liveFrames++;
   }
@@ -159,7 +164,7 @@ static EnterNightStatus EnterNight(JSContext* cx, JSScript* script,
 
   uint64_t retval = 0;
 #if JSOP_SEMANTICS_VERSION >= 2
-  AutoLiveCompiledFrame liveFrame(cx);
+  AutoLiveCompiledFrame liveFrame(cx, sp);
 #endif
   NightFn fn = reinterpret_cast<NightFn>(static_cast<uintptr_t>(index));
   // The body receives its own JSScript (compiled-body ABI) so closure ops can
@@ -228,7 +233,7 @@ static EnterNightStatus EnterNightGlobal(JSContext* cx, JSScript* script,
 
   uint64_t retval = 0;
 #if JSOP_SEMANTICS_VERSION >= 2
-  AutoLiveCompiledFrame liveFrame(cx);
+  AutoLiveCompiledFrame liveFrame(cx, sp);
 #endif
   NightFn fn = reinterpret_cast<NightFn>(static_cast<uintptr_t>(index));
   // Global code has no new.target.
@@ -390,7 +395,7 @@ EnterNightStatus NightApplyOrCall(JSContext* cx, const Value& targetv,
   stack.setTop(frameTop);
   uint64_t retval = 0;
 #if JSOP_SEMANTICS_VERSION >= 2
-  AutoLiveCompiledFrame liveFrame(cx);
+  AutoLiveCompiledFrame liveFrame(cx, sp);
 #endif
   NightFn fn = reinterpret_cast<NightFn>(static_cast<uintptr_t>(index));
   // apply/call forwarding is always an ordinary call: new.target = undefined.
@@ -471,7 +476,7 @@ EnterNightStatus EnterNightResume(JSContext* cx,
 
   uint64_t retval = 0;
 #if JSOP_SEMANTICS_VERSION >= 2
-  AutoLiveCompiledFrame liveFrame(cx);
+  AutoLiveCompiledFrame liveFrame(cx, sp);
 #endif
   NightFn fn = reinterpret_cast<NightFn>(static_cast<uintptr_t>(index));
   int32_t err =

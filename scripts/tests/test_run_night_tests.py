@@ -21,7 +21,7 @@ class NightTestHarnessTests(unittest.TestCase):
 
     def shell(self):
         wrapper = self.root / "build/bin/inproc-shell.sh"
-        wrapper.parent.mkdir(parents=True)
+        wrapper.parent.mkdir(parents=True, exist_ok=True)
         wrapper.write_text('#!/usr/bin/env bash\nexec bash "$@"\n')
         wrapper.chmod(0o755)
 
@@ -55,6 +55,30 @@ class NightTestHarnessTests(unittest.TestCase):
         result = self.run_harness()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("night tests: 0 passed, 1 failed", result.stdout)
+
+    def exclusion_run(self, version, cache=True):
+        self.shell()
+        (self.root / "tests/jit-test/ok.js").write_text("exit 0\n")
+        (self.root / "tests/jit-test/sub").mkdir(exist_ok=True)
+        (self.root / "tests/jit-test/sub/needs-hook.js").write_text("exit 9\n")
+        (self.root / "tests/night-tests-excludes-ff147.txt").write_text(
+            "# a comment\n\nsub/needs-hook.js\n")
+        if cache:
+            (self.root / "build/CMakeCache.txt").write_text(
+                f"NIGHT_ENGINE_VERSION:STRING={version}\n")
+        return self.run_harness()
+
+    def test_version_exclusions_skip_tests_only_for_that_engine(self):
+        # A test one engine cannot pass is skipped on that engine's builds and
+        # still runs (and fails here) on any other, or with no CMake cache.
+        skipped = self.exclusion_run("ff147")
+        self.assertEqual(skipped.returncode, 0, skipped.stdout + skipped.stderr)
+        self.assertIn("night tests: 1 passed, 0 failed, 1 skipped for engine ff147", skipped.stdout)
+        for version, cache in (("ff159", True), (None, False)):
+            with self.subTest(version=version):
+                other = self.exclusion_run(version, cache)
+                self.assertNotEqual(other.returncode, 0)
+                self.assertIn("night tests: 1 passed, 1 failed", other.stdout)
 
 
 if __name__ == "__main__":

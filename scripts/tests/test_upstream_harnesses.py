@@ -36,9 +36,11 @@ class UpstreamHarnessTests(unittest.TestCase):
             harness.parent.mkdir(parents=True)
             harness.write_text(
                 'import os, shutil, sys\nprint(os.environ["HARNESS_OUTPUT"])\n'
-                'if "EXCLUDES_COPY" in os.environ and "--exclude-from" in sys.argv:\n'
-                '    shutil.copyfile(sys.argv[sys.argv.index("--exclude-from") + 1],\n'
-                '                    os.environ["EXCLUDES_COPY"])\n'
+                'if "EXCLUDES_COPY" in os.environ:\n'
+                '    files = [sys.argv[i + 1] for i, a in enumerate(sys.argv)\n'
+                '             if a in ("--exclude-from", "--exclude-file")]\n'
+                '    with open(os.environ["EXCLUDES_COPY"], "w") as out:\n'
+                '        out.write("".join(open(f).read() for f in files))\n'
                 'sys.exit(int(os.environ.get("HARNESS_STATUS", "0")))\n'
             )
 
@@ -87,6 +89,40 @@ class UpstreamHarnessTests(unittest.TestCase):
         self.assertEqual(self.jit_excludes("ff159", interp), ["both.js", "both159.js"])
         self.assertEqual(self.jit_excludes("ff147", aot), ["both.js", "aot.js"])
         self.assertEqual(self.jit_excludes(None, aot), ["both.js", "aot.js"])
+
+    def jstests_excludes(self, version, lane_env):
+        """The exclusion lists run-jstests.sh hands jstests.py for a build
+        configured for engine `version` (None: no CMake cache), in order."""
+        tests = self.root / "tests"
+        (tests / "wasi-jstests-excludes.txt").write_text("both.js\n")
+        (tests / "jstests-excludes.txt").write_text("aot.js\n")
+        (tests / "wasi-jstests-excludes-ff147.txt").write_text("both147.js\n")
+        (tests / "jstests-excludes-ff147.txt").write_text("aot147.js\n")
+        cache = self.build / "CMakeCache.txt"
+        if version:
+            cache.write_text(f"NIGHT_ENGINE_VERSION:STRING={version}\n")
+        elif cache.exists():
+            cache.unlink()
+        copy = self.root / "js-excludes-copy"
+        result = subprocess.run(
+            ["bash", str(self.scripts / "run-jstests.sh"), str(self.firefox), str(self.build)],
+            env={**os.environ, **lane_env, "EXCLUDES_COPY": str(copy),
+                 "HARNESS_OUTPUT": "TEST-PASS | a.js | (args: '') [0.1 s]\n"
+                                   "NIGHT-JSTESTS completed=1 passed=1 failed=0 timeout=0 skipped=0"},
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return copy.read_text().split()
+
+    def test_jstests_excludes_are_scoped_to_the_build_engine_version(self):
+        # As the jit-test lists: a version's own lists apply only to builds
+        # for that engine (159 finds a compiled caller, 147 does not), the AOT
+        # lists only to the AOT lane.
+        aot, interp = {}, {"NIGHT_INPROCESS_OFF": "1"}
+        self.assertEqual(self.jstests_excludes("ff147", aot), ["both.js", "both147.js", "aot.js", "aot147.js"])
+        self.assertEqual(self.jstests_excludes("ff147", interp), ["both.js", "both147.js"])
+        self.assertEqual(self.jstests_excludes("ff159", aot), ["both.js", "aot.js"])
+        self.assertEqual(self.jstests_excludes(None, aot), ["both.js", "aot.js"])
 
     def test_jit_accepts_its_own_positive_summary(self):
         result = self.run_wrapper("jit", "TEST-PASS | first.js\nTEST-PASS | second.js\nPASSED ALL\nPassed: 2\nFailed: 0")

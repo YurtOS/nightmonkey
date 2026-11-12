@@ -1,0 +1,1 @@
+hits.push("main");

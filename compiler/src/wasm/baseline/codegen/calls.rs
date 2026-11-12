@@ -101,7 +101,11 @@ impl<'a> Gen<'a> {
         self.live = true;
         let argc_v = self.i32c(argc);
         let ok_generic = self
-            .call(self.h.call, &[self.cx, top, base, argc_v], Some(Type::I32))
+            .call(
+                self.h.call,
+                &[self.cx, top, base, argc_v, self.sp],
+                Some(Type::I32),
+            )
             .unwrap();
         self.br(BlockTarget {
             block: join,
