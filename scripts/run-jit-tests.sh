@@ -44,6 +44,11 @@ add_list() {
   if [ -n "$version" ] && [ -f "$here/tests/$1-$version.txt" ]; then
     cat "$here/tests/$1-$version.txt" >> "$combined"
   fi
+  # 160 inherits 159's exclusions (its tree is 159's plus a release of changes)
+  # until a 160-specific list says otherwise: tests/<list>-ff160.txt adds to it.
+  if [ "$version" = ff160 ] && [ -f "$here/tests/$1-ff159.txt" ]; then
+    cat "$here/tests/$1-ff159.txt" >> "$combined"
+  fi
 }
 : > "$combined"
 add_list wasi-jit-test-excludes
