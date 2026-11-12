@@ -89,6 +89,9 @@ class UpstreamHarnessTests(unittest.TestCase):
         self.assertEqual(self.jit_excludes("ff159", interp), ["both.js", "both159.js"])
         self.assertEqual(self.jit_excludes("ff147", aot), ["both.js", "aot.js"])
         self.assertEqual(self.jit_excludes(None, aot), ["both.js", "aot.js"])
+        # 160 inherits 159's lists, and a 160 list adds to them.
+        self.assertEqual(sorted(self.jit_excludes("ff160", aot)), ["aot.js", "aot159.js", "both.js", "both159.js"])
+        self.assertEqual(sorted(self.jit_excludes("ff160", interp)), ["both.js", "both159.js"])
 
     def jstests_excludes(self, version, lane_env):
         """The exclusion lists run-jstests.sh hands jstests.py for a build
