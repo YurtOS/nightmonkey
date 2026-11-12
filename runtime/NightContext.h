@@ -45,6 +45,8 @@ struct NightLeafMatch {
   int32_t pairs[2 * kMaxPairs] = {};
 };
 
+class AutoCallerFrame;
+
 struct NightContextState {
   // The property-IC region's base (NightEnvDesc::propicPtr), at offset 0:
   // compiled code loads it from the state it reaches through its context
@@ -62,54 +64,69 @@ struct NightContextState {
   uint32_t liveFrames = 0;
   // The innermost compiled frame that is calling out, for the engine's
   // scripted-caller queries (ExternalCompilerHooks::innermostFrame; 159
-  // only). Compiled frames sit on no engine Activation, so the engine's own
+  // only): the top of a chain of AutoCallerFrame guards, newest first (null:
+  // none). Compiled frames sit on no engine Activation, so the engine's own
   // frame iterator cannot see them: loadRelativeToScript, indirect eval and
   // `new Function` called from compiled code would find no (or the wrong)
-  // caller. `callerFrame` is that frame's base on the value stack (null:
-  // none; its slot 0 is the callee or, for global code, the script, and is
-  // traced and forwarded in place, so the script is read from it when asked
-  // and a compacting GC cannot leave it stale); `callerActivation` is
-  // cx->activation() when it was recorded, which tells the engine whether a
-  // frame of its own was pushed after it. Set and restored by
-  // AutoCallerFrame around the entries and the generic call helpers
-  // (runtime/NightEntry.cpp, runtime/NightRuntime.cpp); a direct
-  // compiled-to-compiled call touches neither. Appended after liveFrames:
-  // the property-IC base must stay at offset 0.
-  JS::Value* callerFrame = nullptr;
-  js::Activation* callerActivation = nullptr;
+  // caller. Each guard holds a frame base on the value stack (its slot 0 is
+  // the callee or, for global code, the script, and is traced and forwarded
+  // in place, so the script is read from it when asked and a compacting GC
+  // cannot leave it stale) and cx->activation() when it was recorded, which
+  // tells the engine whether a frame of its own was pushed after it. Pushed
+  // by the entries and the generic call helpers (runtime/NightEntry.cpp,
+  // runtime/NightRuntime.cpp); a direct compiled-to-compiled call pushes
+  // nothing. Appended after liveFrames: the property-IC base must stay at
+  // offset 0.
+  AutoCallerFrame* callerTop = nullptr;
 };
 
+// Null when the context has no state (the hooks are not installed, or the
+// state could not be allocated): no compiled code runs on such a context.
+inline NightContextState* NightStateOf(JSContext* cx) {
+  return static_cast<NightContextState*>(cx->getExternalCompilerState());
+}
+
+// The context's value stack. Only for a context that runs compiled code
+// (whose state exists: every entry checks NightStateOf first).
+inline NightStack& TheNightStackInline(JSContext* cx) {
+  NightContextState* state = NightStateOf(cx);
+  MOZ_ASSERT(state);
+  return state->stack;
+}
+
 // Records `frame` (the base of the compiled frame about to run or call out)
-// as the innermost one for the lifetime of the guard, and restores the
-// previous record after, so that once the outermost compiled frame returns
-// the record is clear and an interpreted frame's native calls see none. A
-// null `frame` (a fallback from a helper with no frame to name) leaves the
-// record as it is.
+// as the innermost one for the lifetime of the guard: it is pushed on the
+// context's chain and popped on exit, so once the outermost compiled frame
+// returns the chain is empty and an interpreted frame's native calls see
+// none. A null `frame` (a fallback from a helper with no frame to name)
+// pushes nothing.
 class MOZ_RAII AutoCallerFrame {
   NightContextState* state_;
-  JS::Value* savedFrame_ = nullptr;
-  js::Activation* savedActivation_ = nullptr;
-  bool active_;
+  AutoCallerFrame* prev_ = nullptr;
+  JS::Value* frame_;
+  js::Activation* activation_ = nullptr;
 
  public:
   AutoCallerFrame(JSContext* cx, JS::Value* frame)
-      : state_(static_cast<NightContextState*>(cx->getExternalCompilerState())),
-        active_(frame != nullptr) {
-    if (active_) {
-      savedFrame_ = state_->callerFrame;
-      savedActivation_ = state_->callerActivation;
-      state_->callerFrame = frame;
-      state_->callerActivation = cx->activation();
+      : state_(NightStateOf(cx)), frame_(frame) {
+    if (frame_) {
+      prev_ = state_->callerTop;
+      activation_ = cx->activation();
+      state_->callerTop = this;
     }
   }
   ~AutoCallerFrame() {
-    if (active_) {
-      state_->callerFrame = savedFrame_;
-      state_->callerActivation = savedActivation_;
+    if (frame_) {
+      state_->callerTop = prev_;
     }
   }
   AutoCallerFrame(const AutoCallerFrame&) = delete;
   AutoCallerFrame& operator=(const AutoCallerFrame&) = delete;
+
+  JS::Value* frame() const { return frame_; }
+  js::Activation* activation() const { return activation_; }
+  // The guard that was innermost when this one was pushed.
+  AutoCallerFrame* prev() const { return prev_; }
 };
 
 }  // namespace nightrt

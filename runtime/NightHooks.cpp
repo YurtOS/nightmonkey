@@ -178,33 +178,38 @@ static bool ExternalFramesLive(JSContext* cx) {
 
 // The engine's scripted-caller queries (JS::DescribeScriptedCaller,
 // js::DescribeScriptedCallerForCompilation) cannot see compiled frames; this
-// names the innermost one that is calling out, if any (patch 0015). Its
-// script comes from slot 0 of the frame the call helper recorded
-// (nightrt::AutoCallerFrame): the callee, or for global code the script as a
+// names the innermost one that is calling out, if any (patch 0015). The
+// guards (nightrt::AutoCallerFrame) are walked newest first: a frame's script
+// comes from its slot 0, the callee or, for global code, the script as a
 // private GC thing. Slot 0 is traced in place, so the script is current even
-// after a compacting GC; nothing here is held across a call.
+// after a compacting GC; nothing here is held across a call. A self-hosted
+// frame (the compiled Array.prototype.forEach and friends) is skipped, as the
+// engine's iterators skip it, so the caller it was called from is reported.
 static JSScript* InnermostFrame(JSContext* cx, js::Activation** activation) {
   nightrt::NightContextState* state = nightrt::NightStateOf(cx);
-  if (!state || !state->callerFrame) {
+  if (!state) {
     return nullptr;
   }
-  JS::Value slot0 = state->callerFrame[0];
-  JSScript* script = nullptr;
-  if (slot0.isObject()) {
-    JSObject& obj = slot0.toObject();
-    if (obj.is<JSFunction>()) {
-      JSFunction& fun = obj.as<JSFunction>();
-      if (fun.hasBaseScript() && fun.baseScript()->hasBytecode()) {
-        script = fun.nonLazyScript();
+  for (nightrt::AutoCallerFrame* g = state->callerTop; g; g = g->prev()) {
+    JS::Value slot0 = g->frame()[0];
+    JSScript* script = nullptr;
+    if (slot0.isObject()) {
+      JSObject& obj = slot0.toObject();
+      if (obj.is<JSFunction>()) {
+        JSFunction& fun = obj.as<JSFunction>();
+        if (fun.hasBaseScript() && fun.baseScript()->hasBytecode()) {
+          script = fun.nonLazyScript();
+        }
       }
+    } else if (slot0.isPrivateGCThing()) {
+      script = static_cast<JSScript*>(slot0.toGCThing());
     }
-  } else if (slot0.isPrivateGCThing()) {
-    script = static_cast<JSScript*>(slot0.toGCThing());
+    if (script && !script->selfHosted()) {
+      *activation = g->activation();
+      return script;
+    }
   }
-  if (script) {
-    *activation = state->callerActivation;
-  }
-  return script;
+  return nullptr;
 }
 #endif
 
