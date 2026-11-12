@@ -22,7 +22,7 @@ function chainMain() { loadMain(); loadMain(); }              // compiled -> com
 function fnFileMain() { return new Function("return new Error().fileName")(); }
 function evalFileMain() { return (0, eval)("new Error().fileName"); }
 function viaMain(cb) { return cb(); }                         // compiled -> whatever
-function* genMain() { yield 1; loadMain(); yield 2; }          // a resumed compiled generator
+function* genMain() { yield 1; loadRelativeToScript("caller-script-data/main/h.inc"); yield 2; }  // a resumed compiled generator calling out itself
 
 function expect(name, want, fn) {
   hits.length = 0;

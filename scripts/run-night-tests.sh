@@ -28,7 +28,7 @@ if [ -f "$build/CMakeCache.txt" ]; then
   version=$(sed -n 's/^NIGHT_ENGINE_VERSION:[A-Z]*=//p' "$build/CMakeCache.txt")
 fi
 if [ -n "$version" ] && [ -f "$here/tests/night-tests-excludes-$version.txt" ]; then
-  grep -v '^[[:space:]]*\(#\|$\)' "$here/tests/night-tests-excludes-$version.txt" > "$skips" || true
+  tr -d '\r' < "$here/tests/night-tests-excludes-$version.txt" | sed 's/[[:space:]]*$//' | grep -v '^[[:space:]]*\(#\|$\)' > "$skips" || true
 fi
 find "$here/tests/jit-test" -name '*.js' -type f -print0 > "$tests"
 if [ ! -s "$tests" ]; then
