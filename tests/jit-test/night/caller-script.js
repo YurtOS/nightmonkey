@@ -5,8 +5,8 @@
 // them (patch 0015, the innermostFrame hook): before it, a compiled caller got
 // "unable to resolve path" and an interpreted frame below a compiled one was
 // reported in its place. Needs the engine hook (159); the same assertions are
-// the language's answer in the interpreter lane, and on a 147 build (no hook)
-// this test fails. See issue #28.
+// the language's answer in the interpreter lane. A 147 build has no hook, so
+// tests/night-tests-excludes-ff147.txt skips this test there. See issue #28.
 //
 // The AOT tier compiles only the primary script (this file); what it loads at
 // run time stays interpreted. So the COMPILED callers are defined here, and the
