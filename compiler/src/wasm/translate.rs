@@ -1033,11 +1033,31 @@ pub const INTRINSIC_CELL_BYTES: u32 = 8;
 // `JS::Value` is `(tag << 32) | payload`; doubles are stored as their raw
 // IEEE bits (the tag space is NaN-space). Carried from prior phases / Value.h.
 pub(super) const TAG_CLEAR: u32 = 0xFFFF_FF80;
+// 147 and 159 number the immediates INT32, BOOLEAN, UNDEFINED, NULL, MAGIC
+// consecutively from 1. 160 gives every non-GC, non-double type an even
+// code (js/public/Value.h, point 7 of the encoding's rules) and so orders
+// them INT32, NULL, UNDEFINED, BOOLEAN, MAGIC with the odd codes unused;
+// nothing may assume the tags are consecutive (`TAG_IMMEDIATE_SPAN`).
+#[cfg(not(feature = "ff160"))]
 pub(super) const TAG_INT32: u64 = 0xFFFF_FF81;
+#[cfg(not(feature = "ff160"))]
 pub(super) const TAG_BOOLEAN: u64 = 0xFFFF_FF82;
+#[cfg(not(feature = "ff160"))]
 pub(super) const TAG_UNDEFINED: u64 = 0xFFFF_FF83;
+#[cfg(not(feature = "ff160"))]
 pub(super) const TAG_NULL: u64 = 0xFFFF_FF84;
+#[cfg(not(feature = "ff160"))]
 pub(super) const TAG_MAGIC: u64 = 0xFFFF_FF85;
+#[cfg(feature = "ff160")]
+pub(super) const TAG_INT32: u64 = 0xFFFF_FF82;
+#[cfg(feature = "ff160")]
+pub(super) const TAG_BOOLEAN: u64 = 0xFFFF_FF88;
+#[cfg(feature = "ff160")]
+pub(super) const TAG_UNDEFINED: u64 = 0xFFFF_FF86;
+#[cfg(feature = "ff160")]
+pub(super) const TAG_NULL: u64 = 0xFFFF_FF84;
+#[cfg(feature = "ff160")]
+pub(super) const TAG_MAGIC: u64 = 0xFFFF_FF8A;
 // 159 renumbered the GC-thing types (JSVAL_TYPE_PRIVATE_GCTHING 0x07,
 // SYMBOL 0x08, STRING 0x0e; 147: STRING 0x06, SYMBOL 0x07, PRIVATE_GCTHING
 // 0x08), so a string's tag is no longer the lowest GC-thing tag:
@@ -1049,9 +1069,44 @@ pub(super) const TAG_STRING: u64 = 0xFFFF_FF86;
 pub(super) const TAG_SYMBOL: u64 = 0xFFFF_FF87;
 #[cfg(feature = "ff159")]
 pub(super) const TAG_STRING: u64 = 0xFFFF_FF8E;
-#[cfg(feature = "ff159")]
+#[cfg(all(feature = "ff159", not(feature = "ff160")))]
 pub(super) const TAG_SYMBOL: u64 = 0xFFFF_FF88;
+#[cfg(feature = "ff160")]
+pub(super) const TAG_SYMBOL: u64 = 0xFFFF_FF8F;
+#[cfg(not(feature = "ff160"))]
 pub(super) const TAG_BIGINT_HI: u32 = 0xFFFF_FF89;
+#[cfg(feature = "ff160")]
+pub(super) const TAG_BIGINT_HI: u32 = 0xFFFF_FF8D;
+/// The distance from `TAG_INT32` to the highest of the four immediates that
+/// ToBoolean and (in)equality decide inline (int32, boolean, undefined,
+/// null): `tag - TAG_INT32 <= TAG_IMMEDIATE_SPAN` selects them (and, in 160,
+/// the unused odd codes between them, which no Value carries).
+pub(super) const TAG_IMMEDIATE_SPAN: u32 = {
+    let (i, b, u, n) = (TAG_INT32, TAG_BOOLEAN, TAG_UNDEFINED, TAG_NULL);
+    let mut hi = i;
+    if b > hi {
+        hi = b;
+    }
+    if u > hi {
+        hi = u;
+    }
+    if n > hi {
+        hi = n;
+    }
+    (hi - i) as u32
+};
+// INT32 is the lowest of the four, and no other tag lies in its range: the
+// magic, symbol, bigint, object and string tags are above it, and doubles
+// below `TAG_CLEAR`.
+const _: () = {
+    assert!(TAG_INT32 < TAG_BOOLEAN && TAG_INT32 < TAG_UNDEFINED && TAG_INT32 < TAG_NULL);
+    let hi = TAG_INT32 + TAG_IMMEDIATE_SPAN as u64;
+    assert!(TAG_MAGIC > hi);
+    assert!(TAG_SYMBOL > hi);
+    assert!(TAG_BIGINT_HI as u64 > hi);
+    assert!(TAG_OBJECT > hi);
+    assert!(TAG_STRING > hi);
+};
 // `JSVAL_TAG_OBJECT` (= `JSVAL_TAG_CLEAR | JSVAL_TYPE_OBJECT` = 0xFFFFFF80|0x0c),
 // Value.h:200-212. On NUNBOX32 the low 32 bits of a boxed object Value are the
 // `JSObject*` directly (Value::toObjectOrNull, Value.h:945), so the object
@@ -4609,8 +4664,10 @@ mod tests {
     fn opcode_table_is_the_selected_engine_version() {
         #[cfg(feature = "ff147")]
         let expected = ("ff147", 1);
-        #[cfg(feature = "ff159")]
+        #[cfg(all(feature = "ff159", not(feature = "ff160")))]
         let expected = ("ff159", 2);
+        #[cfg(feature = "ff160")]
+        let expected = ("ff160", 2);
         assert_eq!(
             (
                 crate::opcodes::ENGINE_VERSION,
@@ -4638,7 +4695,7 @@ mod tests {
             ("BIGINT", 0x09, true),
             ("OBJECT", 0x0c, true),
         ];
-        #[cfg(feature = "ff159")]
+        #[cfg(all(feature = "ff159", not(feature = "ff160")))]
         let types = [
             ("INT32", 0x01, false),
             ("BOOLEAN", 0x02, false),
@@ -4650,6 +4707,21 @@ mod tests {
             ("BIGINT", 0x09, true),
             ("OBJECT", 0x0c, true),
             ("STRING", 0x0e, true),
+        ];
+        // 160 (js/public/Value.h): every non-GC, non-double type has an even
+        // code; the odd codes below the GC things are unused.
+        #[cfg(feature = "ff160")]
+        let types = [
+            ("INT32", 0x02, false),
+            ("NULL", 0x04, false),
+            ("UNDEFINED", 0x06, false),
+            ("BOOLEAN", 0x08, false),
+            ("MAGIC", 0x0a, false),
+            ("PRIVATE_GCTHING", 0x0b, true),
+            ("OBJECT", 0x0c, true),
+            ("BIGINT", 0x0d, true),
+            ("STRING", 0x0e, true),
+            ("SYMBOL", 0x0f, true),
         ];
         types.map(|(name, ty, gc)| (name, 0xFFFF_FF80 | ty, gc))
     }
@@ -4731,9 +4803,22 @@ mod tests {
                 "{name}: is a number"
             );
             assert_eq!(
-                tag.wrapping_sub(TAG_INT32 as u32) < 4,
+                tag.wrapping_sub(TAG_INT32 as u32) <= TAG_IMMEDIATE_SPAN,
                 matches!(name, "INT32" | "BOOLEAN" | "UNDEFINED" | "NULL"),
                 "{name}: is an immediate with a ToBoolean inline case"
+            );
+            // The lowerings that no longer rely on the tags being consecutive
+            // (ToBoolean's payload test, equality's undefined/null case) test
+            // these four constants for equality.
+            assert_eq!(
+                [TAG_INT32, TAG_BOOLEAN].contains(&(tag as u64)),
+                matches!(name, "INT32" | "BOOLEAN"),
+                "{name}: carries a payload that decides its truthiness"
+            );
+            assert_eq!(
+                [TAG_UNDEFINED, TAG_NULL].contains(&(tag as u64)),
+                matches!(name, "UNDEFINED" | "NULL"),
+                "{name}: has a single value, whatever its payload"
             );
         }
     }

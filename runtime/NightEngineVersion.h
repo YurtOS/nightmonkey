@@ -10,7 +10,9 @@
 // the runtime keys on it.
 //
 //   1: Firefox 147 (ff147).
-//   2: Firefox 159 (ff159): JSWhyMagic renumbered and JS_GENERATOR_CLOSING
+//   2: Firefox 159 (ff159) and 160 (ff160; the same opcode table and
+//      semantics, different Value tags: NIGHT_ENGINE_FF tells them apart).
+//      159: JSWhyMagic renumbered and JS_GENERATOR_CLOSING
 //      removed; a resumed generator gets [value, resume kind] and handles
 //      throw and return resumptions in bytecode (no CheckResumeKind or
 //      closing magic); DynamicImport takes an ImportPhase; the
@@ -23,6 +25,9 @@
 #include "js/Value.h"    // JSWhyMagic, JSVAL_TAG_*
 #include "vm/Opcodes.h"  // JSOP_SEMANTICS_VERSION
 
+#ifndef NIGHT_ENGINE_FF
+#  error "NIGHT_ENGINE_FF (the Firefox major version) is set by CMake from NIGHT_ENGINE_VERSION"
+#endif
 #ifndef NIGHT_JSOP_SEMANTICS_VERSION
 #  error "NIGHT_JSOP_SEMANTICS_VERSION is set by CMake from the selected opcode table"
 #endif
@@ -35,13 +40,26 @@ static_assert(JSOP_SEMANTICS_VERSION == NIGHT_JSOP_SEMANTICS_VERSION,
 // ValueLowerInclGCThingTag). 159 renumbered JSVAL_TYPE_STRING, _SYMBOL and
 // _PRIVATE_GCTHING.
 static_assert(JSVAL_TAG_CLEAR == 0xFFFFFF80, "translate.rs TAG_CLEAR");
+static_assert(JSVAL_TAG_NULL == 0xFFFFFF84, "translate.rs TAG_NULL");
+static_assert(JSVAL_TAG_OBJECT == 0xFFFFFF8C, "translate.rs TAG_OBJECT");
+#if NIGHT_ENGINE_FF >= 160
+// 160 gave every non-GC, non-double type an even code (Value.h); the immediates
+// are no longer consecutive (translate.rs TAG_IMMEDIATE_SPAN).
+static_assert(JSVAL_TAG_INT32 == 0xFFFFFF82, "translate.rs TAG_INT32 (ff160)");
+static_assert(JSVAL_TAG_UNDEFINED == 0xFFFFFF86, "translate.rs TAG_UNDEFINED (ff160)");
+static_assert(JSVAL_TAG_BOOLEAN == 0xFFFFFF88, "translate.rs TAG_BOOLEAN (ff160)");
+static_assert(JSVAL_TAG_MAGIC == 0xFFFFFF8A, "translate.rs TAG_MAGIC (ff160)");
+static_assert(JSVAL_TAG_BIGINT == 0xFFFFFF8D, "translate.rs TAG_BIGINT_HI (ff160)");
+static_assert(JSVAL_TAG_STRING == 0xFFFFFF8E, "translate.rs TAG_STRING (ff160)");
+static_assert(JSVAL_TAG_SYMBOL == 0xFFFFFF8F, "translate.rs TAG_SYMBOL (ff160)");
+static_assert(uint32_t(JS::detail::ValueLowerInclGCThingTag) == 0xFFFFFF8Bu,
+              "abi.rs VAL_GCTHING_TAG_MIN (ff160)");
+#else
 static_assert(JSVAL_TAG_INT32 == 0xFFFFFF81, "translate.rs TAG_INT32");
 static_assert(JSVAL_TAG_BOOLEAN == 0xFFFFFF82, "translate.rs TAG_BOOLEAN");
 static_assert(JSVAL_TAG_UNDEFINED == 0xFFFFFF83, "translate.rs TAG_UNDEFINED");
-static_assert(JSVAL_TAG_NULL == 0xFFFFFF84, "translate.rs TAG_NULL");
 static_assert(JSVAL_TAG_MAGIC == 0xFFFFFF85, "translate.rs TAG_MAGIC");
 static_assert(JSVAL_TAG_BIGINT == 0xFFFFFF89, "translate.rs TAG_BIGINT_HI");
-static_assert(JSVAL_TAG_OBJECT == 0xFFFFFF8C, "translate.rs TAG_OBJECT");
 #if JSOP_SEMANTICS_VERSION == 1
 static_assert(JSVAL_TAG_STRING == 0xFFFFFF86, "translate.rs TAG_STRING (ff147)");
 static_assert(JSVAL_TAG_SYMBOL == 0xFFFFFF87, "translate.rs TAG_SYMBOL (ff147)");
@@ -53,6 +71,7 @@ static_assert(JSVAL_TAG_SYMBOL == 0xFFFFFF88, "translate.rs TAG_SYMBOL (ff159)")
 static_assert(uint32_t(JS::detail::ValueLowerInclGCThingTag) == 0xFFFFFF87u,
               "abi.rs VAL_GCTHING_TAG_MIN (ff159)");
 #endif
+#endif  // NIGHT_ENGINE_FF
 
 namespace js {
 namespace night {

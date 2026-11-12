@@ -205,7 +205,9 @@ class CMakeDistTests(unittest.TestCase):
         # table NIGHT_ENGINE_VERSION selects (runtime/NightEngineVersion.h
         # static_asserts it against the engine's own Opcodes.h).
         self.package_config()
-        for version, semantics in (("ff147", 1), ("ff159", 2)):
+        # NIGHT_ENGINE_FF is the Firefox major version: 160 shares 159's table
+        # and semantics version, so only it tells them apart (the Value tags).
+        for version, semantics, major in (("ff147", 1, 147), ("ff159", 2, 159), ("ff160", 2, 160)):
             with self.subTest(version=version):
                 build = self.configured(NIGHT_ENGINE_VERSION=version, **self.provisioned())
                 compiles = json.loads((build / "compile_commands.json").read_text())
@@ -213,6 +215,7 @@ class CMakeDistTests(unittest.TestCase):
                 self.assertTrue(runtime, "no runtime compile lines")
                 for line in runtime:
                     self.assertIn(f"-DNIGHT_JSOP_SEMANTICS_VERSION={semantics}", line)
+                    self.assertIn(f"-DNIGHT_ENGINE_FF={major}", line)
 
     def test_unknown_engine_version_fails_at_configure(self):
         self.package_config()
