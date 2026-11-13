@@ -2,12 +2,16 @@
 # engine (NIGHT_ENGINE_VERSION=ff160; scripts/run-jit-tests.sh), on top of the
 # ff159 list. Applied to BOTH lanes. One path per line, relative to
 # js/src/jit-test/tests.
-#
-# Both fail identically with the AOT tier off (gate run 43370897258, pin
-# 91cf7b4, interpreter lane), so neither involves NightMonkey. Root cause not
-# yet investigated; tracked in the 160 follow-up.
 
-# Guest traps (code 1) while shrinking a large array.
-arrays/shrink-large-array.js
-# "Unicode backreference mismatch" from the engine's regexp implementation.
+# Fails with "Unicode backreference mismatch" on a STOCK Firefox 160 shell built
+# with our mozconfig's --without-intl-api (native x86-64, --disable-jit, no
+# patches); passes on the same tree with the Intl API on. So it is upstream's
+# non-Intl regexp path, not NightMonkey and not our queue. Re-test if the
+# engine ever builds with the Intl API.
 regexp/bug2072420.js
+
+# Guest traps (code 1) in both lanes on wasm32; passes on a stock native
+# x86-64 160 shell. So not NightMonkey and not upstream logic: something about
+# the wasm32 / Yurt guest (the test grows a 2 MB dense array and shrinks it to
+# 1 MB). Cause not yet found; excluded only so the 160 gate can go green.
+arrays/shrink-large-array.js
