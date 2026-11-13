@@ -1,0 +1,11 @@
+# Additions to wasi-jit-test-excludes.txt for builds against the Firefox 160
+# engine (NIGHT_ENGINE_VERSION=ff160; scripts/run-jit-tests.sh), on top of the
+# ff159 list. Applied to BOTH lanes. One path per line, relative to
+# js/src/jit-test/tests.
+
+# Fails with "Unicode backreference mismatch" on a STOCK Firefox 160 shell built
+# with our mozconfig's --without-intl-api (native x86-64, --disable-jit, no
+# patches); passes on the same tree with the Intl API on. So it is upstream's
+# non-Intl regexp path, not NightMonkey and not our queue. Re-test if the
+# engine ever builds with the Intl API.
+regexp/bug2072420.js
