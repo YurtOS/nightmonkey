@@ -1,0 +1,10 @@
+# Additions to jit-test-excludes.txt (the AOT lane only) for builds against
+# the Firefox 160 engine (NIGHT_ENGINE_VERSION=ff160; scripts/run-jit-tests.sh),
+# on top of the ff159 list. One path per line, relative to
+# js/src/jit-test/tests; a comment gives the reason. None is in 159's tree.
+
+# The NightMonkey tier has no frame introspection: Function.arguments reads
+# null from a compiled frame (same family as arguments/bug1227287.js and the
+# jstests exclusions). The test reads foo1.arguments[0] inside the running foo1.
+# Passes in the interpreter lane.
+arguments/bug2076663.js

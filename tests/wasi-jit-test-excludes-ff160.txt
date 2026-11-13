@@ -1,0 +1,13 @@
+# Additions to wasi-jit-test-excludes.txt for builds against the Firefox 160
+# engine (NIGHT_ENGINE_VERSION=ff160; scripts/run-jit-tests.sh), on top of the
+# ff159 list. Applied to BOTH lanes. One path per line, relative to
+# js/src/jit-test/tests.
+#
+# Both fail identically with the AOT tier off (gate run 43370897258, pin
+# 91cf7b4, interpreter lane), so neither involves NightMonkey. Root cause not
+# yet investigated; tracked in the 160 follow-up.
+
+# Guest traps (code 1) while shrinking a large array.
+arrays/shrink-large-array.js
+# "Unicode backreference mismatch" from the engine's regexp implementation.
+regexp/bug2072420.js
