@@ -304,8 +304,8 @@ impl<'s, 'a> Run<'s, 'a> {
                 let a = self.pop();
                 // Against undefined or null: a tag test.
                 let exact = match (operand >> 8) & 0xFF {
-                    3 => Some(TagSet::prims(PRIM_UNDEFINED)),
-                    4 => Some(TagSet::prims(PRIM_NULL)),
+                    CMP_TYPE_UNDEFINED => Some(TagSet::prims(PRIM_UNDEFINED)),
+                    CMP_TYPE_NULL => Some(TagSet::prims(PRIM_NULL)),
                     _ => None,
                 };
                 if exact.is_some_and(|t| self.fuse_test(a, t, op == StrictConstantNe)) {

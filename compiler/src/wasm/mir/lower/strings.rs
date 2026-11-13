@@ -552,14 +552,14 @@ impl<'a> Lower<'a> {
     }
 
     /// `x === k` for a `StrictConstantEq` operand `k` (the high byte its
-    /// type: 2 boolean, 3 undefined, 4 null, else an int8), as a raw bool.
+    /// type, a `JSValueType` (`CMP_TYPE_*`: boolean, undefined, null; else an int8), as a raw bool.
     pub(super) fn constant_strict_eq(&mut self, x: Value, k: u16) -> Value {
         let (ty, lo) = ((k >> 8) & 0xFF, (k & 0xFF) as u8);
         let tag = self.tag_of(x);
         match ty {
-            3 => self.tag_is(tag, TAG_UNDEFINED as u32),
-            4 => self.tag_is(tag, TAG_NULL as u32),
-            2 => {
+            CMP_TYPE_UNDEFINED => self.tag_is(tag, TAG_UNDEFINED as u32),
+            CMP_TYPE_NULL => self.tag_is(tag, TAG_NULL as u32),
+            CMP_TYPE_BOOLEAN => {
                 let want = self.i64c((TAG_BOOLEAN << 32) | u64::from(lo & 1));
                 self.bin(Operator::I64Eq, x, want, Type::I32)
             }

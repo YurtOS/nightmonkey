@@ -84,14 +84,14 @@ impl<'a> Gen<'a> {
     }
 
     /// `x === k` for a `StrictConstantEq` operand `k` (the high byte its
-    /// type: 2 boolean, 3 undefined, 4 null, else an int8), as a raw bool:
+    /// type, a `JSValueType` (`CMP_TYPE_*`: boolean, undefined, null; else an int8), as a raw bool:
     /// `ConstantStrictEqual` inline.
     pub(super) fn constant_strict_eq(&mut self, x: Value, k: u16) -> Value {
         let (ty, lo) = ((k >> 8) & 0xFF, (k & 0xFF) as u8);
         match ty {
-            3 => self.tag_eq(x, TAG_UNDEFINED),
-            4 => self.tag_eq(x, TAG_NULL),
-            2 => {
+            CMP_TYPE_UNDEFINED => self.tag_eq(x, TAG_UNDEFINED),
+            CMP_TYPE_NULL => self.tag_eq(x, TAG_NULL),
+            CMP_TYPE_BOOLEAN => {
                 let want = self.i64c((TAG_BOOLEAN << 32) | u64::from(lo & 1));
                 self.binop(Operator::I64Eq, x, want, Type::I32)
             }
