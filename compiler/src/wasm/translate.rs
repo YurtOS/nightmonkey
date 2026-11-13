@@ -1148,6 +1148,19 @@ impl ConstValue {
     }
 }
 
+// The type byte of a `StrictConstantEq`/`Ne` operand (`js::ConstantCompareOperand`) is the
+// engine's `JSValueType` number, which 160 renumbered along with the tags (159: boolean 2,
+// undefined 3, null 4; 160: boolean 8, undefined 6, null 4). Any other type byte is an int8.
+#[cfg(not(feature = "ff160"))]
+pub(super) const CMP_TYPE_BOOLEAN: u16 = 2;
+#[cfg(not(feature = "ff160"))]
+pub(super) const CMP_TYPE_UNDEFINED: u16 = 3;
+#[cfg(feature = "ff160")]
+pub(super) const CMP_TYPE_BOOLEAN: u16 = 8;
+#[cfg(feature = "ff160")]
+pub(super) const CMP_TYPE_UNDEFINED: u16 = 6;
+pub(super) const CMP_TYPE_NULL: u16 = 4;
+
 // MagicValue payloads (the low half of a TAG_MAGIC value): the engine's
 // `JSWhyMagic` numbering, which 159 changed (JS_UNINITIALIZED_LEXICAL moved
 // first, JS_GENERATOR_CLOSING removed). runtime/NightEngineVersion.h
@@ -4799,6 +4812,20 @@ mod tests {
         // The engine's ValueLowerInclGCThingTag: its lowest GC-thing tag.
         let lowest_gc = types.iter().filter(|t| t.2).map(|t| t.1).min();
         assert_eq!(Some(VAL_GCTHING_TAG_MIN), lowest_gc);
+        // A `StrictConstantEq` operand's type byte is the engine's JSValueType, the tag's
+        // low bits (tag = TAG_CLEAR | type).
+        for (name, want) in [
+            ("BOOLEAN", CMP_TYPE_BOOLEAN),
+            ("UNDEFINED", CMP_TYPE_UNDEFINED),
+            ("NULL", CMP_TYPE_NULL),
+        ] {
+            let tag = types.iter().find(|t| t.0 == name).map(|t| t.1);
+            assert_eq!(
+                tag.map(|t| t - TAG_CLEAR),
+                Some(u32::from(want)),
+                "{name}: constant-compare type byte"
+            );
+        }
         for (name, tag, gc) in types {
             assert!(tag >= TAG_CLEAR, "{name} is not a double");
             assert_eq!(tag >= VAL_GCTHING_TAG_MIN, gc, "{name}: is a GC thing");

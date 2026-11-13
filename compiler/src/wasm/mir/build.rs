@@ -41,7 +41,9 @@ use crate::mir::types::{
 };
 use crate::opsem::{PRIM_BIGINT, PRIM_INT32, PRIM_NULL, PRIM_UNDEFINED};
 use crate::wasm::baseline::layout::{self, FrameLayout, StackDepths};
-use crate::wasm::translate::{StampCtorIn, TranslateCtx};
+use crate::wasm::translate::{
+    StampCtorIn, TranslateCtx, CMP_TYPE_BOOLEAN, CMP_TYPE_NULL, CMP_TYPE_UNDEFINED,
+};
 
 mod calls;
 mod core;
