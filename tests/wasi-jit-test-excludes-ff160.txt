@@ -7,5 +7,7 @@
 # with our mozconfig's --without-intl-api (native x86-64, --disable-jit, no
 # patches); passes on the same tree with the Intl API on. So it is upstream's
 # non-Intl regexp path, not NightMonkey and not our queue. Re-test if the
-# engine ever builds with the Intl API.
+# engine ever builds with the Intl API. Reported upstream:
+# https://bugzilla.mozilla.org/show_bug.cgi?id=2092596 (follow-up to bug 2072420);
+# drop this line when a fix reaches the engine release we build.
 regexp/bug2072420.js
